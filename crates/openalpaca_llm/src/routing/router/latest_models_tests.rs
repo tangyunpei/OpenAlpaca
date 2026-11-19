@@ -82,7 +82,7 @@ fn anthropic_router(server: &MockHttpServer, default: &str) -> LlmRouter {
     providers.insert(
         ProviderType::Anthropic,
         ProviderEntry {
-            provider,
+            provider: DynLlmProvider::from_arc(provider),
             key_pool: keyed_pool(ProviderType::Anthropic),
         },
     );
@@ -113,7 +113,7 @@ fn openai_router(server: &MockHttpServer, config: &HashMap<String, ModelConfigEn
     providers.insert(
         ProviderType::OpenAI,
         ProviderEntry {
-            provider,
+            provider: DynLlmProvider::from_arc(provider),
             key_pool: keyed_pool(ProviderType::OpenAI),
         },
     );

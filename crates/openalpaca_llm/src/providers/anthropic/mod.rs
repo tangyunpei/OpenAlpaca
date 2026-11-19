@@ -6,7 +6,6 @@ use crate::LlmProvider;
 use crate::config::llm_config::runtime::DEFAULT_MAX_TOKENS;
 use crate::error::LlmError;
 use crate::types::*;
-use async_trait::async_trait;
 use reqwest::header::HeaderMap;
 
 /// The model for a request that names none: Claude Sonnet 5.5, a compiled
@@ -162,7 +161,6 @@ impl AnthropicProvider {
     }
 }
 
-#[async_trait]
 impl LlmProvider for AnthropicProvider {
     fn name(&self) -> &str {
         "anthropic"

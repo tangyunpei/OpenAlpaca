@@ -327,9 +327,9 @@ impl TokenManager {
         let pool = KeyPool::new(vec![api_key], SelectionStrategy::PrimaryFallback);
 
         // Build the provider implementation
-        let provider: Option<Arc<dyn crate::LlmProvider>> = match &provider_type {
+        let provider: Option<Arc<crate::DynLlmProvider<'static>>> = match &provider_type {
             #[cfg(feature = "anthropic")]
-            ProviderType::Anthropic => Some(Arc::new(
+            ProviderType::Anthropic => Some(crate::DynLlmProvider::new_arc(
                 crate::providers::anthropic::AnthropicProvider::new(
                     cred.token.access_token.clone(),
                     None,
@@ -337,12 +337,14 @@ impl TokenManager {
                 ),
             )),
             #[cfg(feature = "openai")]
-            ProviderType::OpenAI => Some(Arc::new(crate::providers::openai::OpenAiProvider::new(
-                cred.token.access_token.clone(),
-                None,
-                None,
-                None,
-            ))),
+            ProviderType::OpenAI => Some(crate::DynLlmProvider::new_arc(
+                crate::providers::openai::OpenAiProvider::new(
+                    cred.token.access_token.clone(),
+                    None,
+                    None,
+                    None,
+                ),
+            )),
             _ => None,
         };
 

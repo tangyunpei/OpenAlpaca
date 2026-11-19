@@ -715,7 +715,6 @@ fn a_failed_run_with_a_file_is_still_failed() {
 /// Mock LLM provider for e2e pipeline tests.
 /// Returns pre-scripted responses in order; repeats the last one on overflow.
 mod e2e_mock {
-    use async_trait::async_trait;
     use openalpaca_llm::{ChatRequest, ChatResponse, LlmError, LlmProvider};
     use std::sync::atomic::{AtomicUsize, Ordering};
 
@@ -738,7 +737,6 @@ mod e2e_mock {
         }
     }
 
-    #[async_trait]
     impl LlmProvider for MockProvider {
         fn name(&self) -> &str {
             "mock"
@@ -1166,7 +1164,6 @@ struct RecordingLeadMock {
     requests: Arc<std::sync::Mutex<Vec<Vec<openalpaca_llm::ChatMessage>>>>,
 }
 
-#[async_trait::async_trait]
 impl openalpaca_llm::LlmProvider for RecordingLeadMock {
     fn name(&self) -> &str {
         "recording-lead-mock"
@@ -1961,7 +1958,6 @@ async fn test_lead_agent_completion_report_persists_final_content_verbatim() {
 /// A provider that answers nothing: every call fails.
 struct RefusesEveryCall;
 
-#[async_trait::async_trait]
 impl openalpaca_llm::LlmProvider for RefusesEveryCall {
     fn name(&self) -> &str {
         "refuses"
@@ -3363,7 +3359,6 @@ struct LeadAndSubagentMock {
     subagent_tool: String,
 }
 
-#[async_trait::async_trait]
 impl openalpaca_llm::LlmProvider for LeadAndSubagentMock {
     fn name(&self) -> &str {
         "lead-and-subagent-mock"
@@ -3495,7 +3490,6 @@ struct LeadSpawnsAPendingWorker {
     worker_calls: std::sync::atomic::AtomicUsize,
 }
 
-#[async_trait::async_trait]
 impl openalpaca_llm::LlmProvider for LeadSpawnsAPendingWorker {
     fn name(&self) -> &str {
         "lead-spawns-a-pending-worker"

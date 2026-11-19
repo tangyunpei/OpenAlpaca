@@ -555,7 +555,6 @@ mod tests {
         requests: Mutex<Vec<Vec<ChatMessage>>>,
     }
 
-    #[async_trait]
     impl LlmProvider for MockProvider {
         fn name(&self) -> &str {
             "mock"

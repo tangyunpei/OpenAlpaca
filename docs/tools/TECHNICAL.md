@@ -1585,7 +1585,7 @@ routing, steering, streaming, the no-answer line — is documented in
 ```rust
 /// Legacy/test entry point (direct provider, no retry)
 pub async fn run_agentic_loop(
-    provider: &dyn LlmProvider,
+    provider: &DynLlmProvider<'_>,
     initial_messages: Vec<ChatMessage>,
     tools: Vec<ToolDefinition>,
     config: &LoopConfig,

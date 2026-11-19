@@ -155,7 +155,6 @@ mod tests {
     /// A provider that answers anything in one line.
     struct StubLlm;
 
-    #[async_trait]
     impl openalpaca_llm::LlmProvider for StubLlm {
         fn name(&self) -> &str {
             "stub"

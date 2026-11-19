@@ -13,7 +13,6 @@ pub use types::{
     RouterRequest,
 };
 
-use crate::LlmProvider;
 use crate::config::LlmRuntimeConfig;
 use crate::keys::key_pool::{
     ApiKey, KeyGuard, KeyPool, KeyStatus, ProviderType, SelectionStrategy,
@@ -23,6 +22,7 @@ use crate::routing::model_alias::{ALIAS_TABLE, ModelAlias, compiled_alias};
 use crate::routing::model_registry::ModelRegistry;
 use crate::routing::rate_limiter::{RateLimitConfig, RateLimiterRegistry};
 use crate::types::{ChatRequest, ThinkingConfig, ThinkingDisplay, ToolChoice};
+use crate::{DynLlmProvider, LlmProvider};
 use arc_swap::ArcSwap;
 
 // Re-export types used by tests via `use super::*;`
@@ -97,7 +97,7 @@ pub struct LlmRouter {
     pub cost_tracker: Arc<CostTracker>,
     default_model: ArcSwap<String>,
     /// CLI backend providers for fallback (e.g. `claude` CLI, `codex` CLI).
-    pub(super) cli_backends: DashMap<ProviderType, Arc<dyn LlmProvider>>,
+    pub(super) cli_backends: DashMap<ProviderType, Arc<DynLlmProvider<'static>>>,
     /// Hot-swappable runtime config (timeouts, endpoints, env vars, provider defaults).
     runtime_config: ArcSwap<LlmRuntimeConfig>,
     /// Limits concurrent in-flight LLM API calls to prevent rate-limit stampedes
@@ -211,7 +211,7 @@ impl LlmRouter {
 
     /// Convenience constructor for single-provider setups (legacy / tests).
     pub fn single_provider(
-        provider: Arc<dyn LlmProvider>,
+        provider: Arc<impl LlmProvider + 'static>,
         provider_type: ProviderType,
         default_model: String,
     ) -> Self {
@@ -228,7 +228,7 @@ impl LlmRouter {
         providers.insert(
             provider_type,
             ProviderEntry {
-                provider,
+                provider: DynLlmProvider::from_arc(provider),
                 key_pool: Arc::new(ArcSwap::from_pointee(key_pool)),
             },
         );
@@ -894,7 +894,7 @@ impl LlmRouter {
     pub fn register_provider(
         &self,
         provider_type: ProviderType,
-        provider: Arc<dyn LlmProvider>,
+        provider: Arc<DynLlmProvider<'static>>,
         pool: KeyPool,
     ) -> bool {
         let address = provider.base_url().map(str::to_string);
@@ -929,8 +929,13 @@ impl LlmRouter {
     }
 
     /// Register a CLI backend for fallback.
-    pub fn register_cli_backend(&self, provider_type: ProviderType, backend: Arc<dyn LlmProvider>) {
-        self.cli_backends.insert(provider_type, backend);
+    pub fn register_cli_backend(
+        &self,
+        provider_type: ProviderType,
+        backend: Arc<impl LlmProvider + 'static>,
+    ) {
+        self.cli_backends
+            .insert(provider_type, DynLlmProvider::from_arc(backend));
     }
 
     /// Get registered CLI backend provider types.

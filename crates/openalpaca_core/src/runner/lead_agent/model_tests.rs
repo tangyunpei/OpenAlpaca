@@ -177,7 +177,6 @@ fn call(name: &str, arguments: serde_json::Value) -> ToolCall {
     }
 }
 
-#[async_trait]
 impl LlmProvider for Models {
     fn name(&self) -> &str {
         "models"
@@ -250,7 +249,7 @@ fn install_with(
         providers.insert(
             provider.clone(),
             ProviderEntry {
-                provider: models.clone(),
+                provider: openalpaca_llm::DynLlmProvider::from_arc(models.clone()),
                 key_pool: Arc::new(ArcSwap::from_pointee(KeyPool::new(
                     vec![ApiKey::new(
                         "test".to_string(),
@@ -1650,7 +1649,6 @@ async fn a_per_call_model_on_a_plugin_template_is_refused() {
 /// A provider that answers nothing.
 struct Refuses;
 
-#[async_trait]
 impl LlmProvider for Refuses {
     fn name(&self) -> &str {
         "refuses"

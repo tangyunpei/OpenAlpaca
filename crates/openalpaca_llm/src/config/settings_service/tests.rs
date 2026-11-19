@@ -13,7 +13,7 @@ use super::*;
 use crate::keys::key_encryption::KeyEncryptor;
 use crate::routing::cost_tracker::CostTracker;
 use crate::routing::model_registry::ModelRegistry;
-use crate::{ChatRequest, ChatResponse, LlmProvider, error::LlmError};
+use crate::{ChatRequest, ChatResponse, DynLlmProvider, LlmProvider, error::LlmError};
 use std::path::Path;
 use std::sync::Mutex;
 
@@ -55,7 +55,6 @@ strategy = "round_robin"
 /// to remove without any provider feature being compiled in.
 struct StubProvider;
 
-#[async_trait::async_trait]
 impl LlmProvider for StubProvider {
     fn name(&self) -> &str {
         "stub"
@@ -129,7 +128,7 @@ impl Harness {
     fn register_stub(&self, provider_type: ProviderType) {
         self.router.register_provider(
             provider_type,
-            Arc::new(StubProvider),
+            DynLlmProvider::new_arc(StubProvider),
             KeyPool::new(vec![], SelectionStrategy::RoundRobin),
         );
     }

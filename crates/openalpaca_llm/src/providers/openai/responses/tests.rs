@@ -17,10 +17,10 @@
 //! (the migration guide and the Chat Completions reference, read
 //! 2026-11-14).
 
-use crate::LlmProvider;
 use crate::providers::openai::{OpenAiProvider, is_openai_api, parse_responses_sse};
 use crate::test_support::{MockHttpServer, MockResponse, loopback_client};
 use crate::types::*;
+use crate::{DynLlmProvider, LlmProvider};
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -1352,7 +1352,7 @@ async fn chat_server() -> MockHttpServer {
 /// Ask `provider` for `req` once whole and once streamed, and return the
 /// two bodies the server was sent, each on Chat Completions.
 async fn chat_bodies(
-    provider: &dyn LlmProvider,
+    provider: &DynLlmProvider<'_>,
     key: &str,
     server: &MockHttpServer,
     req: ChatRequest,
@@ -1399,7 +1399,14 @@ fn utility_request() -> ChatRequest {
 async fn a_chat_completions_request_to_openais_own_api_says_store_false() {
     let server = chat_server().await;
     let provider = cloud_at(&server.base_url);
-    for body in chat_bodies(&provider, "sk-test-not-a-key", &server, utility_request()).await {
+    for body in chat_bodies(
+        DynLlmProvider::from_ref(&provider),
+        "sk-test-not-a-key",
+        &server,
+        utility_request(),
+    )
+    .await
+    {
         assert_eq!(body["store"], false, "{body}");
     }
     assert_eq!(server.hits("/v1/responses").await, 0);
@@ -1431,7 +1438,14 @@ async fn a_compatible_server_and_ollama_are_sent_no_store() {
             Some(format!("{}/v1", server.base_url)),
             None,
         );
-        for body in chat_bodies(&compatible, "sk-test-not-a-key", &server, req.clone()).await {
+        for body in chat_bodies(
+            DynLlmProvider::from_ref(&compatible),
+            "sk-test-not-a-key",
+            &server,
+            req.clone(),
+        )
+        .await
+        {
             assert!(body.get("store").is_none(), "{body}");
         }
 
@@ -1441,7 +1455,7 @@ async fn a_compatible_server_and_ollama_are_sent_no_store() {
             Some(format!("{}/v1", server.base_url)),
             None,
         );
-        for body in chat_bodies(&ollama, "", &server, req).await {
+        for body in chat_bodies(DynLlmProvider::from_ref(&ollama), "", &server, req).await {
             assert!(body.get("store").is_none(), "{body}");
         }
     }

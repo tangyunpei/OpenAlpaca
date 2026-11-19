@@ -1,6 +1,5 @@
 use super::*;
 use crate::keys::key_pool::{ApiKey, SelectionStrategy};
-use async_trait::async_trait;
 use std::sync::atomic::{AtomicUsize, Ordering};
 
 struct MockProvider {
@@ -36,7 +35,6 @@ impl MockProvider {
     }
 }
 
-#[async_trait]
 impl LlmProvider for MockProvider {
     fn name(&self) -> &str {
         &self.name_str
@@ -82,7 +80,7 @@ fn make_request(model: Option<&str>) -> RouterRequest {
 }
 
 fn make_router_with_mock(
-    provider: Arc<dyn LlmProvider>,
+    provider: Arc<impl LlmProvider + 'static>,
     provider_type: ProviderType,
     model: &str,
 ) -> LlmRouter {
@@ -135,7 +133,7 @@ async fn test_key_rotation_on_rate_limit() {
     providers.insert(
         ProviderType::Anthropic,
         ProviderEntry {
-            provider,
+            provider: DynLlmProvider::from_arc(provider),
             key_pool: Arc::new(ArcSwap::from_pointee(key_pool)),
         },
     );
@@ -178,7 +176,7 @@ async fn test_overloaded_error_does_not_cooldown_key() {
     providers.insert(
         ProviderType::Anthropic,
         ProviderEntry {
-            provider,
+            provider: DynLlmProvider::from_arc(provider),
             key_pool: Arc::new(ArcSwap::from_pointee(key_pool)),
         },
     );
@@ -229,7 +227,7 @@ async fn test_openai_overloaded_error_does_not_cooldown_key() {
     providers.insert(
         ProviderType::OpenAI,
         ProviderEntry {
-            provider,
+            provider: DynLlmProvider::from_arc(provider),
             key_pool: Arc::new(ArcSwap::from_pointee(key_pool)),
         },
     );
@@ -272,7 +270,7 @@ async fn test_fallback_chain() {
     providers.insert(
         ProviderType::Anthropic,
         ProviderEntry {
-            provider: anthropic,
+            provider: DynLlmProvider::from_arc(anthropic),
             key_pool: Arc::new(ArcSwap::from_pointee(KeyPool::new(
                 vec![ApiKey::new(
                     "k1".to_string(),
@@ -286,7 +284,7 @@ async fn test_fallback_chain() {
     providers.insert(
         ProviderType::OpenAI,
         ProviderEntry {
-            provider: openai,
+            provider: DynLlmProvider::from_arc(openai),
             key_pool: Arc::new(ArcSwap::from_pointee(KeyPool::new(
                 vec![ApiKey::new(
                     "k1".to_string(),
@@ -438,7 +436,7 @@ async fn the_orchestrator_chain_is_on_the_ladder_for_any_model() {
     providers.insert(
         ProviderType::OpenAI,
         ProviderEntry {
-            provider,
+            provider: DynLlmProvider::from_arc(provider),
             key_pool: Arc::new(ArcSwap::from_pointee(KeyPool::new(
                 vec![ApiKey::new(
                     "k1".to_string(),
@@ -497,7 +495,7 @@ async fn test_all_failed_no_fallback() {
     providers.insert(
         ProviderType::Anthropic,
         ProviderEntry {
-            provider,
+            provider: DynLlmProvider::from_arc(provider),
             key_pool: Arc::new(ArcSwap::from_pointee(key_pool)),
         },
     );
@@ -537,7 +535,7 @@ async fn test_hot_reload_keys() {
     providers.insert(
         ProviderType::Anthropic,
         ProviderEntry {
-            provider,
+            provider: DynLlmProvider::from_arc(provider),
             key_pool: Arc::new(ArcSwap::from_pointee(key_pool)),
         },
     );
@@ -608,7 +606,11 @@ async fn test_register_provider_new() {
         &ProviderType::OpenAI,
         KeyPool::new(vec![], SelectionStrategy::RoundRobin)
     ));
-    assert!(router.register_provider(ProviderType::OpenAI, provider, pool));
+    assert!(router.register_provider(
+        ProviderType::OpenAI,
+        DynLlmProvider::from_arc(provider),
+        pool
+    ));
     assert!(
         router
             .configured_providers()
@@ -634,7 +636,7 @@ async fn test_try_fallback_to_cli() {
     providers.insert(
         ProviderType::Anthropic,
         ProviderEntry {
-            provider: api_provider,
+            provider: DynLlmProvider::from_arc(api_provider),
             key_pool: Arc::new(ArcSwap::from_pointee(KeyPool::new(
                 vec![ApiKey::new(
                     "k1".to_string(),
@@ -689,7 +691,6 @@ async fn test_cli_fallback_not_called_when_api_succeeds() {
 
 struct KeyAwareMockProvider;
 
-#[async_trait]
 impl LlmProvider for KeyAwareMockProvider {
     fn name(&self) -> &str {
         "key_aware_mock"
@@ -733,7 +734,7 @@ async fn test_no_api_keys_triggers_cli_fallback() {
     providers.insert(
         ProviderType::Anthropic,
         ProviderEntry {
-            provider: key_aware,
+            provider: DynLlmProvider::from_arc(key_aware),
             key_pool: Arc::new(ArcSwap::from_pointee(key_pool)),
         },
     );
@@ -779,7 +780,7 @@ async fn test_mixed_pool_uses_api_key_only() {
     providers.insert(
         ProviderType::Anthropic,
         ProviderEntry {
-            provider: key_aware,
+            provider: DynLlmProvider::from_arc(key_aware),
             key_pool: Arc::new(ArcSwap::from_pointee(key_pool)),
         },
     );
@@ -942,7 +943,7 @@ async fn test_streaming_key_rotation_on_rate_limit() {
     providers.insert(
         ProviderType::OpenAI,
         ProviderEntry {
-            provider,
+            provider: DynLlmProvider::from_arc(provider),
             key_pool: Arc::new(ArcSwap::from_pointee(key_pool)),
         },
     );
@@ -987,7 +988,7 @@ async fn test_streaming_all_keys_rate_limited() {
     providers.insert(
         ProviderType::OpenAI,
         ProviderEntry {
-            provider,
+            provider: DynLlmProvider::from_arc(provider),
             key_pool: Arc::new(ArcSwap::from_pointee(key_pool)),
         },
     );
@@ -1034,7 +1035,7 @@ async fn test_streaming_non_retryable_error_fails_immediately() {
     providers.insert(
         ProviderType::OpenAI,
         ProviderEntry {
-            provider,
+            provider: DynLlmProvider::from_arc(provider),
             key_pool: Arc::new(ArcSwap::from_pointee(key_pool)),
         },
     );
@@ -1105,7 +1106,6 @@ struct SlowProvider {
     delay: std::time::Duration,
 }
 
-#[async_trait]
 impl LlmProvider for SlowProvider {
     fn name(&self) -> &str {
         "slow"
@@ -1203,7 +1203,7 @@ async fn rate_headroom_reports_the_tightest_key_without_consuming() {
     providers.insert(
         ProviderType::Anthropic,
         ProviderEntry {
-            provider,
+            provider: DynLlmProvider::from_arc(provider),
             key_pool: Arc::new(ArcSwap::from_pointee(pool)),
         },
     );
@@ -1271,7 +1271,7 @@ fn two_key_router(
     providers.insert(
         ProviderType::OpenAI,
         ProviderEntry {
-            provider: provider.clone(),
+            provider: DynLlmProvider::from_arc(provider.clone()),
             key_pool: Arc::new(ArcSwap::from_pointee(key_pool)),
         },
     );

@@ -1081,7 +1081,7 @@ impl LlmSettingsService {
         let request_timeout = rt.request_timeout_for(&provider_name);
         #[cfg(any(feature = "anthropic", feature = "openai", feature = "ollama"))]
         let client = crate::providers::build_http_client(request_timeout);
-        let provider: Option<Arc<dyn crate::LlmProvider>> = match &provider_type {
+        let provider: Option<Arc<crate::DynLlmProvider<'static>>> = match &provider_type {
             #[cfg(feature = "anthropic")]
             ProviderType::Anthropic => {
                 let model = rt
@@ -1092,7 +1092,7 @@ impl LlmSettingsService {
                     .provider_defaults
                     .get("anthropic")
                     .map(|d| d.default_max_tokens);
-                Some(Arc::new(
+                Some(crate::DynLlmProvider::new_arc(
                     crate::providers::anthropic::AnthropicProvider::with_client(
                         client,
                         require_key()?,
@@ -1112,7 +1112,7 @@ impl LlmSettingsService {
                     .provider_defaults
                     .get("openai")
                     .map(|d| d.default_max_tokens);
-                Some(Arc::new(
+                Some(crate::DynLlmProvider::new_arc(
                     crate::providers::openai::OpenAiProvider::with_client(
                         client,
                         require_key()?,
@@ -1140,7 +1140,7 @@ impl LlmSettingsService {
                     .provider_defaults
                     .get("ollama")
                     .map(|d| d.default_max_tokens);
-                Some(Arc::new(
+                Some(crate::DynLlmProvider::new_arc(
                     crate::providers::ollama::OllamaProvider::with_client(
                         client, model, base_url, max_tokens,
                     )

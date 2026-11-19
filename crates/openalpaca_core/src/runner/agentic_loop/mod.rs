@@ -32,11 +32,11 @@ use crate::session_log::{
 use crate::tools::registry::ToolContext;
 use serde_json::{Value, json};
 use openalpaca_llm::{
-    ChatMessage, FinishReason, LlmProvider, LlmRouter, LlmRouterError, RequestContext, ToolCall,
+    ChatMessage, DynLlmProvider, FinishReason, LlmRouter, LlmRouterError, RequestContext, ToolCall,
     ToolDefinition,
 };
 #[cfg(test)]
-use openalpaca_llm::ChatRequest;
+use openalpaca_llm::{ChatRequest, LlmProvider};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 use tokio_util::sync::CancellationToken;
@@ -153,7 +153,7 @@ impl LoopState {
 /// When `sandbox` is `None`, falls back to stub behavior (backward compat).
 #[allow(clippy::too_many_arguments)]
 pub async fn run_agentic_loop(
-    provider: &dyn LlmProvider,
+    provider: &DynLlmProvider<'_>,
     initial_messages: Vec<ChatMessage>,
     tools: Vec<ToolDefinition>,
     config: &LoopConfig,

@@ -345,7 +345,6 @@ mod tests {
         requests: Mutex<Vec<Vec<ChatMessage>>>,
     }
 
-    #[async_trait]
     impl LlmProvider for MockProvider {
         fn name(&self) -> &str {
             "mock"
@@ -589,7 +588,6 @@ Never runs.
     /// with empty content.
     struct FailingProvider;
 
-    #[async_trait]
     impl LlmProvider for FailingProvider {
         fn name(&self) -> &str {
             "failing"

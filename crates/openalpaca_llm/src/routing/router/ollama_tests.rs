@@ -96,7 +96,7 @@ fn keyless_router(base_url: &str, model_id: &str) -> LlmRouter {
     providers.insert(
         ProviderType::Ollama,
         ProviderEntry {
-            provider,
+            provider: DynLlmProvider::from_arc(provider),
             key_pool: Arc::new(ArcSwap::from_pointee(KeyPool::new(
                 vec![],
                 SelectionStrategy::RoundRobin,
@@ -194,7 +194,7 @@ async fn an_empty_pool_still_refuses_a_provider_that_needs_a_key() {
     providers.insert(
         ProviderType::OpenAI,
         ProviderEntry {
-            provider,
+            provider: DynLlmProvider::from_arc(provider),
             key_pool: Arc::new(ArcSwap::from_pointee(KeyPool::new(
                 vec![],
                 SelectionStrategy::RoundRobin,
@@ -375,7 +375,7 @@ fn empty_catalogue_router(base_url: &str) -> LlmRouter {
     providers.insert(
         ProviderType::Ollama,
         ProviderEntry {
-            provider,
+            provider: DynLlmProvider::from_arc(provider),
             key_pool: Arc::new(ArcSwap::from_pointee(KeyPool::new(
                 vec![],
                 SelectionStrategy::RoundRobin,
@@ -744,7 +744,7 @@ async fn a_routed_stream_says_whether_its_provider_needs_a_key() {
     providers.insert(
         ProviderType::OpenAI,
         ProviderEntry {
-            provider,
+            provider: DynLlmProvider::from_arc(provider),
             key_pool: Arc::new(ArcSwap::from_pointee(KeyPool::new(
                 vec![ApiKey::new(
                     "k1".to_string(),

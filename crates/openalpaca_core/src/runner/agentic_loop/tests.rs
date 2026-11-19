@@ -81,7 +81,6 @@ impl MockProvider {
     }
 }
 
-#[async_trait]
 impl LlmProvider for MockProvider {
     fn name(&self) -> &str {
         "mock"
@@ -114,7 +113,7 @@ async fn test_completes_simple_query() {
     let config = LoopConfig::default();
 
     let result = run_agentic_loop(
-        &provider,
+        DynLlmProvider::from_ref(&provider),
         messages,
         vec![],
         &config,
@@ -146,7 +145,7 @@ async fn test_respects_max_rounds() {
     };
 
     let result = run_agentic_loop(
-        &provider,
+        DynLlmProvider::from_ref(&provider),
         messages,
         vec![],
         &config,
@@ -177,7 +176,7 @@ async fn test_respects_cost_limit() {
     };
 
     let result = run_agentic_loop(
-        &provider,
+        DynLlmProvider::from_ref(&provider),
         messages,
         vec![],
         &config,
@@ -200,7 +199,7 @@ async fn test_handles_provider_error() {
     let config = LoopConfig::default();
 
     let result = run_agentic_loop(
-        &provider,
+        DynLlmProvider::from_ref(&provider),
         messages,
         vec![],
         &config,
@@ -230,7 +229,7 @@ async fn test_tool_stub_returns_error() {
     let config = LoopConfig::default();
 
     let result = run_agentic_loop(
-        &provider,
+        DynLlmProvider::from_ref(&provider),
         messages,
         vec![],
         &config,
@@ -259,7 +258,7 @@ async fn test_tracks_usage() {
     let config = LoopConfig::default();
 
     let result = run_agentic_loop(
-        &provider,
+        DynLlmProvider::from_ref(&provider),
         messages,
         vec![],
         &config,
@@ -337,7 +336,7 @@ async fn test_sandbox_execution() {
     let config = LoopConfig::default();
 
     let result = run_agentic_loop(
-        &provider,
+        DynLlmProvider::from_ref(&provider),
         messages,
         vec![],
         &config,
@@ -414,7 +413,7 @@ async fn test_sandbox_denied_tool() {
     let config = LoopConfig::default();
 
     let result = run_agentic_loop(
-        &provider,
+        DynLlmProvider::from_ref(&provider),
         messages,
         vec![],
         &config,
@@ -480,7 +479,7 @@ async fn test_max_tools_per_round_enforced() {
     };
 
     let result = run_agentic_loop(
-        &provider,
+        DynLlmProvider::from_ref(&provider),
         messages,
         vec![],
         &config,
@@ -508,7 +507,7 @@ async fn test_cancellation_before_first_round() {
     token.cancel(); // pre-cancel before loop starts
 
     let result = run_agentic_loop(
-        &provider,
+        DynLlmProvider::from_ref(&provider),
         messages,
         vec![],
         &config,
@@ -597,7 +596,7 @@ async fn test_cancellation_during_tool_execution() {
     let config = LoopConfig::default();
 
     let result = run_agentic_loop(
-        &provider,
+        DynLlmProvider::from_ref(&provider),
         messages,
         vec![],
         &config,
@@ -698,7 +697,7 @@ async fn a_run_cancelled_while_a_prompt_waits_withdraws_the_prompt_and_says_so()
         Ok(MockProvider::simple_response("Never reached")),
     ]);
     let result = run_agentic_loop(
-        &provider,
+        DynLlmProvider::from_ref(&provider),
         vec![ChatMessage::user("test")],
         vec![],
         &LoopConfig::default(),
@@ -823,7 +822,7 @@ async fn test_max_tokens_triggers_continuation() {
         ..Default::default()
     };
     let result = run_agentic_loop(
-        &provider,
+        DynLlmProvider::from_ref(&provider),
         vec![ChatMessage::user("test")],
         vec![],
         &config,
@@ -866,7 +865,7 @@ async fn test_max_tokens_retries_exhausted_returns_truncated() {
         ..Default::default()
     };
     let result = run_agentic_loop(
-        &provider,
+        DynLlmProvider::from_ref(&provider),
         vec![ChatMessage::user("test")],
         vec![],
         &config,
@@ -933,7 +932,7 @@ async fn test_cost_warning_at_80_percent() {
     };
 
     let result = run_agentic_loop(
-        &provider, messages, vec![], &config,
+        DynLlmProvider::from_ref(&provider), messages, vec![], &config,
         None, "test", None, None, None, None,
     )
     .await;
@@ -1069,7 +1068,7 @@ async fn test_compaction_triggers_during_agentic_loop() {
     };
 
     let result = run_agentic_loop(
-        &provider,
+        DynLlmProvider::from_ref(&provider),
         messages,
         vec![],
         &config,
@@ -1201,7 +1200,7 @@ async fn test_two_compactions_accumulate_dropped_tokens() {
     };
 
     let _ = run_agentic_loop(
-        &provider,
+        DynLlmProvider::from_ref(&provider),
         messages,
         vec![],
         &config,
@@ -1493,7 +1492,6 @@ struct WriterScript {
     seen: std::sync::Mutex<Vec<ChatRequest>>,
 }
 
-#[async_trait]
 impl LlmProvider for WriterScript {
     fn name(&self) -> &str {
         "writer-script"
@@ -1707,7 +1705,6 @@ impl MockRouterProvider {
     }
 }
 
-#[async_trait]
 impl LlmProvider for MockRouterProvider {
     fn name(&self) -> &str {
         "mock-router"
@@ -1854,7 +1851,7 @@ async fn the_loop_retries_a_transient_transport_failure_and_not_a_refused_port()
         responses.push(answer.clone());
         let provider = Arc::new(MockRouterProvider::new(responses));
         let router = LlmRouter::single_provider(
-            Arc::clone(&provider) as Arc<dyn LlmProvider>,
+            Arc::clone(&provider),
             ProviderType::Anthropic,
             "claude-sonnet-5-5".to_string(),
         );
@@ -2164,7 +2161,7 @@ async fn main_loop_turn_with_prior_agent_spend_does_not_exit_cost_exceeded() {
     })]));
 
     let router = LlmRouter::single_provider(
-        Arc::clone(&provider) as Arc<dyn LlmProvider>,
+        Arc::clone(&provider),
         ProviderType::Anthropic,
         "claude-sonnet-5-5".to_string(),
     );
@@ -2249,7 +2246,7 @@ async fn per_turn_cap_still_trips_within_one_turn() {
     let provider = Arc::new(MockRouterProvider::new(vec![Ok(expensive_tool_use)]));
 
     let router = LlmRouter::single_provider(
-        Arc::clone(&provider) as Arc<dyn LlmProvider>,
+        Arc::clone(&provider),
         ProviderType::Anthropic,
         "claude-sonnet-5-5".to_string(),
     );
@@ -2513,7 +2510,7 @@ async fn run_loop_with_seeded_cost(
     })]));
 
     let router = LlmRouter::single_provider(
-        Arc::clone(&provider) as Arc<dyn LlmProvider>,
+        Arc::clone(&provider),
         ProviderType::Anthropic,
         "claude-sonnet-5-5".to_string(),
     );
@@ -2647,7 +2644,7 @@ async fn a_retried_request_carries_one_budget_notice() {
         Ok(MockProvider::simple_response("Done.")),
     ]));
     let router = LlmRouter::single_provider(
-        Arc::clone(&provider) as Arc<dyn LlmProvider>,
+        Arc::clone(&provider),
         ProviderType::Anthropic,
         "claude-sonnet-5-5".to_string(),
     );
@@ -2741,7 +2738,6 @@ impl SteeringHookProvider {
     }
 }
 
-#[async_trait]
 impl LlmProvider for SteeringHookProvider {
     fn name(&self) -> &str {
         "steering-hook"
@@ -2801,7 +2797,7 @@ async fn test_steering_interjection_appears_in_next_request() {
     };
 
     let result = run_agentic_loop(
-        &provider,
+        DynLlmProvider::from_ref(&provider),
         vec![ChatMessage::user("start")],
         vec![],
         &config,
@@ -2855,7 +2851,7 @@ async fn test_steering_completion_guard_continues_loop() {
     };
 
     let result = run_agentic_loop(
-        &provider,
+        DynLlmProvider::from_ref(&provider),
         vec![ChatMessage::user("start")],
         vec![],
         &config,
@@ -2905,7 +2901,7 @@ async fn test_steering_max_rounds_exit_reappends_undelivered() {
     };
 
     let result = run_agentic_loop(
-        &provider,
+        DynLlmProvider::from_ref(&provider),
         vec![ChatMessage::user("start")],
         vec![],
         &config,
@@ -2948,7 +2944,7 @@ async fn test_steering_bonus_extends_but_caps_at_double() {
     };
 
     let result = run_agentic_loop(
-        &provider,
+        DynLlmProvider::from_ref(&provider),
         vec![ChatMessage::user("start")],
         vec![],
         &config,
@@ -3000,7 +2996,7 @@ async fn test_steering_closed_inbox_drains_nothing() {
     };
 
     let result = run_agentic_loop(
-        &provider,
+        DynLlmProvider::from_ref(&provider),
         vec![ChatMessage::user("start")],
         vec![],
         &config,
@@ -3051,7 +3047,7 @@ async fn test_steering_error_exit_reappends_undelivered() {
     };
 
     let result = run_agentic_loop(
-        &provider,
+        DynLlmProvider::from_ref(&provider),
         vec![ChatMessage::user("start")],
         vec![],
         &config,
@@ -3087,7 +3083,6 @@ async fn test_steering_cancel_during_llm_call_reappends_undelivered() {
         call_count: AtomicUsize,
     }
 
-    #[async_trait]
     impl LlmProvider for CancelSecondCallProvider {
         fn name(&self) -> &str {
             "cancel-second"
@@ -3124,7 +3119,7 @@ async fn test_steering_cancel_during_llm_call_reappends_undelivered() {
     };
 
     let result = run_agentic_loop(
-        &provider,
+        DynLlmProvider::from_ref(&provider),
         vec![ChatMessage::user("start")],
         vec![],
         &config,
@@ -3981,7 +3976,7 @@ async fn a_loop_without_a_session_log_is_unchanged() {
     let config = LoopConfig::default();
     assert!(config.session_log.is_none());
     let result = run_agentic_loop(
-        &provider,
+        DynLlmProvider::from_ref(&provider),
         vec![ChatMessage::user("hello")],
         vec![],
         &config,
@@ -4036,7 +4031,7 @@ async fn a_steering_drain_is_narrated_with_its_request_ids() {
 
     let provider = MockProvider::new(vec![Ok(MockProvider::simple_response("Understood."))]);
     let result = run_agentic_loop(
-        &provider,
+        DynLlmProvider::from_ref(&provider),
         vec![ChatMessage::user("start")],
         vec![],
         &config,
@@ -4072,7 +4067,6 @@ async fn a_steering_drain_is_narrated_with_its_request_ids() {
 /// name on a streamed turn can only come from the router's own resolution.
 struct ModelEchoProvider;
 
-#[async_trait]
 impl LlmProvider for ModelEchoProvider {
     fn name(&self) -> &str {
         "model-echo"
@@ -4203,7 +4197,6 @@ struct ThinkingOnlyProvider {
     calls: AtomicUsize,
 }
 
-#[async_trait]
 impl LlmProvider for ThinkingOnlyProvider {
     fn name(&self) -> &str {
         "thinking-only"
@@ -4311,7 +4304,6 @@ struct EndlessStreamProvider {
     unstreamed_calls: AtomicUsize,
 }
 
-#[async_trait]
 impl LlmProvider for EndlessStreamProvider {
     fn name(&self) -> &str {
         "endless-stream"
@@ -4382,12 +4374,12 @@ fn endless_stream_router(provider: Arc<EndlessStreamProvider>) -> (LlmRouter, &'
 
 /// `provider` served as Ollama is, with an empty key pool, for
 /// [`LOCAL_MODEL`].
-fn keyless_router(provider: Arc<dyn LlmProvider>) -> LlmRouter {
+fn keyless_router(provider: Arc<impl LlmProvider + 'static>) -> LlmRouter {
     let mut providers = std::collections::HashMap::new();
     providers.insert(
         ProviderType::Ollama,
         openalpaca_llm::ProviderEntry {
-            provider,
+            provider: openalpaca_llm::DynLlmProvider::from_arc(provider),
             key_pool: Arc::new(arc_swap::ArcSwap::from_pointee(
                 openalpaca_llm::KeyPool::new(vec![], openalpaca_llm::SelectionStrategy::RoundRobin),
             )),
@@ -4567,7 +4559,6 @@ impl SpentDeadlineProvider {
     }
 }
 
-#[async_trait]
 impl LlmProvider for SpentDeadlineProvider {
     fn name(&self) -> &str {
         "spent-deadline"
@@ -4611,16 +4602,13 @@ async fn a_spent_deadline_turn(
 ) -> (LoopResult, Duration) {
     let (router, model) = if provider.needs_key {
         let router = LlmRouter::single_provider(
-            Arc::clone(provider) as Arc<dyn LlmProvider>,
+            Arc::clone(provider),
             ProviderType::Anthropic,
             EFFECTIVE_MODEL.to_string(),
         );
         (router, EFFECTIVE_MODEL)
     } else {
-        (
-            keyless_router(Arc::clone(provider) as Arc<dyn LlmProvider>),
-            LOCAL_MODEL,
-        )
+        (keyless_router(Arc::clone(provider)), LOCAL_MODEL)
     };
     let config = LoopConfig {
         model: Some(model.to_string()),
@@ -4904,7 +4892,7 @@ async fn the_loop_records_the_last_tool_error() {
     // No sandbox: every tool call comes back as the loop's own error string,
     // which is the shape a refused or failed call has.
     let result = run_agentic_loop(
-        &provider,
+        DynLlmProvider::from_ref(&provider),
         vec![ChatMessage::user("go")],
         vec![],
         &config,
@@ -4984,7 +4972,7 @@ async fn the_answer_guard_spends_one_round_and_then_accepts() {
     };
 
     let result = run_agentic_loop(
-        &provider,
+        DynLlmProvider::from_ref(&provider),
         vec![ChatMessage::user("start something")],
         vec![],
         &config,
@@ -5022,7 +5010,7 @@ async fn the_answer_guard_appends_its_note_to_a_repeated_claim_and_stops() {
     };
 
     let result = run_agentic_loop(
-        &provider,
+        DynLlmProvider::from_ref(&provider),
         vec![ChatMessage::user("start something")],
         vec![],
         &config,
@@ -5059,7 +5047,7 @@ async fn an_empty_repeated_answer_is_just_the_runtime_line() {
     };
 
     let result = run_agentic_loop(
-        &provider,
+        DynLlmProvider::from_ref(&provider),
         vec![ChatMessage::user("start something")],
         vec![],
         &config,
@@ -5095,7 +5083,7 @@ async fn the_corrective_round_does_not_cost_the_turn_its_answer() {
     };
 
     let result = run_agentic_loop(
-        &provider,
+        DynLlmProvider::from_ref(&provider),
         vec![ChatMessage::user("start something")],
         vec![],
         &config,
@@ -5123,7 +5111,7 @@ async fn a_loop_without_a_guard_ships_whatever_the_model_said() {
     };
 
     let result = run_agentic_loop(
-        &provider,
+        DynLlmProvider::from_ref(&provider),
         vec![ChatMessage::user("start something")],
         vec![],
         &config,
@@ -5161,7 +5149,6 @@ mod stated_tool_timeout {
         seen: Mutex<Vec<ChatRequest>>,
     }
 
-    #[async_trait]
     impl LlmProvider for Scripted {
         fn name(&self) -> &str {
             "scripted"
@@ -5246,7 +5233,7 @@ mod stated_tool_timeout {
             ..Default::default()
         };
         let result = run_agentic_loop(
-            &provider,
+            DynLlmProvider::from_ref(&provider),
             vec![ChatMessage::user("build it")],
             vec![definition],
             &config,
@@ -5419,7 +5406,6 @@ mod tool_error_flag {
         seen: Mutex<Vec<ChatRequest>>,
     }
 
-    #[async_trait]
     impl LlmProvider for CallsOnce {
         fn name(&self) -> &str {
             "calls-once"
@@ -5520,7 +5506,7 @@ mod tool_error_flag {
             ..Default::default()
         };
         let result = run_agentic_loop(
-            &provider,
+            DynLlmProvider::from_ref(&provider),
             vec![ChatMessage::user("go")],
             vec![],
             &config,
@@ -6029,7 +6015,6 @@ mod round_groups {
         seen: Mutex<Vec<ChatRequest>>,
     }
 
-    #[async_trait]
     impl LlmProvider for Scripted {
         fn name(&self) -> &str {
             "scripted"
@@ -6224,7 +6209,7 @@ mod round_groups {
             seen: Mutex::new(Vec::new()),
         };
         let result = run_agentic_loop(
-            &provider,
+            DynLlmProvider::from_ref(&provider),
             vec![ChatMessage::user("go")],
             vec![],
             config,
@@ -6620,7 +6605,6 @@ impl EchoRecorder {
     }
 }
 
-#[async_trait]
 impl LlmProvider for EchoRecorder {
     fn name(&self) -> &str {
         "echo-recorder"
@@ -6699,7 +6683,7 @@ fn echoes(request: &ChatRequest) -> Vec<Option<openalpaca_llm::EchoedTurn>> {
 
 async fn run_recorded(provider: &EchoRecorder, config: &LoopConfig) -> LoopResult {
     run_agentic_loop(
-        provider,
+        DynLlmProvider::from_ref(provider),
         vec![ChatMessage::system("Be brief."), ChatMessage::user("start")],
         vec![],
         config,
@@ -6833,7 +6817,7 @@ async fn a_compaction_takes_every_thinking_block_out_and_keeps_it_out() {
     };
 
     let result = run_agentic_loop(
-        &provider,
+        DynLlmProvider::from_ref(&provider),
         vec![
             ChatMessage::system("You are a helpful assistant."),
             ChatMessage::user("Search for information repeatedly."),
@@ -7015,7 +6999,7 @@ async fn the_loop_asks_the_server_to_keep_all_thinking() {
     };
 
     run_agentic_loop(
-        &provider,
+        DynLlmProvider::from_ref(&provider),
         vec![ChatMessage::system("Be brief."), ChatMessage::user("start")],
         vec![],
         &config,

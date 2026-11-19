@@ -99,7 +99,6 @@ impl Scripted {
     }
 }
 
-#[async_trait::async_trait]
 impl LlmProvider for Scripted {
     fn name(&self) -> &str {
         "scripted"
@@ -3226,7 +3225,7 @@ fn keyed_router(model: Arc<Scripted>, tpm: u32) -> Arc<LlmRouter> {
     providers.insert(
         ProviderType::Anthropic,
         openalpaca_llm::ProviderEntry {
-            provider: model,
+            provider: openalpaca_llm::DynLlmProvider::from_arc(model),
             key_pool: Arc::new(ArcSwap::from_pointee(openalpaca_llm::KeyPool::new(
                 vec![openalpaca_llm::ApiKey::new(
                     "k1".to_string(),

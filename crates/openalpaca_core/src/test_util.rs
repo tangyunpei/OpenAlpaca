@@ -250,7 +250,6 @@ impl RecordingProvider {
     }
 }
 
-#[async_trait::async_trait]
 impl openalpaca_llm::LlmProvider for RecordingProvider {
     fn name(&self) -> &str {
         "recording"
@@ -507,7 +506,6 @@ impl CallsOneTool {
     }
 }
 
-#[async_trait::async_trait]
 impl openalpaca_llm::LlmProvider for CallsOneTool {
     fn name(&self) -> &str {
         "calls-one-tool"

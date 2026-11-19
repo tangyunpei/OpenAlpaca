@@ -95,7 +95,6 @@ impl ScriptedLlm {
     }
 }
 
-#[async_trait::async_trait]
 impl openalpaca_llm::LlmProvider for ScriptedLlm {
     fn name(&self) -> &str {
         "scripted-memory-commands"

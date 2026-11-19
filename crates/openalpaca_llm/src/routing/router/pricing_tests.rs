@@ -83,7 +83,7 @@ fn openai_router(base: &str, config: &HashMap<String, ModelConfigEntry>) -> LlmR
     providers.insert(
         ProviderType::OpenAI,
         ProviderEntry {
-            provider,
+            provider: DynLlmProvider::from_arc(provider),
             key_pool: keyed_pool(ProviderType::OpenAI),
         },
     );
@@ -284,7 +284,7 @@ async fn a_discovered_ollama_model_still_costs_nothing() {
     providers.insert(
         ProviderType::Ollama,
         ProviderEntry {
-            provider,
+            provider: DynLlmProvider::from_arc(provider),
             key_pool: Arc::new(ArcSwap::from_pointee(KeyPool::new(
                 vec![],
                 SelectionStrategy::RoundRobin,
@@ -531,7 +531,7 @@ async fn a_router_built_on_a_loopback_base_url_is_exempt_at_boot() {
     providers.insert(
         ProviderType::OpenAI,
         ProviderEntry {
-            provider,
+            provider: DynLlmProvider::from_arc(provider),
             key_pool: keyed_pool(ProviderType::OpenAI),
         },
     );
@@ -595,7 +595,7 @@ async fn a_loopback_base_url_the_anthropic_arm_does_not_call_is_not_exempt() {
     providers.insert(
         ProviderType::Anthropic,
         ProviderEntry {
-            provider,
+            provider: DynLlmProvider::from_arc(provider),
             key_pool: keyed_pool(ProviderType::Anthropic),
         },
     );
@@ -648,7 +648,7 @@ async fn re_registering_a_provider_off_loopback_ends_the_exemption() {
     ));
     router.register_provider(
         ProviderType::OpenAI,
-        elsewhere,
+        DynLlmProvider::from_arc(elsewhere),
         KeyPool::new(vec![], SelectionStrategy::RoundRobin),
     );
     let cost = router
@@ -705,7 +705,7 @@ async fn anthropic_discovery_reads_every_page_of_the_model_list() {
     providers.insert(
         ProviderType::Anthropic,
         ProviderEntry {
-            provider,
+            provider: DynLlmProvider::from_arc(provider),
             key_pool: keyed_pool(ProviderType::Anthropic),
         },
     );
@@ -771,7 +771,7 @@ async fn a_later_page_that_does_not_decode_keeps_the_ids_already_read() {
     providers.insert(
         ProviderType::Anthropic,
         ProviderEntry {
-            provider,
+            provider: DynLlmProvider::from_arc(provider),
             key_pool: keyed_pool(ProviderType::Anthropic),
         },
     );
@@ -818,7 +818,7 @@ fn anthropic_router(server: &MockHttpServer) -> LlmRouter {
     providers.insert(
         ProviderType::Anthropic,
         ProviderEntry {
-            provider,
+            provider: DynLlmProvider::from_arc(provider),
             key_pool: keyed_pool(ProviderType::Anthropic),
         },
     );
@@ -1014,7 +1014,7 @@ fn responses_router(base: &str) -> LlmRouter {
     providers.insert(
         ProviderType::OpenAI,
         ProviderEntry {
-            provider,
+            provider: DynLlmProvider::from_arc(provider),
             key_pool: keyed_pool(ProviderType::OpenAI),
         },
     );

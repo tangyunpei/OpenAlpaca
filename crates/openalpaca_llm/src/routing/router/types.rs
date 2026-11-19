@@ -1,4 +1,4 @@
-use crate::LlmProvider;
+use crate::DynLlmProvider;
 use crate::error::LlmError;
 use crate::keys::key_pool::KeyPool;
 use crate::types::*;
@@ -169,7 +169,7 @@ pub enum LlmRouterError {
 /// `Ref` would block `deregister_provider` for the length of its call.
 #[derive(Clone)]
 pub struct ProviderEntry {
-    pub provider: Arc<dyn LlmProvider>,
+    pub provider: Arc<DynLlmProvider<'static>>,
     pub key_pool: Arc<ArcSwap<KeyPool>>,
 }
 

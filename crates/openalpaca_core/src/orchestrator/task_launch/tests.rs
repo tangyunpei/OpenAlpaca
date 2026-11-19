@@ -13,7 +13,6 @@ use crate::security::sandbox::SandboxManager;
 use crate::test_util::{make_agent, template_from_agent};
 use crate::tools::ToolRegistry;
 use arc_swap::ArcSwap;
-use async_trait::async_trait;
 use chrono::Utc;
 use openalpaca_llm::{
     ChatRequest, ChatResponse, FinishReason, LlmError, LlmProvider, LlmRouter, ProviderType, Usage,
@@ -26,7 +25,6 @@ use std::sync::Arc;
 /// router, so the dispatch takes the same path production does.
 struct StubLlm;
 
-#[async_trait]
 impl LlmProvider for StubLlm {
     fn name(&self) -> &str {
         "stub"

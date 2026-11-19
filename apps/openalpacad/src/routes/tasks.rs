@@ -2359,7 +2359,6 @@ pub(crate) mod tests {
     /// takes the same path production does; the run itself never gets far.
     struct StubLlm;
 
-    #[async_trait::async_trait]
     impl LlmProvider for StubLlm {
         fn name(&self) -> &str {
             "stub"

@@ -61,13 +61,14 @@ pub use streaming::{collect_stream, collect_stream_idle};
 pub use tool_arguments::UnreadableArguments;
 pub use types::*;
 
-use async_trait::async_trait;
-
-#[async_trait]
+#[dynosaur::dynosaur(pub DynLlmProvider = dyn(box) LlmProvider)]
 pub trait LlmProvider: Send + Sync {
     fn name(&self) -> &str;
     fn supports_tools(&self) -> bool;
-    async fn chat(&self, request: ChatRequest) -> Result<ChatResponse, LlmError>;
+    fn chat(
+        &self,
+        request: ChatRequest,
+    ) -> impl Future<Output = Result<ChatResponse, LlmError>> + Send;
 
     /// Whether a call to this provider needs an API key at all.
     ///
@@ -119,18 +120,21 @@ pub trait LlmProvider: Send + Sync {
 
     /// Chat using a specific API key. Default delegates to `chat()`.
     /// Providers override this to inject the key into their HTTP requests.
-    async fn chat_with_key(
+    fn chat_with_key(
         &self,
         _key: &str,
         request: ChatRequest,
-    ) -> Result<ChatResponse, LlmError> {
-        self.chat(request).await
+    ) -> impl Future<Output = Result<ChatResponse, LlmError>> + Send {
+        async move { self.chat(request).await }
     }
 
     /// List models available from this provider using the given API key.
     /// Default returns empty. Providers override with real API calls.
-    async fn list_models_with_key(&self, _key: &str) -> Result<Vec<String>, LlmError> {
-        Ok(vec![])
+    fn list_models_with_key(
+        &self,
+        _key: &str,
+    ) -> impl Future<Output = Result<Vec<String>, LlmError>> + Send {
+        async move { Ok(vec![]) }
     }
 
     /// The provider's models, with whatever metadata its API volunteers.
@@ -139,16 +143,19 @@ pub trait LlmProvider: Send + Sync {
     /// A provider that can say more — context length, image and tool support —
     /// overrides this so the registry does not have to guess (L2). `key` is
     /// empty for a provider that [needs none](Self::requires_key).
-    async fn discover_models(
+    fn discover_models(
         &self,
         key: &str,
-    ) -> Result<Vec<crate::routing::model_registry::DiscoveredModel>, LlmError> {
-        Ok(self
-            .list_models_with_key(key)
-            .await?
-            .into_iter()
-            .map(crate::routing::model_registry::DiscoveredModel::bare)
-            .collect())
+    ) -> impl Future<Output = Result<Vec<crate::routing::model_registry::DiscoveredModel>, LlmError>>
+    + Send {
+        async move {
+            Ok(self
+                .list_models_with_key(key)
+                .await?
+                .into_iter()
+                .map(crate::routing::model_registry::DiscoveredModel::bare)
+                .collect())
+        }
     }
 
     /// Whether this provider supports streaming responses.
@@ -157,20 +164,25 @@ pub trait LlmProvider: Send + Sync {
     }
 
     /// Streaming chat completion. Default falls back to non-streaming.
-    async fn chat_streaming(&self, request: ChatRequest) -> Result<ChatStream, LlmError> {
-        let response = self.chat(request).await?;
-        Ok(Box::pin(futures_util::stream::iter(
-            response_to_events(response).into_iter().map(Ok),
-        )))
+    fn chat_streaming(
+        &self,
+        request: ChatRequest,
+    ) -> impl Future<Output = Result<ChatStream, LlmError>> + Send {
+        async move {
+            let response = self.chat(request).await?;
+            Ok(Box::pin(futures_util::stream::iter(
+                response_to_events(response).into_iter().map(Ok),
+            )) as ChatStream)
+        }
     }
 
     /// Streaming chat with specific key. Default delegates to `chat_streaming`.
-    async fn chat_streaming_with_key(
+    fn chat_streaming_with_key(
         &self,
         _key: &str,
         request: ChatRequest,
-    ) -> Result<ChatStream, LlmError> {
-        self.chat_streaming(request).await
+    ) -> impl Future<Output = Result<ChatStream, LlmError>> + Send {
+        async move { self.chat_streaming(request).await }
     }
 }
 
@@ -211,6 +223,14 @@ pub fn response_to_events(response: ChatResponse) -> Vec<StreamEvent> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A type-erased provider is held in the router's `ProviderEntry` and
+    /// its CLI backends, and every call through it runs in spawned work.
+    #[test]
+    fn a_held_llm_provider_is_send_and_sync() {
+        fn send_and_sync<T: Send + Sync + ?Sized>() {}
+        send_and_sync::<std::sync::Arc<DynLlmProvider<'static>>>();
+    }
 
     #[test]
     fn test_role_serialization() {

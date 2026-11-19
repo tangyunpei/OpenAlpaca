@@ -7,7 +7,6 @@ use crate::LlmProvider;
 use crate::config::llm_config::runtime::DEFAULT_MAX_TOKENS;
 use crate::error::LlmError;
 use crate::types::*;
-use async_trait::async_trait;
 use reqwest::header::HeaderMap;
 
 /// The model for a request that names none: GPT-6 Luna, a compiled row,
@@ -277,7 +276,6 @@ impl OpenAiProvider {
     }
 }
 
-#[async_trait]
 impl LlmProvider for OpenAiProvider {
     fn name(&self) -> &str {
         "openai"

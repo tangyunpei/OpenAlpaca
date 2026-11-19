@@ -109,7 +109,7 @@ mod tests {
         );
         router.register_provider(
             ProviderType::Ollama,
-            provider,
+            openalpaca_llm::DynLlmProvider::from_arc(provider),
             openalpaca_llm::keys::key_pool::KeyPool::new(
                 Vec::new(),
                 openalpaca_llm::keys::key_pool::SelectionStrategy::RoundRobin,

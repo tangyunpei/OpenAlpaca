@@ -8044,7 +8044,6 @@ fn prompt_of(request: &openalpaca_llm::ChatRequest) -> String {
         .join("\n")
 }
 
-#[async_trait::async_trait]
 impl openalpaca_llm::LlmProvider for StubModel {
     fn name(&self) -> &str {
         "stub"
@@ -8145,7 +8144,7 @@ fn router_over(models: &[&str], stub: Arc<StubModel>) -> Arc<openalpaca_llm::Llm
     };
     let key = ApiKey::new("default".to_string(), ProviderType::Ollama, String::new());
     let entry = ProviderEntry {
-        provider: stub,
+        provider: openalpaca_llm::DynLlmProvider::from_arc(stub),
         key_pool: Arc::new(arc_swap::ArcSwap::from_pointee(KeyPool::new(
             vec![key],
             SelectionStrategy::RoundRobin,

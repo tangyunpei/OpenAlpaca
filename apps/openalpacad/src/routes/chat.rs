@@ -1634,7 +1634,6 @@ pub(crate) mod tests {
     /// *routable*, which is what the effective default depends on.
     struct StubLlm;
 
-    #[async_trait::async_trait]
     impl openalpaca_llm::LlmProvider for StubLlm {
         fn name(&self) -> &str {
             "stub"

@@ -58,7 +58,6 @@ fn make_orchestrator_with_fixed_llm_response(response: &str) -> Orchestrator {
         response: String,
     }
 
-    #[async_trait]
     impl LlmProvider for FixedMockLlm {
         fn name(&self) -> &str {
             "fixed-mock"
@@ -106,7 +105,6 @@ fn make_orchestrator_with_capturing_llm(
         captured_requests: Arc<std::sync::Mutex<Vec<ChatRequest>>>,
     }
 
-    #[async_trait]
     impl LlmProvider for CapturingMockLlm {
         fn name(&self) -> &str {
             "capturing-mock"
@@ -269,7 +267,6 @@ async fn test_permission_denied_external() {
 
 #[tokio::test]
 async fn test_simple_query_with_mock_llm() {
-    use async_trait::async_trait;
     use openalpaca_llm::{
         ChatRequest, ChatResponse, FinishReason, LlmError, LlmProvider, LlmRouter, ProviderType,
         Usage,
@@ -277,7 +274,6 @@ async fn test_simple_query_with_mock_llm() {
 
     struct MockLlm;
 
-    #[async_trait]
     impl LlmProvider for MockLlm {
         fn name(&self) -> &str {
             "mock"
@@ -405,7 +401,6 @@ async fn test_security_gate_replaces_trust_gate() {
 
 /// Helper: create a mock LLM that returns a fixed response string.
 fn make_planning_mock_llm(response: &str) -> Arc<LlmRouter> {
-    use async_trait::async_trait;
     use openalpaca_llm::{ChatRequest, ChatResponse, FinishReason, LlmError, LlmProvider, Usage};
     use std::sync::atomic::{AtomicUsize, Ordering};
 
@@ -414,7 +409,6 @@ fn make_planning_mock_llm(response: &str) -> Arc<LlmRouter> {
         call_count: AtomicUsize,
     }
 
-    #[async_trait]
     impl LlmProvider for PlanningMockLlm {
         fn name(&self) -> &str {
             "planning-mock"
@@ -484,13 +478,11 @@ fn make_orchestrator_with_llm_and_agents(
 
 #[tokio::test]
 async fn test_slash_commands_bypass_llm() {
-    use async_trait::async_trait;
     use openalpaca_llm::{ChatRequest, ChatResponse, LlmError, LlmProvider};
 
     // Mock LLM that panics if called — slash commands must bypass it
     struct PanickingLlm;
 
-    #[async_trait]
     impl LlmProvider for PanickingLlm {
         fn name(&self) -> &str {
             "panicking"
@@ -643,7 +635,6 @@ mod request_workspace_threading {
         calls: AtomicUsize,
     }
 
-    #[async_trait]
     impl LlmProvider for CallsTheToolOnce {
         fn name(&self) -> &str {
             "records-ctx"
@@ -834,7 +825,6 @@ mod a_list_change_mid_turn {
         offered: Arc<Mutex<Vec<Vec<String>>>>,
     }
 
-    #[async_trait]
     impl LlmProvider for CallsChangeListOnce {
         fn name(&self) -> &str {
             "calls-change-list-once"
@@ -991,7 +981,6 @@ mod project_turn_offers {
     /// Answers at once and keeps every request it was handed.
     struct Capturing(Arc<Mutex<Vec<ChatRequest>>>);
 
-    #[async_trait]
     impl LlmProvider for Capturing {
         fn name(&self) -> &str {
             "capturing"
@@ -1137,7 +1126,6 @@ async fn test_tool_intent_detected_and_executes() {
         call_count: AtomicUsize,
     }
 
-    #[async_trait::async_trait]
     impl LlmProvider for ToolMockLlm {
         fn name(&self) -> &str {
             "tool-mock"
@@ -1233,7 +1221,6 @@ async fn test_tool_max_rounds_enforcement() {
         call_count: AtomicUsize,
     }
 
-    #[async_trait::async_trait]
     impl LlmProvider for AlwaysToolUseLlm {
         fn name(&self) -> &str {
             "always-tool"
@@ -1490,7 +1477,7 @@ fn local_only_router(
     // *adaptation*, not L1's keyless slot.
     router.register_provider(
         ProviderType::Ollama,
-        provider,
+        openalpaca_llm::DynLlmProvider::from_arc(provider),
         openalpaca_llm::keys::key_pool::KeyPool::new(
             vec![openalpaca_llm::keys::ApiKey::new(
                 "default".to_string(),
@@ -1989,7 +1976,6 @@ async fn test_attachment_context_does_not_trigger_file_write_tool() {
         captured_requests: Arc<std::sync::Mutex<Vec<ChatRequest>>>,
     }
 
-    #[async_trait::async_trait]
     impl LlmProvider for CapturingToolAwareLlm {
         fn name(&self) -> &str {
             "capturing-tool-aware"
@@ -2533,7 +2519,6 @@ async fn test_slash_skill_takes_deterministic_tier_with_router() {
         call_count: Arc<AtomicUsize>,
     }
 
-    #[async_trait]
     impl LlmProvider for CountingMockLlm {
         fn name(&self) -> &str {
             "counting-mock"
@@ -3120,7 +3105,6 @@ struct ToolModeMockLlm {
     requests: Arc<std::sync::Mutex<Vec<ChatRequest>>>,
 }
 
-#[async_trait]
 impl openalpaca_llm::LlmProvider for ToolModeMockLlm {
     fn name(&self) -> &str {
         "tool-mode-mock"
@@ -4062,7 +4046,6 @@ async fn a_legacy_tools_allow_skill_is_attributed_on_both_the_top_level_and_the_
 
 struct SilentMockLlm;
 
-#[async_trait]
 impl openalpaca_llm::LlmProvider for SilentMockLlm {
     fn name(&self) -> &str {
         "silent-mock"
@@ -4397,7 +4380,6 @@ async fn a_skill_loop_honours_the_configured_inline_threshold() {
         seen: Arc<Mutex<Vec<ChatRequest>>>,
     }
 
-    #[async_trait]
     impl LlmProvider for DumpThenAnswer {
         fn name(&self) -> &str {
             "dump-then-answer"
@@ -5271,7 +5253,6 @@ fn make_orchestrator_with_streaming_llm() -> Orchestrator {
 
     struct StreamingMockLlm;
 
-    #[async_trait]
     impl LlmProvider for StreamingMockLlm {
         fn name(&self) -> &str {
             "streaming-mock"
@@ -5512,7 +5493,7 @@ Echo.
 }
 
 fn orchestrator_with_skill(
-    provider: Arc<dyn openalpaca_llm::LlmProvider>,
+    provider: Arc<impl openalpaca_llm::LlmProvider + 'static>,
     registry: Arc<ToolRegistry>,
     catalog: Arc<skill_catalog::SkillCatalog>,
 ) -> Orchestrator {
@@ -5520,7 +5501,7 @@ fn orchestrator_with_skill(
 }
 
 fn orchestrator_with_skill_and_config(
-    provider: Arc<dyn openalpaca_llm::LlmProvider>,
+    provider: Arc<impl openalpaca_llm::LlmProvider + 'static>,
     registry: Arc<ToolRegistry>,
     catalog: Arc<skill_catalog::SkillCatalog>,
     config: DaemonConfig,
@@ -5557,7 +5538,6 @@ struct ParkedStreamingSkillLlm {
     release: std::sync::Mutex<Option<tokio::sync::oneshot::Receiver<()>>>,
 }
 
-#[async_trait]
 impl openalpaca_llm::LlmProvider for ParkedStreamingSkillLlm {
     fn name(&self) -> &str {
         "parked-streaming-skill-mock"
@@ -5803,7 +5783,6 @@ struct StreamingSendSkillLlm {
     seen: Arc<Mutex<Vec<ChatRequest>>>,
 }
 
-#[async_trait]
 impl openalpaca_llm::LlmProvider for StreamingSendSkillLlm {
     fn name(&self) -> &str {
         "streaming-send-skill-mock"
@@ -6022,7 +6001,6 @@ struct StreamingToolMockLlm {
     call_count: std::sync::atomic::AtomicUsize,
 }
 
-#[async_trait]
 impl openalpaca_llm::LlmProvider for StreamingToolMockLlm {
     fn name(&self) -> &str {
         "streaming-tool-mock"
@@ -6156,7 +6134,6 @@ async fn a_streamed_tool_call_runs_with_its_arguments() {
 /// parameter", then an empty answer.
 struct AlwaysToolCallingMock;
 
-#[async_trait]
 impl openalpaca_llm::LlmProvider for AlwaysToolCallingMock {
     fn name(&self) -> &str {
         "always-tool-calling-mock"
@@ -7756,7 +7733,6 @@ impl ScriptedTurnLlm {
     }
 }
 
-#[async_trait]
 impl openalpaca_llm::LlmProvider for ScriptedTurnLlm {
     fn name(&self) -> &str {
         "scripted-turn-mock"
@@ -9040,7 +9016,6 @@ impl MarkerExtractorLlm {
     }
 }
 
-#[async_trait]
 impl openalpaca_llm::LlmProvider for MarkerExtractorLlm {
     fn name(&self) -> &str {
         "marker-extractor-mock"

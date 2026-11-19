@@ -31,7 +31,6 @@ struct PricedRounds {
     usages: Vec<Usage>,
 }
 
-#[async_trait]
 impl LlmProvider for PricedRounds {
     fn name(&self) -> &str {
         "priced-rounds"

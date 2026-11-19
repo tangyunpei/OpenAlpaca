@@ -823,7 +823,6 @@ mod tests {
     /// Minimal provider so a real `LlmRouter` can be constructed; never called.
     struct StubProvider;
 
-    #[async_trait::async_trait]
     impl openalpaca_llm::LlmProvider for StubProvider {
         fn name(&self) -> &str {
             "stub"
@@ -1047,7 +1046,6 @@ mod tests {
     /// A provider whose every answer comes after `self.0`.
     struct AnswersAfter(std::time::Duration);
 
-    #[async_trait::async_trait]
     impl openalpaca_llm::LlmProvider for AnswersAfter {
         fn name(&self) -> &str {
             "answers-after"

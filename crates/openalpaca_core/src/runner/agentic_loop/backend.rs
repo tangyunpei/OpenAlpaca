@@ -1,8 +1,8 @@
 use super::StreamCallback;
 use crate::orchestrator::working_state::{self, TranscriptLine, WorkingState, WriterConfig};
 use openalpaca_llm::{
-    ChatMessage, ChatRequest, ChatResponse, FinishReason, LlmProvider, LlmRouter, LlmRouterError,
-    RequestContext, RouterRequest, ThinkingConfig, ToolChoice, ToolDefinition,
+    ChatMessage, ChatRequest, ChatResponse, DynLlmProvider, FinishReason, LlmProvider, LlmRouter,
+    LlmRouterError, RequestContext, RouterRequest, ThinkingConfig, ToolChoice, ToolDefinition,
     context_management::ContextManagement,
 };
 use std::sync::Arc;
@@ -12,7 +12,7 @@ use std::time::Duration;
 /// Keeps the unified loop generic without dynamic dispatch overhead.
 pub(super) enum LlmBackend<'a> {
     /// Direct single-provider call (legacy/test path).
-    Direct { provider: &'a dyn LlmProvider },
+    Direct { provider: &'a DynLlmProvider<'a> },
     /// Router-based call with key rotation, fallback, cost tracking.
     Router {
         router: &'a LlmRouter,

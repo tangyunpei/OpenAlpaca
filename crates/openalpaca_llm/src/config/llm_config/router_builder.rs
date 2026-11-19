@@ -1,4 +1,4 @@
-use crate::LlmProvider;
+use crate::DynLlmProvider;
 use crate::error::LlmError;
 use crate::keys::key_pool::{
     ApiKey, KeyPool, ProviderType, SelectionStrategy,
@@ -219,7 +219,7 @@ fn build_router_from_hierarchical(
             let request_timeout = runtime_config.request_timeout_for(provider_name);
             #[cfg(any(feature = "anthropic", feature = "openai", feature = "ollama"))]
             let client = crate::providers::build_http_client(request_timeout);
-            let provider: Box<dyn LlmProvider> = match &provider_type {
+            let provider: Arc<DynLlmProvider<'static>> = match &provider_type {
                 #[cfg(feature = "anthropic")]
                 ProviderType::Anthropic => {
                     let Some(key) = first_secret else {
@@ -236,7 +236,7 @@ fn build_router_from_hierarchical(
                     let max_tokens = provider_config
                         .default_max_tokens
                         .or_else(|| prov_defaults.map(|d| d.default_max_tokens));
-                    Box::new(
+                    DynLlmProvider::new_arc(
                         crate::providers::anthropic::AnthropicProvider::with_client(
                             client, key, model, max_tokens,
                         )
@@ -263,7 +263,7 @@ fn build_router_from_hierarchical(
                     let max_tokens = provider_config
                         .default_max_tokens
                         .or_else(|| prov_defaults.map(|d| d.default_max_tokens));
-                    Box::new(
+                    DynLlmProvider::new_arc(
                         crate::providers::openai::OpenAiProvider::with_client(
                             client, key, model, base_url, max_tokens,
                         )
@@ -293,7 +293,7 @@ fn build_router_from_hierarchical(
                     let max_tokens = provider_config
                         .default_max_tokens
                         .or_else(|| prov_defaults.map(|d| d.default_max_tokens));
-                    Box::new(
+                    DynLlmProvider::new_arc(
                         crate::providers::ollama::OllamaProvider::with_client(
                             client, model, base_url, max_tokens,
                         )
@@ -309,7 +309,7 @@ fn build_router_from_hierarchical(
             providers_map.insert(
                 provider_type,
                 ProviderEntry {
-                    provider: Arc::from(provider),
+                    provider,
                     key_pool: Arc::new(ArcSwap::from_pointee(key_pool)),
                 },
             );

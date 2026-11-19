@@ -83,7 +83,7 @@ fn anthropic_router(
     providers.insert(
         ProviderType::Anthropic,
         ProviderEntry {
-            provider,
+            provider: DynLlmProvider::from_arc(provider),
             key_pool: Arc::new(ArcSwap::from_pointee(KeyPool::new(
                 vec![ApiKey::new(
                     "test".to_string(),

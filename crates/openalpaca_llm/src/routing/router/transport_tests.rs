@@ -146,10 +146,11 @@ fn provider_entry(
     deadline: Duration,
 ) -> (ProviderType, ProviderEntry) {
     let base_url = format!("{base}/v1");
-    let (provider_type, provider, keys): (ProviderType, Arc<dyn LlmProvider>, _) = if keyed {
+    let (provider_type, provider, keys): (ProviderType, Arc<DynLlmProvider<'static>>, _) = if keyed
+    {
         (
             ProviderType::OpenAI,
-            Arc::new(
+            DynLlmProvider::new_arc(
                 crate::providers::openai::OpenAiProvider::with_client(
                     client,
                     "sk-test".to_string(),
@@ -168,7 +169,7 @@ fn provider_entry(
     } else {
         (
             ProviderType::Ollama,
-            Arc::new(
+            DynLlmProvider::new_arc(
                 OllamaProvider::with_client(client, model.to_string(), Some(base_url), None)
                     .with_request_timeout(deadline),
             ),

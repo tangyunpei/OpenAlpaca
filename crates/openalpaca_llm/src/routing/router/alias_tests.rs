@@ -13,13 +13,11 @@ use crate::error::LlmError;
 use crate::routing::model_alias::{ALIAS_TABLE, ModelAlias, ModelChoice};
 use crate::routing::model_registry::ModelInfo;
 use crate::types::{ChatRequest, ChatResponse};
-use async_trait::async_trait;
 use std::collections::HashSet;
 
 /// A loaded provider that is never called.
 struct Standing(&'static str);
 
-#[async_trait]
 impl LlmProvider for Standing {
     fn name(&self) -> &str {
         self.0
@@ -64,7 +62,7 @@ fn router(loaded: &[ProviderType], default: &str) -> LlmRouter {
         providers.insert(
             provider.clone(),
             ProviderEntry {
-                provider: Arc::new(Standing(name_of(provider))),
+                provider: DynLlmProvider::new_arc(Standing(name_of(provider))),
                 key_pool: Arc::new(ArcSwap::from_pointee(key_pool)),
             },
         );

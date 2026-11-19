@@ -1339,7 +1339,6 @@ struct SubagentCompactionProvider {
     subagent_requests: std::sync::Mutex<Vec<Vec<openalpaca_llm::ChatMessage>>>,
 }
 
-#[async_trait]
 impl openalpaca_llm::LlmProvider for SubagentCompactionProvider {
     fn name(&self) -> &str {
         "subagent-compaction"
@@ -1620,7 +1619,6 @@ impl PathTally {
     }
 }
 
-#[async_trait]
 impl openalpaca_llm::LlmProvider for PathTally {
     fn name(&self) -> &str {
         "path-tally"
@@ -2998,7 +2996,6 @@ fn scripted_response(
     }
 }
 
-#[async_trait]
 impl openalpaca_llm::LlmProvider for ScriptedProvider {
     fn name(&self) -> &str {
         "scripted"
@@ -4291,7 +4288,6 @@ struct LeadAndSubagentProvider {
     subagent_reply: String,
 }
 
-#[async_trait]
 impl openalpaca_llm::LlmProvider for LeadAndSubagentProvider {
     fn name(&self) -> &str {
         "lead-and-subagent"
@@ -4491,7 +4487,6 @@ struct TemperatureRecordingProvider {
     seen: std::sync::Mutex<Vec<(bool, Option<f32>)>>,
 }
 
-#[async_trait]
 impl openalpaca_llm::LlmProvider for TemperatureRecordingProvider {
     fn name(&self) -> &str {
         "temperature-recording"
@@ -5719,7 +5714,6 @@ struct SubagentSearchesMemory {
     lead_tools: std::sync::Mutex<Vec<String>>,
 }
 
-#[async_trait]
 impl openalpaca_llm::LlmProvider for SubagentSearchesMemory {
     fn name(&self) -> &str {
         "subagent-searches-memory"
@@ -6113,7 +6107,6 @@ struct RecordsTheSubagent {
     subagent_requests: std::sync::Mutex<Vec<Vec<openalpaca_llm::ChatMessage>>>,
 }
 
-#[async_trait]
 impl openalpaca_llm::LlmProvider for RecordsTheSubagent {
     fn name(&self) -> &str {
         "records-the-subagent"
@@ -6256,7 +6249,6 @@ struct LeadCompactionProvider {
     lead_requests: std::sync::Mutex<Vec<Vec<openalpaca_llm::ChatMessage>>>,
 }
 
-#[async_trait]
 impl openalpaca_llm::LlmProvider for LeadCompactionProvider {
     fn name(&self) -> &str {
         "lead-compaction"
@@ -6457,7 +6449,6 @@ struct LeadEndsWhileTheWorkersCommandRuns {
 }
 
 #[cfg(unix)]
-#[async_trait]
 impl openalpaca_llm::LlmProvider for LeadEndsWhileTheWorkersCommandRuns {
     fn name(&self) -> &str {
         "lead-ends-while-the-workers-command-runs"
@@ -6650,7 +6641,6 @@ struct LeadAndWorkerBothPend {
     worker_call_dropped: Arc<std::sync::atomic::AtomicBool>,
 }
 
-#[async_trait]
 impl openalpaca_llm::LlmProvider for LeadAndWorkerBothPend {
     fn name(&self) -> &str {
         "lead-and-worker-both-pend"
@@ -6780,7 +6770,6 @@ impl GatedWorkers {
     }
 }
 
-#[async_trait]
 impl openalpaca_llm::LlmProvider for GatedWorkers {
     fn name(&self) -> &str {
         "gated-workers"
@@ -6830,7 +6819,7 @@ impl openalpaca_llm::LlmProvider for GatedWorkers {
 /// A router whose every call lands on `provider`, with room for sixteen
 /// concurrent calls on its one key, so the router's own per-key bound (eight
 /// by default) is never the bound under test.
-fn roomy_router(provider: Arc<dyn openalpaca_llm::LlmProvider>) -> Arc<LlmRouter> {
+fn roomy_router(provider: Arc<impl openalpaca_llm::LlmProvider + 'static>) -> Arc<LlmRouter> {
     let key_pool = openalpaca_llm::KeyPool::new(
         vec![openalpaca_llm::ApiKey::new(
             "default".to_string(),
@@ -6842,7 +6831,7 @@ fn roomy_router(provider: Arc<dyn openalpaca_llm::LlmProvider>) -> Arc<LlmRouter
     let providers = HashMap::from([(
         openalpaca_llm::ProviderType::Anthropic,
         openalpaca_llm::ProviderEntry {
-            provider,
+            provider: openalpaca_llm::DynLlmProvider::from_arc(provider),
             key_pool: Arc::new(ArcSwap::from_pointee(key_pool)),
         },
     )]);
@@ -7259,7 +7248,6 @@ struct FailingProvider {
     error: fn() -> openalpaca_llm::LlmError,
 }
 
-#[async_trait]
 impl openalpaca_llm::LlmProvider for FailingProvider {
     fn name(&self) -> &str {
         "failing"
@@ -7418,7 +7406,6 @@ struct SpentLocalProvider {
     timeout: std::time::Duration,
 }
 
-#[async_trait]
 impl openalpaca_llm::LlmProvider for SpentLocalProvider {
     fn name(&self) -> &str {
         "ollama"
@@ -7445,13 +7432,16 @@ impl openalpaca_llm::LlmProvider for SpentLocalProvider {
 }
 
 /// A router serving one local model, `model`, from `provider` with no key.
-fn local_router(provider: Arc<dyn openalpaca_llm::LlmProvider>, model: &str) -> LlmRouter {
+fn local_router(
+    provider: Arc<impl openalpaca_llm::LlmProvider + 'static>,
+    model: &str,
+) -> LlmRouter {
     use openalpaca_llm::ProviderType;
     let mut providers = std::collections::HashMap::new();
     providers.insert(
         ProviderType::Ollama,
         openalpaca_llm::ProviderEntry {
-            provider,
+            provider: openalpaca_llm::DynLlmProvider::from_arc(provider),
             key_pool: Arc::new(arc_swap::ArcSwap::from_pointee(
                 openalpaca_llm::KeyPool::new(vec![], openalpaca_llm::SelectionStrategy::RoundRobin),
             )),
@@ -7544,15 +7534,15 @@ fn overloaded() -> openalpaca_llm::LlmError {
 /// `cloud`, with the local `llama-local:8b`, served by `local` with no key,
 /// as its fallback chain's one rung.
 fn cloud_with_a_local_rung(
-    cloud: Arc<dyn openalpaca_llm::LlmProvider>,
-    local: Arc<dyn openalpaca_llm::LlmProvider>,
+    cloud: Arc<impl openalpaca_llm::LlmProvider + 'static>,
+    local: Arc<impl openalpaca_llm::LlmProvider + 'static>,
 ) -> LlmRouter {
     use openalpaca_llm::{ApiKey, KeyPool, ProviderEntry, ProviderType, SelectionStrategy};
     let mut providers = std::collections::HashMap::new();
     providers.insert(
         ProviderType::Anthropic,
         ProviderEntry {
-            provider: cloud,
+            provider: openalpaca_llm::DynLlmProvider::from_arc(cloud),
             key_pool: Arc::new(arc_swap::ArcSwap::from_pointee(KeyPool::new(
                 vec![ApiKey::new(
                     "test".to_string(),
@@ -7566,7 +7556,7 @@ fn cloud_with_a_local_rung(
     providers.insert(
         ProviderType::Ollama,
         ProviderEntry {
-            provider: local,
+            provider: openalpaca_llm::DynLlmProvider::from_arc(local),
             key_pool: Arc::new(arc_swap::ArcSwap::from_pointee(KeyPool::new(
                 vec![],
                 SelectionStrategy::RoundRobin,
@@ -8307,7 +8297,6 @@ struct LeadSpawnsFour {
     lead_requests: std::sync::Mutex<Vec<Vec<openalpaca_llm::ChatMessage>>>,
 }
 
-#[async_trait]
 impl openalpaca_llm::LlmProvider for LeadSpawnsFour {
     fn name(&self) -> &str {
         "lead-spawns-four"

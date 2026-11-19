@@ -2,7 +2,6 @@ use crate::LlmProvider;
 use crate::error::LlmError;
 use crate::routing::model_registry::DiscoveredModel;
 use crate::types::*;
-use async_trait::async_trait;
 
 const DEFAULT_BASE_URL: &str = "http://localhost:11434/v1";
 
@@ -139,7 +138,6 @@ impl OllamaProvider {
     }
 }
 
-#[async_trait]
 impl LlmProvider for OllamaProvider {
     fn name(&self) -> &str {
         "ollama"

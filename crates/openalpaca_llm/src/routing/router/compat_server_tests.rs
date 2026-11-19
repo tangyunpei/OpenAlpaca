@@ -20,7 +20,6 @@ use crate::providers::openai::OpenAiProvider;
 use crate::routing::model_registry::{ModelInfo, RequestContract};
 use crate::test_support::{MockHttpServer, MockResponse, loopback_client, refused_base_url};
 use crate::types::{ChatMessage, ChatRequest, ChatResponse};
-use async_trait::async_trait;
 use std::collections::HashSet;
 use std::time::Duration;
 
@@ -77,8 +76,8 @@ fn keyed_pool(provider: ProviderType) -> Arc<ArcSwap<KeyPool>> {
 
 /// The `openai` arm built to call `base_url` (`…/v1`), as the boot builder
 /// builds it.
-fn openai_at(base_url: &str) -> Arc<dyn LlmProvider> {
-    Arc::new(OpenAiProvider::with_client(
+fn openai_at(base_url: &str) -> Arc<DynLlmProvider<'static>> {
+    DynLlmProvider::new_arc(OpenAiProvider::with_client(
         loopback_client(TIMEOUT),
         "sk-test-not-a-key".to_string(),
         Some("gpt-6-luna".to_string()),
@@ -90,7 +89,6 @@ fn openai_at(base_url: &str) -> Arc<dyn LlmProvider> {
 /// A loaded provider that is never called: a local Ollama, or Anthropic.
 struct Idle(&'static str);
 
-#[async_trait]
 impl LlmProvider for Idle {
     fn name(&self) -> &str {
         self.0
@@ -111,7 +109,7 @@ impl LlmProvider for Idle {
 /// the `[orchestrator] model`, and `[providers.openai] base_url` at
 /// `openai_base` with `pins` under its `model_aliases`.
 fn router_over(
-    loaded: Vec<(ProviderType, Arc<dyn LlmProvider>)>,
+    loaded: Vec<(ProviderType, Arc<DynLlmProvider<'static>>)>,
     config: &HashMap<String, ModelConfigEntry>,
     default: &str,
     openai_base: &str,
@@ -448,7 +446,10 @@ async fn a_compatible_openai_beside_a_local_main_model_announces_no_collapse() {
     let router = router_over(
         vec![
             (ProviderType::OpenAI, openai_at(&base)),
-            (ProviderType::Ollama, Arc::new(Idle("ollama"))),
+            (
+                ProviderType::Ollama,
+                DynLlmProvider::new_arc(Idle("ollama")),
+            ),
         ],
         &HashMap::new(),
         "qwen3:8b",
@@ -476,7 +477,10 @@ async fn a_compatible_openai_parent_beside_anthropic_announces_its_collapse() {
     let router = router_over(
         vec![
             (ProviderType::OpenAI, openai_at(&base)),
-            (ProviderType::Anthropic, Arc::new(Idle("anthropic"))),
+            (
+                ProviderType::Anthropic,
+                DynLlmProvider::new_arc(Idle("anthropic")),
+            ),
         ],
         &HashMap::new(),
         SERVED,

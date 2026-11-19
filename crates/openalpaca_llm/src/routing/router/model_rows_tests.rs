@@ -99,7 +99,7 @@ fn openai_router_over(
     providers.insert(
         ProviderType::OpenAI,
         ProviderEntry {
-            provider,
+            provider: DynLlmProvider::from_arc(provider),
             key_pool: Arc::new(ArcSwap::from_pointee(KeyPool::new(
                 vec![ApiKey::new(
                     "test".to_string(),
@@ -553,8 +553,8 @@ fn ollama_router(base: &str, rows: &[(&str, ModelConfigEntry)]) -> LlmRouter {
 }
 
 /// An Ollama provider at `base` (`/v1` added).
-fn ollama_at(base: &str) -> Arc<dyn LlmProvider> {
-    Arc::new(crate::providers::ollama::OllamaProvider::with_client(
+fn ollama_at(base: &str) -> Arc<DynLlmProvider<'static>> {
+    DynLlmProvider::new_arc(crate::providers::ollama::OllamaProvider::with_client(
         loopback_client(TIMEOUT),
         "unset".to_string(),
         Some(format!("{base}/v1")),
@@ -1552,7 +1552,7 @@ async fn anthropic_s_listing_reads_no_capabilities_as_before() {
         providers.insert(
             ProviderType::Anthropic,
             ProviderEntry {
-                provider: Arc::new(provider) as Arc<dyn LlmProvider>,
+                provider: DynLlmProvider::new_arc(provider),
                 key_pool: Arc::new(ArcSwap::from_pointee(KeyPool::new(
                     vec![ApiKey::new(
                         "test".to_string(),
@@ -1731,7 +1731,7 @@ fn ollama_and_compat_router(
     providers.insert(
         ProviderType::OpenAI,
         ProviderEntry {
-            provider: Arc::new(openai_at(compat_base)) as Arc<dyn LlmProvider>,
+            provider: DynLlmProvider::new_arc(openai_at(compat_base)),
             key_pool: Arc::new(ArcSwap::from_pointee(KeyPool::new(
                 vec![ApiKey::new(
                     "test".to_string(),

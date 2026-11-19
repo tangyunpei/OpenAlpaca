@@ -461,7 +461,6 @@ mod main_loop_tool_timeout {
     };
     use crate::tools::ToolRegistry;
     use arc_swap::ArcSwap;
-    use async_trait::async_trait;
     use openalpaca_llm::{
         ChatRequest, ChatResponse, FinishReason, LlmError, LlmProvider, LlmRouter, ProviderType,
         Role, ToolCall, Usage,
@@ -479,7 +478,6 @@ mod main_loop_tool_timeout {
         seen: Mutex<Vec<ChatRequest>>,
     }
 
-    #[async_trait]
     impl LlmProvider for CallsTheShell {
         fn name(&self) -> &str {
             "calls-the-shell"
