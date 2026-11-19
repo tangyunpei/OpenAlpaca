@@ -1,5 +1,4 @@
 use anyhow::Result;
-use async_trait::async_trait;
 use notify::{Config, Event, PollWatcher, RecursiveMode, Watcher};
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
@@ -9,7 +8,6 @@ use std::time::Instant;
 use tokio::sync::mpsc;
 use tracing::{debug, error, info, warn};
 
-use super::EventWatcher;
 use openalpaca_api::events::WakeEvent;
 
 /// Debounce window in milliseconds
@@ -147,9 +145,9 @@ impl FileWatchHandle {
     }
 }
 
-#[async_trait]
-impl EventWatcher for FilesystemWatcher {
-    async fn start(&self, tx: mpsc::Sender<WakeEvent>) -> Result<()> {
+impl FilesystemWatcher {
+    /// Start watching for events
+    pub async fn start(&self, tx: mpsc::Sender<WakeEvent>) -> Result<()> {
         // Setup notify watcher
         let mut watcher = PollWatcher::new(
             debounced_handler(tx),
@@ -179,7 +177,8 @@ impl EventWatcher for FilesystemWatcher {
         Ok(())
     }
 
-    async fn stop(&self) -> Result<()> {
+    /// Stop watching
+    pub async fn stop(&self) -> Result<()> {
         let mut w = self.watcher.lock().unwrap();
         // Dropping the watcher stops it
         *w = None;
