@@ -156,18 +156,34 @@ pub trait PluginAgentExecutor: Send + Sync {
 #[cfg(test)]
 mod tests {
     use std::sync::Arc;
+    use std::time::Duration;
+
+    use serde_json::Value;
 
     use super::{
         DynPluginAgentExecutor, DynPluginSkillExecutor, DynPluginToolExecutor,
-        DynToolCallbackExecutor,
+        DynToolCallbackExecutor, PluginToolExecutor,
     };
+
+    /// Compiles only for a `Send` value: applied to an unpolled future.
+    fn is_send<T: Send>(_: &T) {}
 
     /// A type-erased executor crosses tasks: the registry holds it in
     /// `ToolBackend::Plugin` and calls it from spawned work.
+    ///
+    /// The supertraits alone make the held form `Send + Sync`, so the test
+    /// also holds each method's declared `+ Send`: the generic body sees
+    /// only the trait's declaration, and naming it at the Dyn compiles it.
     #[test]
     fn a_held_plugin_tool_executor_is_send_and_sync() {
         fn send_and_sync<T: Send + Sync + ?Sized>() {}
         send_and_sync::<Arc<DynPluginToolExecutor<'static>>>();
+
+        fn futures_are_send<E: PluginToolExecutor + ?Sized>(e: &E, args: &Value) {
+            is_send(&e.execute("t", args));
+            is_send(&e.execute_within("t", args, Duration::ZERO));
+        }
+        let _ = futures_are_send::<DynPluginToolExecutor<'static>>;
     }
 
     /// A type-erased tool callback rides inside a plugin skill's boxed,
