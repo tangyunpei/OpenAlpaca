@@ -162,7 +162,7 @@ mod tests {
 
     use super::{
         DynPluginAgentExecutor, DynPluginSkillExecutor, DynPluginToolExecutor,
-        DynToolCallbackExecutor, PluginToolExecutor,
+        DynToolCallbackExecutor, PluginToolExecutor, ToolCallbackExecutor,
     };
 
     /// Compiles only for a `Send` value: applied to an unpolled future.
@@ -187,11 +187,17 @@ mod tests {
     }
 
     /// A type-erased tool callback rides inside a plugin skill's boxed,
-    /// `Send` invoke future, so the held form is `Send + Sync`.
+    /// `Send` invoke future, so the held form is `Send + Sync`; its method's
+    /// declared `+ Send` is held as for `PluginToolExecutor`.
     #[test]
     fn a_held_tool_callback_executor_is_send_and_sync() {
         fn send_and_sync<T: Send + Sync + ?Sized>() {}
         send_and_sync::<Arc<DynToolCallbackExecutor<'static>>>();
+
+        fn futures_are_send<E: ToolCallbackExecutor + ?Sized>(e: &E, args: &Value) {
+            is_send(&e.execute_tool("t", args));
+        }
+        let _ = futures_are_send::<DynToolCallbackExecutor<'static>>;
     }
 
     /// A type-erased skill executor is held in the skill catalog's
