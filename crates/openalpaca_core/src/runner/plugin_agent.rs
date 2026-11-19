@@ -18,7 +18,7 @@ use super::unless_cancelled;
 use crate::security::sandbox::{SandboxManager, SandboxPolicy};
 use crate::tools::extensions::{ExtensionId, ExtensionLedger, ScopedRun};
 use crate::tools::registry::ToolContext;
-use openalpaca_api::plugin_traits::PluginAgentExecutor;
+use openalpaca_api::plugin_traits::{DynPluginAgentExecutor, PluginAgentExecutor};
 use openalpaca_llm::ToolCall;
 use std::sync::Arc;
 use std::time::Duration;
@@ -131,7 +131,7 @@ impl ScopedRun for PluginLoopOutcome {
 ///    cancel ready in the same tick yield the future's output.
 #[allow(clippy::too_many_arguments)]
 pub async fn run_plugin_agent_loop(
-    executor: &Arc<dyn PluginAgentExecutor>,
+    executor: &Arc<DynPluginAgentExecutor<'static>>,
     instance_id: &str,
     task_id: &str,
     instructions: &str,
@@ -300,7 +300,7 @@ pub async fn run_plugin_agent_loop(
 /// A run the cancel ended: the plugin is told to stop, and the run fails
 /// `"Cancelled"`, wherever the cancel landed.
 async fn cancelled(
-    executor: &Arc<dyn PluginAgentExecutor>,
+    executor: &Arc<DynPluginAgentExecutor<'static>>,
     instance_id: &str,
     tool_calls_made: usize,
 ) -> PluginLoopOutcome {
@@ -353,7 +353,6 @@ mod tests {
         }
     }
 
-    #[async_trait]
     impl PluginAgentExecutor for StubExecutor {
         async fn spawn(
             &self,
@@ -462,7 +461,7 @@ mod tests {
 
         // The child dies on the first `step`, exactly as a T4 kill leaves it.
         let executor = StubExecutor::new(true, vec![]);
-        let exec: Arc<dyn PluginAgentExecutor> = executor.clone();
+        let exec = DynPluginAgentExecutor::from_arc(executor.clone());
         let (sandbox, _registry) = make_sandbox();
 
         // The toggle flips while the run is in flight.
@@ -514,7 +513,6 @@ mod tests {
         steps: Mutex<usize>,
     }
 
-    #[async_trait]
     impl PluginAgentExecutor for FlippingExecutor {
         async fn spawn(
             &self,
@@ -575,7 +573,7 @@ mod tests {
             extension: ext.clone(),
             steps: Mutex::new(0),
         });
-        let exec: Arc<dyn PluginAgentExecutor> = executor.clone();
+        let exec = DynPluginAgentExecutor::from_arc(executor.clone());
         let (sandbox, _registry) = make_sandbox();
 
         let outcome = ledger
@@ -629,7 +627,7 @@ mod tests {
             true,
             vec![("working".into(), String::new(), vec![])],
         );
-        let exec: Arc<dyn PluginAgentExecutor> = executor.clone();
+        let exec = DynPluginAgentExecutor::from_arc(executor.clone());
         let (sandbox, _registry) = make_sandbox();
 
         ledger.upsert(&ext, false, crate::tools::extensions::ExtensionState::Disabled);
@@ -677,7 +675,7 @@ mod tests {
         cancel_token: Option<&CancellationToken>,
     ) -> PluginLoopOutcome {
         let (sandbox, _registry) = make_sandbox();
-        let exec: Arc<dyn PluginAgentExecutor> = executor.clone();
+        let exec = DynPluginAgentExecutor::from_arc(executor.clone());
         run_plugin_agent_loop(
             &exec,
             "plugin-instance",
@@ -802,7 +800,7 @@ mod tests {
             ],
         );
         let (sandbox, _registry) = make_sandbox();
-        let exec: Arc<dyn PluginAgentExecutor> = executor.clone();
+        let exec = DynPluginAgentExecutor::from_arc(executor.clone());
         // What the spawn path hands the loop: the template's id, which the
         // sandbox attributes every call to (`lead_agent/tools.rs`).
         let ctx = ToolContext {
@@ -866,7 +864,7 @@ mod tests {
         let (sandbox, _registry) = make_sandbox();
         let mut denying_policy = policy();
         denying_policy.denied_capabilities = vec!["echo".to_string()];
-        let exec: Arc<dyn PluginAgentExecutor> = executor.clone();
+        let exec = DynPluginAgentExecutor::from_arc(executor.clone());
         let outcome = run_plugin_agent_loop(
             &exec,
             "plugin-instance",
@@ -957,7 +955,6 @@ mod tests {
         stopped: Mutex<bool>,
     }
 
-    #[async_trait]
     impl PluginAgentExecutor for HangingExecutor {
         async fn spawn(
             &self,
@@ -1005,7 +1002,7 @@ mod tests {
             entered: tokio::sync::Notify::new(),
             stopped: Mutex::new(false),
         });
-        let exec: Arc<dyn PluginAgentExecutor> = executor.clone();
+        let exec = DynPluginAgentExecutor::from_arc(executor.clone());
         let token = CancellationToken::new();
         let run_token = token.clone();
         let mut run = tokio::spawn(async move {
@@ -1137,7 +1134,7 @@ mod tests {
         ctx: ToolContext,
         token: CancellationToken,
     ) -> tokio::task::JoinHandle<PluginLoopOutcome> {
-        let exec: Arc<dyn PluginAgentExecutor> = executor.clone();
+        let exec = DynPluginAgentExecutor::from_arc(executor.clone());
         tokio::spawn(async move {
             run_plugin_agent_loop(
                 &exec,

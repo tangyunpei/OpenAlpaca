@@ -2762,7 +2762,6 @@ struct CompletingPluginExecutor {
     instructions: std::sync::Mutex<Option<String>>,
 }
 
-#[async_trait]
 impl openalpaca_api::plugin_traits::PluginAgentExecutor for CompletingPluginExecutor {
     async fn spawn(
         &self,
@@ -2826,7 +2825,9 @@ async fn test_spawn_subagent_executes_plugin_backed_template() {
         sections: HashMap::new(),
         source: AgentSource::Plugin {
             plugin_id: "test_plugin".to_string(),
-            executor: executor.clone(),
+            executor: openalpaca_api::plugin_traits::DynPluginAgentExecutor::from_arc(
+                executor.clone(),
+            ),
         },
     };
 
@@ -3726,7 +3727,9 @@ async fn a_subagent_lane_is_narrated_into_the_runs_session_log() {
         sections: HashMap::new(),
         source: AgentSource::Plugin {
             plugin_id: "test_plugin".to_string(),
-            executor: executor.clone(),
+            executor: openalpaca_api::plugin_traits::DynPluginAgentExecutor::from_arc(
+                executor.clone(),
+            ),
         },
     };
 
@@ -4940,7 +4943,6 @@ struct ToolRequestingPluginExecutor {
     fed_back: std::sync::Mutex<Option<serde_json::Value>>,
 }
 
-#[async_trait]
 impl openalpaca_api::plugin_traits::PluginAgentExecutor for ToolRequestingPluginExecutor {
     async fn spawn(
         &self,
@@ -4998,7 +5000,7 @@ async fn a_plugin_backed_subagent_may_call_the_tool_its_capability_resolves_to()
     let mut template = crate::test_util::template_from_agent(&agent);
     template.source = AgentSource::Plugin {
         plugin_id: "test_plugin".to_string(),
-        executor: executor.clone(),
+        executor: openalpaca_api::plugin_traits::DynPluginAgentExecutor::from_arc(executor.clone()),
     };
     let shared = Arc::new(SharedContext::new());
     assert!(shared.agent_registry.register_template(template));

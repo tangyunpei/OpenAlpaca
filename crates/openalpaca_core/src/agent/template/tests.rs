@@ -568,7 +568,6 @@ capabilities:
 /// the subagent.
 struct IdlePluginExecutor;
 
-#[async_trait::async_trait]
 impl openalpaca_api::plugin_traits::PluginAgentExecutor for IdlePluginExecutor {
     async fn spawn(
         &self,
@@ -604,7 +603,9 @@ impl openalpaca_api::plugin_traits::PluginAgentExecutor for IdlePluginExecutor {
 fn from_plugin(mut template: AgentTemplate) -> AgentTemplate {
     template.source = AgentSource::Plugin {
         plugin_id: "acme".to_string(),
-        executor: Arc::new(IdlePluginExecutor),
+        executor: openalpaca_api::plugin_traits::DynPluginAgentExecutor::new_arc(
+            IdlePluginExecutor,
+        ),
     };
     template
 }

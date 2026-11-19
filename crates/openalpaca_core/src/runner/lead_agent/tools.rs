@@ -27,6 +27,7 @@ use crate::tools::ToolRegistry;
 use arc_swap::ArcSwap;
 use async_trait::async_trait;
 use chrono::Utc;
+use openalpaca_api::plugin_traits::PluginAgentExecutor;
 use openalpaca_llm::{ChatMessage, LlmRouter, ModelChoice, ToolDefinition};
 use openalpaca_storage::Database;
 use std::sync::atomic::{AtomicUsize, Ordering};

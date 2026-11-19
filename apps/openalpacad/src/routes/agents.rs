@@ -1029,7 +1029,6 @@ pub(crate) mod tests {
 
     struct IdleExecutor;
 
-    #[async_trait::async_trait]
     impl openalpaca_api::plugin_traits::PluginAgentExecutor for IdleExecutor {
         async fn spawn(
             &self,
@@ -1086,7 +1085,7 @@ pub(crate) mod tests {
             parse_agent_markdown("---\nid: general_agent\nname: A\ndescription: d\n---\n").unwrap();
         plugin.source = openalpaca_core::agent::AgentSource::Plugin {
             plugin_id: "acme".to_string(),
-            executor: Arc::new(IdleExecutor),
+            executor: openalpaca_api::plugin_traits::DynPluginAgentExecutor::new_arc(IdleExecutor),
         };
         assert!(!t.registry.register_template(plugin));
 
@@ -1320,7 +1319,7 @@ pub(crate) mod tests {
             parse_agent_markdown("---\nid: acme_agent\nname: A\ndescription: d\n---\n").unwrap();
         plugin.source = openalpaca_core::agent::AgentSource::Plugin {
             plugin_id: "acme".to_string(),
-            executor: Arc::new(IdleExecutor),
+            executor: openalpaca_api::plugin_traits::DynPluginAgentExecutor::new_arc(IdleExecutor),
         };
         assert!(t.registry.register_template(plugin));
         // An `agent` row is what a delete would archive, and a leftover

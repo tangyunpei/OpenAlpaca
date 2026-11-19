@@ -3137,7 +3137,7 @@ fn build_agent_template_from_info(
         sections: HashMap::new(),
         source: AgentSource::Plugin {
             plugin_id: plugin_name.to_string(),
-            executor: bridge,
+            executor: openalpaca_api::plugin_traits::DynPluginAgentExecutor::from_arc(bridge),
         },
     }
 }

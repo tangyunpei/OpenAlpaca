@@ -1583,7 +1583,6 @@ async fn a_per_call_refusal_lists_thirty_routable_ids_and_how_many_more() {
 /// A plugin's agent that completes at once.
 struct PluginAgent;
 
-#[async_trait]
 impl openalpaca_api::plugin_traits::PluginAgentExecutor for PluginAgent {
     async fn spawn(
         &self,
@@ -1634,7 +1633,7 @@ async fn a_per_call_model_on_a_plugin_template_is_refused() {
     ));
     template.source = crate::agent::template::AgentSource::Plugin {
         plugin_id: "test_plugin".to_string(),
-        executor: Arc::new(PluginAgent),
+        executor: openalpaca_api::plugin_traits::DynPluginAgentExecutor::new_arc(PluginAgent),
     };
     assert!(shared.agent_registry.register_template(template));
     let lead = instance(&shared, "lead_agent");

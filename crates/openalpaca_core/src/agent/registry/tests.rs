@@ -546,7 +546,6 @@ fn clearing_a_plugins_tombstones_leaves_every_other_plugins_alone() {
 /// and remove templates.
 struct IdleExecutor;
 
-#[async_trait::async_trait]
 impl openalpaca_api::plugin_traits::PluginAgentExecutor for IdleExecutor {
     async fn spawn(
         &self,
@@ -584,7 +583,7 @@ fn plugin_template(id: &str, plugin: &str) -> AgentTemplate {
     AgentTemplate {
         source: AgentSource::Plugin {
             plugin_id: plugin.to_string(),
-            executor: std::sync::Arc::new(IdleExecutor),
+            executor: openalpaca_api::plugin_traits::DynPluginAgentExecutor::new_arc(IdleExecutor),
         },
         ..make_template(id, vec![], false)
     }

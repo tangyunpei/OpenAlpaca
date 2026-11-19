@@ -1,6 +1,5 @@
 use std::time::Duration;
 
-use async_trait::async_trait;
 use serde_json::Value;
 
 /// Trait for executing tools via a plugin subprocess.
@@ -110,30 +109,35 @@ pub trait PluginSkillExecutor: Send + Sync {
 /// Trait for executing agent tasks via a plugin subprocess.
 /// The agent manages its own LLM calls and reasoning loop.
 /// The daemon dispatches tasks and proxies tool requests.
-#[async_trait]
+///
+/// Its methods return `impl Future + Send`, so an implementor writes plain
+/// `async fn`; a plugin's agent template holds its executor as
+/// [`DynPluginAgentExecutor`] (`Arc<DynPluginAgentExecutor<'static>>`),
+/// built with `DynPluginAgentExecutor::new_arc` or `from_arc`.
+#[dynosaur::dynosaur(pub DynPluginAgentExecutor = dyn(box) PluginAgentExecutor)]
 pub trait PluginAgentExecutor: Send + Sync {
     /// Spawn an agent instance for a task.
     /// Returns true if the agent accepted the task.
-    async fn spawn(
+    fn spawn(
         &self,
         instance_id: &str,
         task_id: &str,
         instructions: &str,
         context: &Value,
-    ) -> Result<bool, String>;
+    ) -> impl Future<Output = Result<bool, String>> + Send;
 
     /// Poll for progress or send tool results back.
     /// Returns (status, output, tool_calls).
     /// status: "working" | "tool_request" | "complete" | "failed"
     /// tool_calls: empty unless status is "tool_request"
-    async fn step(
+    fn step(
         &self,
         instance_id: &str,
         tool_results: Option<&Value>,
-    ) -> Result<(String, String, Vec<Value>), String>;
+    ) -> impl Future<Output = Result<(String, String, Vec<Value>), String>> + Send;
 
     /// Stop a running agent instance.
-    async fn stop(&self, instance_id: &str) -> Result<(), String>;
+    fn stop(&self, instance_id: &str) -> impl Future<Output = Result<(), String>> + Send;
 
     fn plugin_id(&self) -> &str;
     fn agent_id(&self) -> &str;
@@ -153,7 +157,10 @@ pub trait PluginAgentExecutor: Send + Sync {
 mod tests {
     use std::sync::Arc;
 
-    use super::{DynPluginSkillExecutor, DynPluginToolExecutor, DynToolCallbackExecutor};
+    use super::{
+        DynPluginAgentExecutor, DynPluginSkillExecutor, DynPluginToolExecutor,
+        DynToolCallbackExecutor,
+    };
 
     /// A type-erased executor crosses tasks: the registry holds it in
     /// `ToolBackend::Plugin` and calls it from spawned work.
@@ -177,5 +184,13 @@ mod tests {
     fn a_held_plugin_skill_executor_is_send_and_sync() {
         fn send_and_sync<T: Send + Sync + ?Sized>() {}
         send_and_sync::<Arc<DynPluginSkillExecutor<'static>>>();
+    }
+
+    /// A type-erased agent executor is held in a plugin template's
+    /// `AgentSource::Plugin` and driven from spawned subagent work.
+    #[test]
+    fn a_held_plugin_agent_executor_is_send_and_sync() {
+        fn send_and_sync<T: Send + Sync + ?Sized>() {}
+        send_and_sync::<Arc<DynPluginAgentExecutor<'static>>>();
     }
 }

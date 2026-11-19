@@ -25,7 +25,7 @@ pub enum AgentSource {
     /// Plugin-backed agent running an external reasoning loop.
     Plugin {
         plugin_id: String,
-        executor: Arc<dyn openalpaca_api::plugin_traits::PluginAgentExecutor>,
+        executor: Arc<openalpaca_api::plugin_traits::DynPluginAgentExecutor<'static>>,
     },
 }
 

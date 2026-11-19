@@ -220,7 +220,6 @@ fn deleting_the_switching_file_brings_the_template_back_without_a_restart() {
 /// A plugin's agent executor that is never driven: the test only registers.
 struct IdleExecutor;
 
-#[async_trait::async_trait]
 impl openalpaca_api::plugin_traits::PluginAgentExecutor for IdleExecutor {
     async fn spawn(
         &self,
@@ -264,7 +263,7 @@ fn a_plugin_template_cannot_take_a_switched_off_bundled_id() {
     .unwrap();
     plugin.source = AgentSource::Plugin {
         plugin_id: "acme".to_string(),
-        executor: std::sync::Arc::new(IdleExecutor),
+        executor: openalpaca_api::plugin_traits::DynPluginAgentExecutor::new_arc(IdleExecutor),
     };
     assert!(!store.registry.register_template(plugin));
 

@@ -434,7 +434,6 @@ mod tests {
 
     struct IdleExecutor;
 
-    #[async_trait::async_trait]
     impl openalpaca_api::plugin_traits::PluginAgentExecutor for IdleExecutor {
         async fn spawn(
             &self,
@@ -479,7 +478,7 @@ mod tests {
         .unwrap();
         template.source = openalpaca_core::agent::AgentSource::Plugin {
             plugin_id: "acme".to_string(),
-            executor: Arc::new(IdleExecutor),
+            executor: openalpaca_api::plugin_traits::DynPluginAgentExecutor::new_arc(IdleExecutor),
         };
         let registry = &start.shared_context.agent_registry;
 
