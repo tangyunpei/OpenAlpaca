@@ -625,7 +625,6 @@ mod tests {
         release: AsyncMutex<Option<oneshot::Receiver<()>>>,
     }
 
-    #[async_trait::async_trait]
     impl MessageHandler for ParkedStreamingHandler {
         async fn handle(&self, request: HandleRequest) -> Result<HandleResult, String> {
             let sink = request
@@ -650,7 +649,6 @@ mod tests {
     /// provider with no streaming whose answer arrives whole.
     struct SilentHandler;
 
-    #[async_trait::async_trait]
     impl MessageHandler for SilentHandler {
         async fn handle(&self, _request: HandleRequest) -> Result<HandleResult, String> {
             Ok(HandleResult::text("the whole answer".to_string()))
@@ -661,7 +659,6 @@ mod tests {
     /// conversation (design 11 §5).
     struct ContinuingHandler;
 
-    #[async_trait::async_trait]
     impl MessageHandler for ContinuingHandler {
         async fn handle(&self, _request: HandleRequest) -> Result<HandleResult, String> {
             Ok(HandleResult {
@@ -677,7 +674,9 @@ mod tests {
         }
     }
 
-    fn service_with(handler: Arc<dyn MessageHandler>) -> (ChatService, Arc<ChatStreamManager>) {
+    fn service_with(
+        handler: Arc<impl MessageHandler + 'static>,
+    ) -> (ChatService, Arc<ChatStreamManager>) {
         let bus = EventBus::default();
         let gateway = Arc::new(crate::gateway::Gateway::new(
             Arc::new(SharedContext::new()),

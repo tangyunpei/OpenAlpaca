@@ -865,7 +865,6 @@ async fn the_gateway_returns_while_a_flush_is_stuck() {
     }
 
     struct Echo;
-    #[async_trait::async_trait]
     impl crate::gateway::MessageHandler for Echo {
         async fn handle(
             &self,
@@ -1112,7 +1111,6 @@ struct FlushMidTurn {
     report: Mutex<Option<FlushReport>>,
 }
 
-#[async_trait::async_trait]
 impl crate::gateway::MessageHandler for FlushMidTurn {
     async fn handle(
         &self,

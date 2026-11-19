@@ -230,7 +230,6 @@ pub fn spawn_timer_turn(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use async_trait::async_trait;
     use openalpaca_core::bus::EventBus;
     use openalpaca_core::context::SharedContext;
     use openalpaca_core::gateway::{HandleRequest, HandleResult, MessageHandler};
@@ -360,7 +359,6 @@ Body.
         calls: Arc<Mutex<Vec<RecordedCall>>>,
     }
 
-    #[async_trait]
     impl MessageHandler for StubHandler {
         async fn handle(&self, request: HandleRequest) -> Result<HandleResult, String> {
             self.calls.lock().unwrap().push((

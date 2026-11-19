@@ -1,4 +1,3 @@
-use async_trait::async_trait;
 use openalpaca_core::{
     gateway::{
         HandleRequest, HandleResult, MemoryUsed, MessageHandler, ResolvedAttachment,
@@ -72,7 +71,6 @@ impl OrchestratorHandler {
     }
 }
 
-#[async_trait]
 impl MessageHandler for OrchestratorHandler {
     async fn handle(&self, request: HandleRequest) -> Result<HandleResult, String> {
         let request_id = request.request_id;

@@ -6,7 +6,6 @@ use crate::security::policy::{Principal, Scope};
 use crate::security::sandbox::SandboxManager;
 use crate::test_util::{make_agent, template_from_agent};
 use crate::tools::ToolRegistry;
-use async_trait::async_trait;
 use base64::Engine as _;
 use openalpaca_llm::{ChatRequest, ContentPart, ImageSource};
 use openalpaca_storage::{OutcomeKind, TaskStatus};
@@ -9132,7 +9131,6 @@ impl ExtractionScene {
 /// turn to the orchestrator.
 struct OrchestratorTurns(Arc<Orchestrator>);
 
-#[async_trait]
 impl crate::gateway::MessageHandler for OrchestratorTurns {
     async fn handle(&self, request: HandleRequest) -> Result<crate::gateway::HandleResult, String> {
         self.0

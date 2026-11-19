@@ -360,7 +360,6 @@ fn has_file(dir: &Path, id: files::NoteId) -> bool {
 
 struct Turns(Arc<Orchestrator>);
 
-#[async_trait::async_trait]
 impl crate::gateway::MessageHandler for Turns {
     async fn handle(&self, request: HandleRequest) -> Result<crate::gateway::HandleResult, String> {
         self.0

@@ -645,7 +645,6 @@ pub(super) fn run_with_home(test: &str, home: &std::path::Path, cwd: &std::path:
 fn the_connector_takes_chat_db_from_the_home_user_home_reports() {
     use super::connector::IMessageConnector;
     use arc_swap::ArcSwap;
-    use async_trait::async_trait;
     use openalpaca_core::{
         bus::EventBus,
         context::SharedContext,
@@ -657,7 +656,6 @@ fn the_connector_takes_chat_db_from_the_home_user_home_reports() {
     use std::sync::Arc;
 
     struct Unused;
-    #[async_trait]
     impl MessageHandler for Unused {
         async fn handle(&self, _request: HandleRequest) -> Result<HandleResult, String> {
             Err("not called".to_string())

@@ -2425,7 +2425,6 @@ async fn blocking<T: Send + 'static>(f: impl FnOnce() -> T + Send + 'static) -> 
 /// ten lines of it: the turn, then the per-request maps the bridge drains.
 struct EvalHandler(Arc<openalpaca_core::orchestrator::Orchestrator>);
 
-#[async_trait::async_trait]
 impl openalpaca_core::gateway::MessageHandler for EvalHandler {
     async fn handle(
         &self,
