@@ -1,6 +1,5 @@
 use crate::bus::EventBus;
 use crate::middleware::user::{parse_user_markdown, render_user_markdown};
-use async_trait::async_trait;
 use base64::Engine as _;
 use std::path::{Path, PathBuf};
 
@@ -21,33 +20,32 @@ pub(super) struct UserHandler {
     pub max_backups: Option<usize>,
 }
 
-#[async_trait]
-impl super::PersonaHandler for UserHandler {
-    fn target_name(&self) -> &'static str {
+impl UserHandler {
+    pub(super) fn target_name(&self) -> &'static str {
         "user"
     }
 
-    fn document_path(&self) -> &Path {
+    pub(super) fn document_path(&self) -> &Path {
         &self.user_path
     }
 
-    fn backup_dir(&self) -> &Path {
+    pub(super) fn backup_dir(&self) -> &Path {
         &self.backup_dir
     }
 
-    fn backup_prefix(&self) -> &'static str {
+    pub(super) fn backup_prefix(&self) -> &'static str {
         "USER"
     }
 
-    fn max_backups(&self) -> Option<usize> {
+    pub(super) fn max_backups(&self) -> Option<usize> {
         self.max_backups
     }
 
-    fn tmp_filename(&self) -> &'static str {
+    pub(super) fn tmp_filename(&self) -> &'static str {
         ".USER.md.tmp"
     }
 
-    fn validate_replace(&self, content_b64: &str) -> Result<String, String> {
+    pub(super) fn validate_replace(&self, content_b64: &str) -> Result<String, String> {
         if content_b64.trim().is_empty() {
             return Err("content_b64 must not be empty.".to_string());
         }
@@ -69,7 +67,7 @@ impl super::PersonaHandler for UserHandler {
         Ok(content)
     }
 
-    async fn validate_sections(
+    pub(super) async fn validate_sections(
         &self,
         sections: &serde_json::Value,
     ) -> Result<(String, Option<Vec<String>>), String> {
@@ -174,7 +172,7 @@ impl super::PersonaHandler for UserHandler {
         Ok((rendered, Some(modified)))
     }
 
-    fn publish_event(
+    pub(super) fn publish_event(
         &self,
         mode: &str,
         hash: &str,

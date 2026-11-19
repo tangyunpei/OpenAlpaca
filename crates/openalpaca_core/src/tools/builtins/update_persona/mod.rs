@@ -29,27 +29,95 @@ pub struct PersonaToolContext {
 /// Known top-level fields in the update_persona tool arguments.
 const KNOWN_TOP_LEVEL_FIELDS: &[&str] = &["target", "mode", "content_b64", "sections"];
 
-/// Common lifecycle for all persona document updates.
-#[async_trait]
-trait PersonaHandler: Send + Sync {
-    fn target_name(&self) -> &'static str;
-    fn document_path(&self) -> &Path;
-    fn backup_dir(&self) -> &Path;
-    fn backup_prefix(&self) -> &'static str;
-    fn max_backups(&self) -> Option<usize>;
-    fn tmp_filename(&self) -> &'static str;
-    fn validate_replace(&self, content_b64: &str) -> Result<String, String>;
+/// The persona document an update targets, a closed set of three; each
+/// variant dispatches the common update lifecycle to its own handler.
+enum PersonaHandler<'a> {
+    Soul(&'a soul::SoulHandler),
+    User(&'a user::UserHandler),
+    Identity(&'a identity::IdentityHandler),
+}
+
+impl PersonaHandler<'_> {
+    fn target_name(&self) -> &'static str {
+        match self {
+            Self::Soul(h) => h.target_name(),
+            Self::User(h) => h.target_name(),
+            Self::Identity(h) => h.target_name(),
+        }
+    }
+
+    fn document_path(&self) -> &Path {
+        match self {
+            Self::Soul(h) => h.document_path(),
+            Self::User(h) => h.document_path(),
+            Self::Identity(h) => h.document_path(),
+        }
+    }
+
+    fn backup_dir(&self) -> &Path {
+        match self {
+            Self::Soul(h) => h.backup_dir(),
+            Self::User(h) => h.backup_dir(),
+            Self::Identity(h) => h.backup_dir(),
+        }
+    }
+
+    fn backup_prefix(&self) -> &'static str {
+        match self {
+            Self::Soul(h) => h.backup_prefix(),
+            Self::User(h) => h.backup_prefix(),
+            Self::Identity(h) => h.backup_prefix(),
+        }
+    }
+
+    fn max_backups(&self) -> Option<usize> {
+        match self {
+            Self::Soul(h) => h.max_backups(),
+            Self::User(h) => h.max_backups(),
+            Self::Identity(h) => h.max_backups(),
+        }
+    }
+
+    fn tmp_filename(&self) -> &'static str {
+        match self {
+            Self::Soul(h) => h.tmp_filename(),
+            Self::User(h) => h.tmp_filename(),
+            Self::Identity(h) => h.tmp_filename(),
+        }
+    }
+
+    fn validate_replace(&self, content_b64: &str) -> Result<String, String> {
+        match self {
+            Self::Soul(h) => h.validate_replace(content_b64),
+            Self::User(h) => h.validate_replace(content_b64),
+            Self::Identity(h) => h.validate_replace(content_b64),
+        }
+    }
+
     async fn validate_sections(
         &self,
         sections: &serde_json::Value,
-    ) -> Result<(String, Option<Vec<String>>), String>;
+    ) -> Result<(String, Option<Vec<String>>), String> {
+        match self {
+            Self::Soul(h) => h.validate_sections(sections).await,
+            Self::User(h) => h.validate_sections(sections).await,
+            Self::Identity(h) => h.validate_sections(sections).await,
+        }
+    }
+
     fn publish_event(
         &self,
         mode: &str,
         hash: &str,
         backup_path: &Option<String>,
         modified_sections: Option<Vec<String>>,
-    );
+    ) {
+        match self {
+            Self::Soul(h) => h.publish_event(mode, hash, backup_path, modified_sections),
+            Self::User(h) => h.publish_event(mode, hash, backup_path, modified_sections),
+            Self::Identity(h) => h.publish_event(mode, hash, backup_path, modified_sections),
+        }
+    }
 }
 
 struct PersonaUpdateTool {
@@ -79,10 +147,10 @@ impl BuiltInTool for PersonaUpdateTool {
             .and_then(|v| v.as_str())
             .ok_or("Missing required parameter: target (\"soul\", \"user\", or \"identity\")")?;
 
-        let handler: &dyn PersonaHandler = match target {
-            "soul" => &self.soul,
-            "user" => &self.user,
-            "identity" => &self.identity,
+        let handler = match target {
+            "soul" => PersonaHandler::Soul(&self.soul),
+            "user" => PersonaHandler::User(&self.user),
+            "identity" => PersonaHandler::Identity(&self.identity),
             other => {
                 return Err(format!(
                     "Invalid target '{}'. Must be \"soul\", \"user\", or \"identity\".",

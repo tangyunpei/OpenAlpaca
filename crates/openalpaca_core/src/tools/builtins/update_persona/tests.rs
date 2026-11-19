@@ -65,6 +65,31 @@ Remember everything.
 
 // --- Dispatch tests ---
 
+/// Each target's `PersonaHandler` variant reaches its own handler (M55b: an
+/// enum over the closed set of three, not a `&dyn` trait object).
+#[test]
+fn each_target_variant_dispatches_to_its_handler() {
+    let (tool, dir) = make_persona_tool();
+    let cases = [
+        (PersonaHandler::Soul(&tool.soul), "soul", "SOUL", "SOUL.md"),
+        (PersonaHandler::User(&tool.user), "user", "USER", "USER.md"),
+        (
+            PersonaHandler::Identity(&tool.identity),
+            "identity",
+            "IDENTITY",
+            "IDENTITY.md",
+        ),
+    ];
+    for (handler, name, prefix, file) in cases {
+        assert_eq!(handler.target_name(), name);
+        assert_eq!(handler.backup_prefix(), prefix);
+        assert_eq!(handler.tmp_filename(), format!(".{file}.tmp"));
+        assert_eq!(handler.document_path(), dir.path().join(file));
+        assert_eq!(handler.backup_dir(), dir.path().join("backups"));
+        assert_eq!(handler.max_backups(), None);
+    }
+}
+
 #[tokio::test]
 async fn test_missing_target_returns_error() {
     let (tool, _dir) = make_persona_tool();
