@@ -162,7 +162,7 @@ mod tests {
 
     use super::{
         DynPluginAgentExecutor, DynPluginSkillExecutor, DynPluginToolExecutor,
-        DynToolCallbackExecutor, PluginToolExecutor, ToolCallbackExecutor,
+        DynToolCallbackExecutor, PluginSkillExecutor, PluginToolExecutor, ToolCallbackExecutor,
     };
 
     /// Compiles only for a `Send` value: applied to an unpolled future.
@@ -201,11 +201,21 @@ mod tests {
     }
 
     /// A type-erased skill executor is held in the skill catalog's
-    /// `SkillSource::Plugin` and invoked from spawned turns.
+    /// `SkillSource::Plugin` and invoked from spawned turns; its method's
+    /// declared `+ Send` is held as for `PluginToolExecutor`.
     #[test]
     fn a_held_plugin_skill_executor_is_send_and_sync() {
         fn send_and_sync<T: Send + Sync + ?Sized>() {}
         send_and_sync::<Arc<DynPluginSkillExecutor<'static>>>();
+
+        fn futures_are_send<E: PluginSkillExecutor + ?Sized>(
+            e: &E,
+            context: &Value,
+            tools: &DynToolCallbackExecutor<'_>,
+        ) {
+            is_send(&e.invoke("q", context, tools));
+        }
+        let _ = futures_are_send::<DynPluginSkillExecutor<'static>>;
     }
 
     /// A type-erased agent executor is held in a plugin template's
