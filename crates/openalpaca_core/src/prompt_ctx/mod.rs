@@ -11,4 +11,4 @@ pub use section::{
 };
 pub use manager::ContextManager;
 pub use package::{AgentSummary, ContextPackage, HandoffContext, PackageSection, PackageSectionKind};
-pub use sources::{ContextRequest, ContextSource, ExecutionPath};
+pub use sources::{ContextRequest, ContextSource, DynContextSource, ExecutionPath};

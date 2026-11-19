@@ -52,7 +52,7 @@ use crate::middleware::bootstrap::BootstrapDocument;
 use crate::middleware::identity::IdentityDocument;
 use crate::middleware::prompt::SystemPersona;
 use crate::middleware::user::UserDocument;
-use crate::prompt_ctx::ContextManager;
+use crate::prompt_ctx::{ContextManager, DynContextSource};
 use crate::runner::LoopConfig;
 use crate::security::gate::SecurityGate;
 use crate::security::policy::Principal;
@@ -371,18 +371,20 @@ impl Orchestrator {
         let background = Arc::new(BackgroundJobs::new());
 
         let context_manager = Arc::new(if db.is_some() {
-            let sources: Vec<Box<dyn crate::prompt_ctx::sources::ContextSource>> = vec![
-                Box::new(crate::prompt_ctx::sources::memory::MemorySource::new(
+            let sources: Vec<Box<DynContextSource<'static>>> = vec![
+                DynContextSource::new_box(crate::prompt_ctx::sources::memory::MemorySource::new(
                     memory_service.clone(),
                     daemon_config.clone(),
                 )),
-                Box::new(
+                DynContextSource::new_box(
                     crate::prompt_ctx::sources::conversation::ConversationSource::new(),
                 ),
                 // The user profile is not a source: it is the persona layer's
                 // own block, injected once per turn (plan 3.3, design §5).
-                Box::new(crate::prompt_ctx::sources::skill::SkillContextSource::new()),
-                Box::new(
+                DynContextSource::new_box(
+                    crate::prompt_ctx::sources::skill::SkillContextSource::new(),
+                ),
+                DynContextSource::new_box(
                     crate::prompt_ctx::sources::workspace::WorkspaceSource::new(),
                 ),
             ];
