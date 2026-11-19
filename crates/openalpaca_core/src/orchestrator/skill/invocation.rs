@@ -28,6 +28,7 @@ use crate::security::sandbox::SandboxPolicy;
 use crate::tools::builtins::ScriptToolBuiltIn;
 use crate::tools::registry::{RegisteredTool, ToolBackend, ToolContext};
 use chrono::Utc;
+use openalpaca_api::plugin_traits::{DynPluginSkillExecutor, PluginSkillExecutor};
 use openalpaca_llm::{ChatMessage, ToolChoice};
 use openalpaca_storage::repository::LlmUsageRepository;
 use std::sync::Arc;
@@ -1228,7 +1229,7 @@ impl Orchestrator {
         source: &str,
         skill_name: &str,
         plugin_id: &str,
-        executor: Arc<dyn openalpaca_api::plugin_traits::PluginSkillExecutor>,
+        executor: Arc<DynPluginSkillExecutor<'static>>,
         query: &str,
         lane_key: &str,
         // R-T27 — the session the gateway resolved this turn into

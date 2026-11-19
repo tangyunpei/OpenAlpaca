@@ -532,7 +532,6 @@ async fn test_concurrent_register_plugin_skill() {
     struct MockSkillExecutor {
         id: String,
     }
-    #[async_trait::async_trait]
     impl PluginSkillExecutor for MockSkillExecutor {
         async fn invoke(
             &self,
@@ -602,7 +601,6 @@ async fn test_plugin_skill_registration_lifecycle() {
     struct MockSkillExecutor {
         id: String,
     }
-    #[async_trait::async_trait]
     impl PluginSkillExecutor for MockSkillExecutor {
         async fn invoke(
             &self,
@@ -692,7 +690,6 @@ async fn test_plugin_skill_registration_lifecycle() {
 
 struct UninstallStubExecutor;
 
-#[async_trait::async_trait]
 impl openalpaca_api::plugin_traits::PluginSkillExecutor for UninstallStubExecutor {
     async fn invoke(
         &self,

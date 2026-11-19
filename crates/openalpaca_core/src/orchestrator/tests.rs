@@ -2699,7 +2699,6 @@ async fn test_plugin_skill_invoked_via_executor_with_sandboxed_tool_callback() {
     struct StubSkillExecutor {
         received_query: std::sync::Mutex<Option<String>>,
     }
-    #[async_trait]
     impl PluginSkillExecutor for StubSkillExecutor {
         async fn invoke(
             &self,
@@ -4821,7 +4820,6 @@ async fn a_withdrawn_plugin_skill_is_attributed_to_its_plugin_on_slash() {
 
 struct TombstoneStubExecutor;
 
-#[async_trait]
 impl openalpaca_api::plugin_traits::PluginSkillExecutor for TombstoneStubExecutor {
     async fn invoke(
         &self,
@@ -7234,7 +7232,6 @@ async fn a_plugin_skills_turn_reports_the_attachment_skipped() {
     use openalpaca_api::plugin_traits::{DynToolCallbackExecutor, PluginSkillExecutor};
 
     struct EchoPluginSkill;
-    #[async_trait::async_trait]
     impl PluginSkillExecutor for EchoPluginSkill {
         async fn invoke(
             &self,

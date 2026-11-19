@@ -133,7 +133,6 @@ struct StubPluginSkill {
     outcome: Arc<Mutex<Option<Result<String, String>>>>,
 }
 
-#[async_trait::async_trait]
 impl openalpaca_api::plugin_traits::PluginSkillExecutor for StubPluginSkill {
     async fn invoke(
         &self,
@@ -213,7 +212,7 @@ async fn run_plugin_skill_as(
         "cli",
         "acme-search",
         "acme",
-        stub,
+        openalpaca_api::plugin_traits::DynPluginSkillExecutor::from_arc(stub),
         "go",
         "test:cli",
         None,
@@ -614,7 +613,6 @@ struct SendsArguments {
     outcome: Arc<Mutex<Option<Result<String, String>>>>,
 }
 
-#[async_trait::async_trait]
 impl openalpaca_api::plugin_traits::PluginSkillExecutor for SendsArguments {
     async fn invoke(
         &self,
@@ -696,7 +694,7 @@ async fn a_plugin_skills_json_string_tool_call_reaches_the_tool_as_its_object() 
         "cli",
         "acme-search",
         "acme",
-        stub.clone(),
+        openalpaca_api::plugin_traits::DynPluginSkillExecutor::from_arc(stub.clone()),
         "go",
         "test:cli",
         None,

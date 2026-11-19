@@ -1,6 +1,5 @@
 use std::sync::Arc;
 
-use async_trait::async_trait;
 use openalpaca_api::plugin_traits::{
     DynToolCallbackExecutor, PluginSkillExecutor, ToolCallbackExecutor,
 };
@@ -53,7 +52,6 @@ impl PluginSkillBridge {
     }
 }
 
-#[async_trait]
 impl PluginSkillExecutor for PluginSkillBridge {
     async fn invoke(
         &self,

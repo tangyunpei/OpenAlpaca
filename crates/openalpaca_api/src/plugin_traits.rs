@@ -78,16 +78,21 @@ pub trait ToolCallbackExecutor: Send + Sync {
 /// Trait for executing skills via a plugin subprocess.
 /// The skill/invoke RPC may request tool callbacks, forming a loop until
 /// the skill returns a final result with no tool_calls.
-#[async_trait]
+///
+/// Its method returns `impl Future + Send`, so an implementor writes plain
+/// `async fn`; the skill catalog holds a plugin's executor as
+/// [`DynPluginSkillExecutor`] (`Arc<DynPluginSkillExecutor<'static>>`),
+/// built with `DynPluginSkillExecutor::from_arc`.
+#[dynosaur::dynosaur(pub DynPluginSkillExecutor = dyn(box) PluginSkillExecutor)]
 pub trait PluginSkillExecutor: Send + Sync {
     /// Invoke the skill with a query.
     /// The executor handles the tool callback loop internally.
-    async fn invoke(
+    fn invoke(
         &self,
         query: &str,
         context: &Value,
         tool_executor: &DynToolCallbackExecutor<'_>,
-    ) -> Result<String, String>;
+    ) -> impl Future<Output = Result<String, String>> + Send;
 
     fn plugin_id(&self) -> &str;
     fn skill_id(&self) -> &str;
@@ -148,7 +153,7 @@ pub trait PluginAgentExecutor: Send + Sync {
 mod tests {
     use std::sync::Arc;
 
-    use super::{DynPluginToolExecutor, DynToolCallbackExecutor};
+    use super::{DynPluginSkillExecutor, DynPluginToolExecutor, DynToolCallbackExecutor};
 
     /// A type-erased executor crosses tasks: the registry holds it in
     /// `ToolBackend::Plugin` and calls it from spawned work.
@@ -164,5 +169,13 @@ mod tests {
     fn a_held_tool_callback_executor_is_send_and_sync() {
         fn send_and_sync<T: Send + Sync + ?Sized>() {}
         send_and_sync::<Arc<DynToolCallbackExecutor<'static>>>();
+    }
+
+    /// A type-erased skill executor is held in the skill catalog's
+    /// `SkillSource::Plugin` and invoked from spawned turns.
+    #[test]
+    fn a_held_plugin_skill_executor_is_send_and_sync() {
+        fn send_and_sync<T: Send + Sync + ?Sized>() {}
+        send_and_sync::<Arc<DynPluginSkillExecutor<'static>>>();
     }
 }

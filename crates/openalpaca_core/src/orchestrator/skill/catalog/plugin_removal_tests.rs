@@ -8,7 +8,6 @@ use tempfile::TempDir;
 
 struct StubExecutor;
 
-#[async_trait::async_trait]
 impl openalpaca_api::plugin_traits::PluginSkillExecutor for StubExecutor {
     async fn invoke(
         &self,

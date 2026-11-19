@@ -28,7 +28,6 @@ struct SkillBridge {
     skill: &'static str,
 }
 
-#[async_trait::async_trait]
 impl openalpaca_api::plugin_traits::PluginSkillExecutor for SkillBridge {
     async fn invoke(
         &self,

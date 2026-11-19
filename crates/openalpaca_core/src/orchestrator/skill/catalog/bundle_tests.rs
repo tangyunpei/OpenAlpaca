@@ -566,7 +566,6 @@ fn the_start_line_names_the_pack_and_every_set_aside_copy() {
 #[test]
 fn a_plugin_skill_over_a_bundled_key_gives_it_back_when_it_goes() {
     struct Stub;
-    #[async_trait::async_trait]
     impl openalpaca_api::plugin_traits::PluginSkillExecutor for Stub {
         async fn invoke(
             &self,

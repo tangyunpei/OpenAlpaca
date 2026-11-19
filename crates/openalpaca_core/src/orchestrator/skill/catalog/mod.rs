@@ -28,6 +28,7 @@ use crate::middleware::skill::{
 };
 use crate::orchestrator::intent::is_reserved_slash_name;
 use crate::tools::builtins::SkillRoots;
+use openalpaca_api::plugin_traits::{DynPluginSkillExecutor, PluginSkillExecutor};
 use openalpaca_storage::resolve_skill_key;
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
@@ -41,7 +42,7 @@ pub enum SkillSource {
     /// Plugin-backed skill (executed via PluginSkillExecutor)
     Plugin {
         plugin_id: String,
-        executor: Arc<dyn openalpaca_api::plugin_traits::PluginSkillExecutor>,
+        executor: Arc<DynPluginSkillExecutor<'static>>,
     },
 }
 
@@ -1299,9 +1300,10 @@ impl SkillCatalog {
         &self,
         skill_id: String,
         frontmatter: SkillFrontmatter,
-        executor: Arc<dyn openalpaca_api::plugin_traits::PluginSkillExecutor>,
+        executor: Arc<impl PluginSkillExecutor + 'static>,
         plugin_id: String,
     ) {
+        let executor = DynPluginSkillExecutor::from_arc(executor);
         let skill_id = skill_id.to_lowercase();
         warn_reserved_slash_claims(&skill_id, &frontmatter);
         let slash_cmd = frontmatter.invoke.slash.clone();
