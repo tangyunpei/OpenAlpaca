@@ -740,7 +740,7 @@ async fn run_agentic_loop_core(
 
                 let compactor = crate::prompt_ctx::compaction::GraduatedCompactor::new(
                     budget,
-                    &backend,
+                    crate::context_budget::compaction::DynSummarizer::from_ref(&backend),
                     config.writer.max_chars,
                     config.kept_head,
                 );

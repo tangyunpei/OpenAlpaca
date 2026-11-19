@@ -157,11 +157,10 @@ fn test_compaction_tier_thresholds() {
 }
 
 // ── Compaction tests ──────────────────────────────────────────────
-use super::compaction::{CompactionPipeline, DEFAULT_KEPT_HEAD, Summarizer};
+use super::compaction::{CompactionPipeline, DEFAULT_KEPT_HEAD, DynSummarizer, Summarizer};
 use crate::orchestrator::working_state::{
     BLOCK_PREFIX, PREVIOUS_BLOCK_PREFIX, VERSION, WorkingState,
 };
-use async_trait::async_trait;
 use openalpaca_llm::ChatMessage;
 
 #[test]
@@ -223,7 +222,6 @@ impl MockSummarizer {
     }
 }
 
-#[async_trait]
 impl Summarizer for MockSummarizer {
     async fn summarize(
         &self,
@@ -236,6 +234,29 @@ impl Summarizer for MockSummarizer {
         ));
         Ok(state(&self.topic))
     }
+}
+
+/// A summarizer reaches the compaction pipeline as a `&DynSummarizer`
+/// borrowed across the loop's awaits, in spawned work.
+///
+/// The supertraits alone make the held form `Send + Sync`, so the test
+/// also holds `summarize`'s declared `+ Send`: the generic body sees only
+/// the trait's declaration, and naming it at the Dyn compiles it.
+#[test]
+fn a_held_summarizer_is_send_and_sync() {
+    fn send_and_sync<T: Send + Sync + ?Sized>() {}
+    send_and_sync::<std::sync::Arc<DynSummarizer<'static>>>();
+    send_and_sync::<&DynSummarizer<'static>>();
+
+    fn is_send<T: Send>(_: &T) {}
+    fn futures_are_send<S: Summarizer + ?Sized>(
+        summarizer: &S,
+        previous: Option<&WorkingState>,
+        messages: &[ChatMessage],
+    ) {
+        is_send(&summarizer.summarize(previous, messages));
+    }
+    let _ = futures_are_send::<DynSummarizer<'static>>;
 }
 
 #[tokio::test]
@@ -257,7 +278,7 @@ async fn test_summarize_replaces_older_messages() {
         2,
         None,
         &[],
-        &summarizer,
+        DynSummarizer::from_ref(&summarizer),
         4000,
     )
     .await
@@ -293,7 +314,7 @@ async fn test_summarize_preserves_recent_when_nothing_to_summarize() {
         4,
         None,
         &[],
-        &summarizer,
+        DynSummarizer::from_ref(&summarizer),
         4000,
     )
     .await
@@ -343,7 +364,7 @@ async fn one_state_block_is_left_after_compaction_wherever_the_previous_stood() 
             4,
             Some(&previous),
             &[],
-            &summarizer,
+            DynSummarizer::from_ref(&summarizer),
             4000,
         )
         .await;
@@ -423,7 +444,7 @@ async fn the_writer_never_reads_the_previous_conversations_block() {
             4,
             None,
             &[],
-            &summarizer,
+            DynSummarizer::from_ref(&summarizer),
             4000,
         )
         .await
@@ -472,7 +493,7 @@ async fn the_rows_behind_the_list_are_read_first_and_never_alone() {
         2,
         None,
         &behind,
-        &summarizer,
+        DynSummarizer::from_ref(&summarizer),
         4000,
     )
     .await
@@ -497,7 +518,7 @@ async fn the_rows_behind_the_list_are_read_first_and_never_alone() {
         4,
         None,
         &behind,
-        &summarizer,
+        DynSummarizer::from_ref(&summarizer),
         4000,
     )
     .await
@@ -526,9 +547,16 @@ async fn test_compaction_full_pipeline() {
 
     let summarizer = MockSummarizer::new("Rust discussion");
 
-    let result =
-        CompactionPipeline::compact(messages, DEFAULT_KEPT_HEAD, 2, None, &[], &summarizer, 4000)
-            .await;
+    let result = CompactionPipeline::compact(
+        messages,
+        DEFAULT_KEPT_HEAD,
+        2,
+        None,
+        &[],
+        DynSummarizer::from_ref(&summarizer),
+        4000,
+    )
+    .await;
     assert!(result.compacted_messages.len() < 10);
     // The social pair went before the summary, so the boundary is counted in
     // the list as handed: 10 messages less the 2 kept.
@@ -541,7 +569,6 @@ async fn test_compaction_full_pipeline() {
 async fn test_compaction_fallback_on_summarizer_failure() {
     struct FailingSummarizer;
 
-    #[async_trait]
     impl Summarizer for FailingSummarizer {
         async fn summarize(
             &self,
@@ -571,7 +598,7 @@ async fn test_compaction_fallback_on_summarizer_failure() {
         2,
         None,
         &[],
-        &FailingSummarizer,
+        DynSummarizer::from_ref(&FailingSummarizer),
         4000,
     )
     .await;
@@ -606,7 +633,7 @@ async fn test_compaction_preserves_recent() {
         2,
         None,
         &[],
-        &MockSummarizer::new("summary"),
+        DynSummarizer::from_ref(&MockSummarizer::new("summary")),
         4000,
     )
     .await;
@@ -623,7 +650,6 @@ async fn test_compaction_preserves_recent() {
 #[tokio::test]
 async fn every_phase_keeps_a_longer_kept_head() {
     struct FailingSummarizer;
-    #[async_trait]
     impl Summarizer for FailingSummarizer {
         async fn summarize(
             &self,
@@ -657,11 +683,18 @@ async fn every_phase_keeps_a_longer_kept_head() {
     assert!(!discarded.iter().any(|m| m.content == "thanks"));
 
     let summarizer = MockSummarizer::new("Weighing");
-    let (summarised, _) =
-        CompactionPipeline::summarize_older(messages.clone(), 3, 2, None, &[], &summarizer, 4000)
-            .await
-            .unwrap()
-            .expect("older rows to fold");
+    let (summarised, _) = CompactionPipeline::summarize_older(
+        messages.clone(),
+        3,
+        2,
+        None,
+        &[],
+        DynSummarizer::from_ref(&summarizer),
+        4000,
+    )
+    .await
+    .unwrap()
+    .expect("older rows to fold");
     assert_eq!(kept(&summarised), want, "the summary");
     assert!(summarised[3].content.starts_with(BLOCK_PREFIX));
     let read = summarizer.seen.lock().unwrap()[0].1.clone();
@@ -670,9 +703,16 @@ async fn every_phase_keeps_a_longer_kept_head() {
         "the writer was handed the objective: {read:?}"
     );
 
-    let fallback =
-        CompactionPipeline::compact(messages.clone(), 3, 2, None, &[], &FailingSummarizer, 4000)
-            .await;
+    let fallback = CompactionPipeline::compact(
+        messages.clone(),
+        3,
+        2,
+        None,
+        &[],
+        DynSummarizer::from_ref(&FailingSummarizer),
+        4000,
+    )
+    .await;
     assert_eq!(kept(&fallback.compacted_messages), want, "the heuristic");
     assert!(
         fallback.compacted_messages[3]
@@ -686,7 +726,7 @@ async fn every_phase_keeps_a_longer_kept_head() {
         2,
         None,
         &[],
-        &FailingSummarizer,
+        DynSummarizer::from_ref(&FailingSummarizer),
         4000,
     )
     .await;

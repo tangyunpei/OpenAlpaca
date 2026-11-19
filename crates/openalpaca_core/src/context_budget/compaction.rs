@@ -1,19 +1,18 @@
 use crate::orchestrator::working_state::{BLOCK_PREFIX, PREVIOUS_BLOCK_PREFIX, WorkingState};
 use crate::utils::social::is_social_phrase;
-use async_trait::async_trait;
 use openalpaca_llm::{ChatMessage, Role};
 use tracing;
 
 /// The working-state writer at compaction (mockable in tests): the state
 /// after `messages`, folded into `previous` — one model call (design 11
 /// §3.3).
-#[async_trait]
+#[dynosaur::dynosaur(pub DynSummarizer = dyn(box) Summarizer)]
 pub trait Summarizer: Send + Sync {
-    async fn summarize(
+    fn summarize(
         &self,
         previous: Option<&WorkingState>,
         messages: &[ChatMessage],
-    ) -> Result<WorkingState, String>;
+    ) -> impl Future<Output = Result<WorkingState, String>> + Send;
 }
 
 /// The messages at the head of a list every compaction tier keeps by
@@ -62,7 +61,7 @@ impl CompactionPipeline {
         min_recent: usize,
         previous: Option<&WorkingState>,
         behind: &[ChatMessage],
-        summarizer: &dyn Summarizer,
+        summarizer: &DynSummarizer<'_>,
         max_chars: usize,
     ) -> CompactionResult {
         let messages_before = messages.len();
@@ -192,7 +191,7 @@ impl CompactionPipeline {
         min_recent: usize,
         previous: Option<&WorkingState>,
         behind: &[ChatMessage],
-        summarizer: &dyn Summarizer,
+        summarizer: &DynSummarizer<'_>,
         max_chars: usize,
     ) -> Result<Option<(Vec<ChatMessage>, WorkingState)>, String> {
         if messages.len() <= head + min_recent {

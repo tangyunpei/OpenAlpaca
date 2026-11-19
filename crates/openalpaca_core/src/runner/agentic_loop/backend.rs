@@ -318,7 +318,6 @@ fn estimate_cost(input_tokens: u32, output_tokens: u32, input_rate: f64, output_
 /// loop has a store (`WriterConfig::db`), as the turn end's is. A spent
 /// ceiling, a failed call and an answer that is not a state are all an
 /// `Err`: the pipeline falls back to its heuristic.
-#[async_trait::async_trait]
 impl<'a> crate::context_budget::compaction::Summarizer for LlmBackend<'a> {
     async fn summarize(
         &self,

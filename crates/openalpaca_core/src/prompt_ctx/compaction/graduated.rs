@@ -1,5 +1,5 @@
 use crate::context_budget::{CompactionTier, ContextBudgetManager};
-use crate::context_budget::compaction::Summarizer;
+use crate::context_budget::compaction::DynSummarizer;
 use crate::orchestrator::working_state::WorkingState;
 use openalpaca_llm::{ChatMessage, ContentPart, Role};
 
@@ -32,7 +32,7 @@ impl CompactionReport {
 
 pub struct GraduatedCompactor<'a> {
     budget: &'a ContextBudgetManager,
-    summarizer: &'a dyn Summarizer,
+    summarizer: &'a DynSummarizer<'a>,
     /// The rendered working state's limit (`summary_max_chars`).
     max_chars: usize,
     /// The messages at the head of the list no tier touches
@@ -43,7 +43,7 @@ pub struct GraduatedCompactor<'a> {
 impl<'a> GraduatedCompactor<'a> {
     pub fn new(
         budget: &'a ContextBudgetManager,
-        summarizer: &'a dyn Summarizer,
+        summarizer: &'a DynSummarizer<'a>,
         max_chars: usize,
         kept_head: usize,
     ) -> Self {
@@ -215,11 +215,11 @@ pub fn drop_multimedia(messages: &mut [ChatMessage]) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::context_budget::compaction::Summarizer;
     use openalpaca_llm::ImageSource;
 
     /// A writer that answers one fixed state, whatever it is handed.
     struct StateSummarizer;
-    #[async_trait::async_trait]
     impl Summarizer for StateSummarizer {
         async fn summarize(
             &self,
@@ -269,7 +269,7 @@ mod tests {
 
         let compactor = GraduatedCompactor::new(
             &budget,
-            &StateSummarizer,
+            DynSummarizer::from_ref(&StateSummarizer),
             4000,
             crate::context_budget::compaction::DEFAULT_KEPT_HEAD,
         );
@@ -336,7 +336,7 @@ mod tests {
 
         let compactor = GraduatedCompactor::new(
             &budget,
-            &StateSummarizer,
+            DynSummarizer::from_ref(&StateSummarizer),
             4000,
             crate::context_budget::compaction::DEFAULT_KEPT_HEAD,
         );
@@ -382,7 +382,7 @@ mod tests {
 
         let compactor = GraduatedCompactor::new(
             &budget,
-            &StateSummarizer,
+            DynSummarizer::from_ref(&StateSummarizer),
             4000,
             crate::context_budget::compaction::DEFAULT_KEPT_HEAD,
         );
