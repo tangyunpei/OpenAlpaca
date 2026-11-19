@@ -344,6 +344,13 @@ pub enum ToolBackend {
         /// so a snapshot holding a sealed client from a previous load is
         /// refused as `Stale` rather than talking to a dead transport.
         generation: u64,
+        /// The tool's declared `outputSchema` (MCP `Tool.output_schema`), as
+        /// the server listed it; `None` when it declared none. Served by
+        /// `GET /v1/tools` and never placed in the provider's tool
+        /// definition (M14). Read at the tool-list load only: the refresh
+        /// compares names, so a server changing it under a live name keeps
+        /// the old one until a reload or reconnect.
+        output_schema: Option<Arc<serde_json::Map<String, serde_json::Value>>>,
     },
 }
 
@@ -919,6 +926,7 @@ impl ToolRegistry {
                 remote_name,
                 server_name,
                 generation,
+                output_schema: _,
             } => {
                 match ctx {
                     Some(ctx) => tracing::debug!(
@@ -948,7 +956,10 @@ impl ToolRegistry {
                     None => client.call_tool(remote_name, arguments.clone(), None).await,
                 };
                 match called {
-                    Ok(result) => crate::tools::mcp::bridge::serialize_call_result(result),
+                    Ok(result) => crate::tools::mcp::bridge::serialize_call_result(
+                        result,
+                        &crate::tools::mcp::bridge::SerializeOptions::default(),
+                    ),
                     Err(e) => {
                         tracing::warn!(
                             server = %server_name,

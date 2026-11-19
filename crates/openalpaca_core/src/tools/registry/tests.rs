@@ -1988,6 +1988,7 @@ fn mcp_backend() -> ToolBackend {
         remote_name: "echo".to_string(),
         server_name: "srv".to_string(),
         generation: 0,
+        output_schema: None,
     }
 }
 
@@ -2076,6 +2077,7 @@ fn mcp_tool(name: &str, server: &str, generation: u64) -> RegisteredTool {
         remote_name: "echo".to_string(),
         server_name: server.to_string(),
         generation,
+        output_schema: None,
     };
     tool.author = format!("mcp:{server}");
     tool

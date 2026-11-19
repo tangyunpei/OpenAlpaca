@@ -76,6 +76,7 @@ fn with_github(registry: &ToolRegistry, parameters: serde_json::Value) -> Extens
                 remote_name: "create_issue".to_string(),
                 server_name: "github".to_string(),
                 generation,
+                output_schema: None,
             },
         ))
         .unwrap();

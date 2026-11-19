@@ -1079,6 +1079,12 @@ export interface ToolCatalogEntry {
   invocations_today: number;
   version: string;
   author: string;
+  /**
+   * An MCP tool's declared `outputSchema`, as its server listed it (M14);
+   * `null` when it declared none and for every other source. Opaque: a JSON
+   * Schema the GUI does not read into.
+   */
+  output_schema: Record<string, unknown> | null;
 }
 
 /**

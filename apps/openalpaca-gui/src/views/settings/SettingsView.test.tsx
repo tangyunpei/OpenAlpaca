@@ -203,6 +203,7 @@ vi.mock("@/hooks/useSkills", async (importOriginal) => ({
         invocations_today: 4,
         version: "1.0.0",
         author: "builtin",
+        output_schema: null,
       },
       {
         name: "github__create_issue",
@@ -214,6 +215,7 @@ vi.mock("@/hooks/useSkills", async (importOriginal) => ({
         invocations_today: 12,
         version: "1.4.0",
         author: "mcp:github",
+        output_schema: null,
       },
     ]),
   useSkillHealth: () =>

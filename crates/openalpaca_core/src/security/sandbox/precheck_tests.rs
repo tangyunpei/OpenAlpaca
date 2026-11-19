@@ -222,6 +222,7 @@ async fn a_disabled_extensions_tool_raises_no_card() {
                 remote_name: "create_issue".to_string(),
                 server_name: "github".to_string(),
                 generation,
+                output_schema: None,
             },
         ))
         .unwrap();

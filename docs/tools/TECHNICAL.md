@@ -287,6 +287,10 @@ pub enum ToolBackend {
         remote_name: String,                  // Tool name on the server
         server_name: String,
         generation: u64,                      // Which load of the server
+        output_schema: Option<Arc<serde_json::Map<String, serde_json::Value>>>,
+                                              // Its declared outputSchema, served
+                                              // by GET /v1/tools, never sent to
+                                              // a provider
     },
 }
 ```
@@ -1122,20 +1126,29 @@ depends on the registry dropping the last reference.
   `<server>__<tool>` in their capabilities resolve the tool through the
   registry's capability index (annotation-derived virtual capabilities
   still apply).
-- `serialize_call_result()` flattens a `CallToolResult` into
-  `Result<String, String>`: text blocks are concatenated with newlines;
-  `is_error = true` becomes a tool error.
+- `serialize_call_result(result, &SerializeOptions::default())` flattens a
+  `CallToolResult` into `Result<String, String>`: blocks are concatenated
+  with newlines — a text block as its text, a resource link as
+  `[resource link: <label> — <uri>]` (the label its `name`, else its
+  `title`; the URI alone when both are empty); then a `structuredContent`
+  value is appended pretty-printed unless a text block already parses to
+  the same value (an rmcp-built server mirrors it as compact text), and a
+  `null` one is read as absent; `is_error = true` becomes a tool error.
+- The tool's declared `outputSchema` is carried on `ToolBackend::Mcp` and
+  served by `GET /v1/tools` as `output_schema` (`null` when none); it never
+  enters the provider's tool definition, and nothing validates a result
+  against it yet.
 
 ### Limitations (current state)
 
-- **Non-text content is dropped**: image/audio/resource blocks in tool
-  results are replaced with a bracketed placeholder — they are not
-  surfaced to the model.
-- **Structured content is dropped**: `serialize_call_result()` reads only
-  the content blocks, so a successful result carrying only
-  `structuredContent` reaches the loop as `""` and the model as
-  `(<server>__<tool> completed with no output)` (N-TOOL-6); M14
-  (programme step 8) serializes it.
+- **Non-text content is dropped**: image, audio and embedded-resource
+  blocks in tool results are replaced with a bracketed placeholder — they
+  are not surfaced to the model (a resource link prints its label and URI,
+  above).
+- **A live tool's definition is read once per load**: the tool-list
+  refresh compares names only, so a server that changes a listed tool's
+  `outputSchema`, input schema or description under the same name keeps
+  the old one until a reload or reconnect.
 - **MCP resources and prompts are not implemented**: the client has no
   resource or prompt methods at all — it imports tools and nothing else.
   A future phase would add the methods rather than fill in placeholders,

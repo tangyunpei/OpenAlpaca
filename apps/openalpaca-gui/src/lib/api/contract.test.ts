@@ -1527,12 +1527,14 @@ const RESPONSES: Record<string, Entry> = {
         invocations_today: "required",
         name: "required",
         origin: "required",
+        output_schema: "required",
         provides_capabilities: "required",
         requires_confirmation: "required",
         source: "required",
         version: "required",
       },
       {
+        output_schema: "opaque",
         origin: shape<Inner<ToolCatalogEntry["origin"]>>(
           {
             enabled: "required",

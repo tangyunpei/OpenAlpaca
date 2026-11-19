@@ -6,11 +6,13 @@
 //!   tool, in the providers' alphabet, and one server's list mapped with its
 //!   collisions resolved (N-MCP-4).
 //! - [`serialize_call_result`] — flatten a `CallToolResult` into the
-//!   `Result<String, String>` shape the rest of the tool-call path consumes.
+//!   `Result<String, String>` shape the rest of the tool-call path consumes,
+//!   under one [`SerializeOptions`].
 
 use std::sync::Arc;
 
-use openalpaca_mcp::{CallToolResult, ContentBlock, McpClient, Tool};
+use openalpaca_mcp::{CallToolResult, ContentBlock, McpClient, Resource, Tool};
+use serde_json::Value;
 
 use crate::tools::registry::{RegisteredTool, ToolBackend};
 
@@ -152,11 +154,15 @@ pub fn rmcp_tool_to_registered(
         input_examples: None,
     };
 
+    // M14: the declared output schema is carried on the backend and served
+    // by `GET /v1/tools`; it never enters the provider's `ToolDefinition`
+    // above (`strict_mode_compatible` stays the rule there).
     let backend = ToolBackend::Mcp {
         client,
         remote_name: remote_name.clone(),
         server_name: server_name.to_string(),
         generation,
+        output_schema: tool.output_schema.clone(),
     };
 
     RegisteredTool {
@@ -175,15 +181,30 @@ pub fn rmcp_tool_to_registered(
     }
 }
 
+/// How [`serialize_call_result`] reads one result. M14 needs nothing from
+/// it yet: it is the one place a later entry adds what the serializer must
+/// know (M85 the by-product sink, M82 the output schema), so the signature
+/// keeps one parameter. Built with `SerializeOptions::default()`.
+#[derive(Debug, Clone, Default)]
+#[non_exhaustive]
+pub struct SerializeOptions {}
+
 /// Convert an rmcp [`CallToolResult`] into the `Result<String, String>` shape
 /// the tool registry hands back to the agentic loop.
 ///
-/// Concatenates text content blocks with newline separators. Non-text blocks
-/// are replaced by a bracketed placeholder so the LLM can see they existed —
-/// P2 doesn't yet surface images/resources/audio back to the model. When
-/// `is_error == Some(true)`, returns `Err(body)` so the tool-call path treats
-/// it as a tool error.
-pub fn serialize_call_result(result: CallToolResult) -> Result<String, String> {
+/// Concatenates content blocks with newline separators: a text block as its
+/// text, a resource link as `[resource link: <label> — <uri>]` (the label is
+/// its `name`, else its `title`; the URI alone when both are empty), an image
+/// or any other block as a bracketed placeholder so the LLM can see it
+/// existed. Then, when `structured_content` holds a value other than JSON
+/// `null` and no text block already parses to that same value (an rmcp-built
+/// server mirrors it as compact text), the value is appended pretty-printed
+/// (M14). When `is_error == Some(true)`, returns `Err(body)` so the tool-call
+/// path treats it as a tool error.
+pub fn serialize_call_result(
+    result: CallToolResult,
+    _options: &SerializeOptions,
+) -> Result<String, String> {
     let mut buf = String::new();
     for content in &result.content {
         if !buf.is_empty() {
@@ -196,16 +217,57 @@ pub fn serialize_call_result(result: CallToolResult) -> Result<String, String> {
                     "[image content omitted — P2 does not yet surface non-text MCP content]",
                 );
             }
+            ContentBlock::ResourceLink(link) => buf.push_str(&resource_link_line(link)),
             other => {
                 buf.push_str(&format!("[non-text content: {}]", content_kind_name(other)));
             }
         }
     }
 
+    // `"structuredContent": null` arrives as `Some(Null)`; it is read as
+    // absent, so N-TOOL-6's line still answers for a result with nothing else.
+    if let Some(value) = result.structured_content.as_ref().filter(|v| !v.is_null())
+        && !mirrored(&result.content, value)
+    {
+        if !buf.is_empty() {
+            buf.push('\n');
+        }
+        // A `Value` always serializes; the compact form is the fallback.
+        buf.push_str(&serde_json::to_string_pretty(value).unwrap_or_else(|_| value.to_string()));
+    }
+
     if result.is_error.unwrap_or(false) {
         return Err(buf);
     }
     Ok(buf)
+}
+
+/// Whether a text block of `content` is a copy of the structured `value`: its
+/// exact compact form (what rmcp's `CallToolResult::structured` writes,
+/// compared as text so a float's re-parse cannot make it differ) or any text
+/// that parses to the same value.
+fn mirrored(content: &[ContentBlock], value: &Value) -> bool {
+    let compact = value.to_string();
+    content.iter().any(|block| match block {
+        ContentBlock::Text(t) => {
+            t.text == compact
+                || serde_json::from_str::<Value>(&t.text).is_ok_and(|parsed| parsed == *value)
+        }
+        _ => false,
+    })
+}
+
+/// `[resource link: <label> — <uri>]`, the label the link's `name`, else its
+/// `title`; `[resource link: <uri>]` when both are empty or absent. `name` is
+/// a required string in MCP, so "absent" can only be empty.
+fn resource_link_line(link: &Resource) -> String {
+    let label = Some(link.name.as_str())
+        .filter(|n| !n.is_empty())
+        .or_else(|| link.title.as_deref().filter(|t| !t.is_empty()));
+    match label {
+        Some(label) => format!("[resource link: {label} — {}]", link.uri),
+        None => format!("[resource link: {}]", link.uri),
+    }
 }
 
 fn content_kind_name(c: &ContentBlock) -> &'static str {
@@ -241,29 +303,195 @@ mod tests {
     #[test]
     fn serialize_text_content_concatenates() {
         let result = CallToolResult::success(vec![text_content("hello"), text_content("world")]);
-        let out = serialize_call_result(result).unwrap();
+        let out = serialize_call_result(result, &SerializeOptions::default()).unwrap();
         assert_eq!(out, "hello\nworld");
     }
 
     #[test]
     fn serialize_is_error_true_returns_err() {
         let result = CallToolResult::error(vec![text_content("boom")]);
-        let err = serialize_call_result(result).unwrap_err();
+        let err = serialize_call_result(result, &SerializeOptions::default()).unwrap_err();
         assert_eq!(err, "boom");
     }
 
     #[test]
     fn serialize_empty_content_returns_ok_empty() {
         let result = CallToolResult::success(vec![]);
-        let out = serialize_call_result(result).unwrap();
+        let out = serialize_call_result(result, &SerializeOptions::default()).unwrap();
         assert_eq!(out, "");
     }
 
     #[test]
     fn serialize_is_error_false_treated_as_ok() {
         let result = CallToolResult::success(vec![text_content("ok")]);
-        let out = serialize_call_result(result).unwrap();
+        let out = serialize_call_result(result, &SerializeOptions::default()).unwrap();
         assert_eq!(out, "ok");
+    }
+
+    fn serialize(result: CallToolResult) -> Result<String, String> {
+        serialize_call_result(result, &SerializeOptions::default())
+    }
+
+    /// A successful result carrying only `structuredContent` (`content`
+    /// defaults to `[]`).
+    fn structured_only(value: Value) -> CallToolResult {
+        let mut result = CallToolResult::default();
+        result.structured_content = Some(value);
+        result
+    }
+
+    /// M14: the data a tool returned only as `structuredContent` reaches the
+    /// model pretty-printed, so N-TOOL-6's "completed with no output" line no
+    /// longer stands in for it.
+    #[test]
+    fn structured_content_alone_reaches_the_model_as_pretty_json() {
+        let value = serde_json::json!({"issue": {"number": 7, "open": true}});
+        let out = serialize(structured_only(value.clone())).unwrap();
+        assert_eq!(out, serde_json::to_string_pretty(&value).unwrap());
+        assert!(
+            crate::session_log::no_output_line("srv__get", &out).is_none(),
+            "a structured-only result is not 'completed with no output': {out}"
+        );
+    }
+
+    /// M14: an rmcp-built server mirrors the value as compact text into
+    /// `content`; the model reads it once, not twice.
+    #[test]
+    fn a_mirrored_structured_value_is_printed_once() {
+        let value = serde_json::json!({"count": 3, "items": ["a", "b"], "ratio": 0.1});
+        let out = serialize(CallToolResult::structured(value.clone())).unwrap();
+        assert_eq!(out, value.to_string());
+    }
+
+    /// M14: a text block that parses to the same value, in any layout,
+    /// counts as the mirror.
+    #[test]
+    fn a_pretty_text_block_of_the_same_value_counts_as_the_mirror() {
+        let value = serde_json::json!({"b": 2, "a": 1});
+        let mut result = structured_only(value.clone());
+        result.content = vec![text_content(&serde_json::to_string_pretty(&value).unwrap())];
+        let out = serialize(result).unwrap();
+        assert_eq!(out, serde_json::to_string_pretty(&value).unwrap());
+    }
+
+    /// M14: a summary in `content` and different data in
+    /// `structuredContent` — the model reads both, the summary first.
+    #[test]
+    fn a_summary_and_a_different_structured_value_are_both_kept() {
+        let value = serde_json::json!({"created": 2});
+        let mut result = structured_only(value.clone());
+        result.content = vec![text_content("Created two issues.")];
+        let out = serialize(result).unwrap();
+        assert_eq!(
+            out,
+            format!(
+                "Created two issues.\n{}",
+                serde_json::to_string_pretty(&value).unwrap()
+            )
+        );
+    }
+
+    /// M14: `structured_error` mirrors too; the error reads the text once and
+    /// the `is_error` mapping is unchanged.
+    #[test]
+    fn a_structured_error_is_an_err_with_its_text_once() {
+        let value = serde_json::json!({"error": "not found"});
+        let err = serialize(CallToolResult::structured_error(value.clone())).unwrap_err();
+        assert_eq!(err, value.to_string());
+    }
+
+    /// M14: `"structuredContent": null` arrives as `Some(Null)` and is read
+    /// as absent — nothing is appended, so N-TOOL-6's line still answers.
+    #[test]
+    fn a_null_structured_value_is_read_as_absent() {
+        let out = serialize(structured_only(Value::Null)).unwrap();
+        assert_eq!(out, "");
+        assert_eq!(
+            crate::session_log::no_output_line("srv__get", &out).as_deref(),
+            Some("(srv__get completed with no output)")
+        );
+
+        let mut result = structured_only(Value::Null);
+        result.content = vec![text_content("done")];
+        assert_eq!(serialize(result).unwrap(), "done");
+    }
+
+    /// M14: a resource link prints its name and URI.
+    #[test]
+    fn a_resource_link_prints_its_name_and_uri() {
+        let link = Resource::new("file:///reports/q3.csv", "q3.csv").with_title("Q3 report");
+        let result = CallToolResult::success(vec![
+            text_content("Here it is:"),
+            ContentBlock::resource_link(link),
+        ]);
+        assert_eq!(
+            serialize(result).unwrap(),
+            "Here it is:\n[resource link: q3.csv — file:///reports/q3.csv]"
+        );
+    }
+
+    /// M14: with an empty name the label is the title.
+    #[test]
+    fn a_resource_link_with_only_a_title_is_labelled_by_it() {
+        let link = Resource::new("file:///reports/q3.csv", "").with_title("Q3 report");
+        let result = CallToolResult::success(vec![ContentBlock::resource_link(link)]);
+        assert_eq!(
+            serialize(result).unwrap(),
+            "[resource link: Q3 report — file:///reports/q3.csv]"
+        );
+    }
+
+    /// M14: with neither a name nor a title (absent or empty), the URI alone.
+    #[test]
+    fn a_resource_link_with_neither_prints_the_uri_alone() {
+        for link in [
+            Resource::new("file:///reports/q3.csv", ""),
+            Resource::new("file:///reports/q3.csv", "").with_title(""),
+        ] {
+            let result = CallToolResult::success(vec![ContentBlock::resource_link(link)]);
+            assert_eq!(
+                serialize(result).unwrap(),
+                "[resource link: file:///reports/q3.csv]"
+            );
+        }
+    }
+
+    /// M14: the declared output schema is carried on the backend.
+    /// Regression guard beside it: the schema never reaches the provider's
+    /// tool definition (green on the parent, which carried it nowhere).
+    #[test]
+    fn the_output_schema_is_carried_on_the_backend_and_not_in_the_definition() {
+        let schema: serde_json::Map<String, Value> = serde_json::from_value(serde_json::json!({
+            "type": "object",
+            "properties": {"number": {"type": "integer"}},
+            "required": ["number"]
+        }))
+        .unwrap();
+        let client = Arc::new(McpClient::disconnected_for_tests("srv"));
+        let tool = Tool::new("get", "Get an issue", serde_json::Map::new())
+            .with_raw_output_schema(Arc::new(schema.clone()));
+        let registered = rmcp_tool_to_registered("srv", "1.0", tool, client, 0);
+        match &registered.backend {
+            ToolBackend::Mcp { output_schema, .. } => {
+                assert_eq!(output_schema.as_deref(), Some(&schema));
+            }
+            _ => panic!("an MCP tool has an MCP backend"),
+        }
+        let definition = serde_json::to_string(&registered.definition).unwrap();
+        assert!(
+            !definition.contains("\"required\":[\"number\"]"),
+            "the output schema leaked into the provider definition: {definition}"
+        );
+        assert_eq!(registered.definition.parameters, serde_json::json!({}));
+        assert_eq!(registered.definition.strict, None);
+
+        let client = Arc::new(McpClient::disconnected_for_tests("srv"));
+        let tool = Tool::new("ping", "Ping", serde_json::Map::new());
+        let registered = rmcp_tool_to_registered("srv", "1.0", tool, client, 0);
+        match &registered.backend {
+            ToolBackend::Mcp { output_schema, .. } => assert!(output_schema.is_none()),
+            _ => panic!("an MCP tool has an MCP backend"),
+        }
     }
 
     #[test]

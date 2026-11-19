@@ -811,6 +811,7 @@ mod tests {
             remote_name: "echo".to_string(),
             server_name: "srv".to_string(),
             generation: 0,
+            output_schema: None,
         }
     }
 
