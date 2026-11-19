@@ -6,14 +6,23 @@ use serde_json::Value;
 /// Trait for executing tools via a plugin subprocess.
 /// Defined in openalpaca_api to avoid circular dependencies:
 /// openalpaca_core uses it in ToolBackend::Plugin, openalpaca_plugins implements it.
-#[async_trait]
+///
+/// Its methods return `impl Future + Send`, so an implementor writes plain
+/// `async fn`; a holder of a type-erased executor holds
+/// [`DynPluginToolExecutor`] (`Arc<DynPluginToolExecutor<'static>>`), built
+/// with `DynPluginToolExecutor::new_arc` or `from_arc`.
+#[dynosaur::dynosaur(pub DynPluginToolExecutor = dyn(box) PluginToolExecutor)]
 pub trait PluginToolExecutor: Send + Sync {
     /// Execute a tool by name with JSON arguments.
     ///
     /// `tool_name` is the name the tool is registered under,
     /// `<plugin>::<tool>` (the registry's `Plugin` arm passes its own); the
     /// implementor sends its plugin the bare `<tool>` the plugin listed.
-    async fn execute(&self, tool_name: &str, arguments: &Value) -> Result<String, String>;
+    fn execute(
+        &self,
+        tool_name: &str,
+        arguments: &Value,
+    ) -> impl Future<Output = Result<String, String>> + Send;
 
     /// [`Self::execute`] for a call the sandbox cuts at `sandbox_cut`
     /// (PLUGIN-WAIT): the registry's `Plugin` arm calls this where the call's
@@ -23,14 +32,16 @@ pub trait PluginToolExecutor: Send + Sync {
     /// one that ends a slow call.
     ///
     /// Default: [`Self::execute`], so no existing implementor changes.
-    async fn execute_within(
+    fn execute_within(
         &self,
         tool_name: &str,
         arguments: &Value,
         sandbox_cut: Duration,
-    ) -> Result<String, String> {
-        let _ = sandbox_cut;
-        self.execute(tool_name, arguments).await
+    ) -> impl Future<Output = Result<String, String>> + Send {
+        async move {
+            let _ = sandbox_cut;
+            self.execute(tool_name, arguments).await
+        }
     }
 
     /// The plugin this executor belongs to.
@@ -121,5 +132,20 @@ pub trait PluginAgentExecutor: Send + Sync {
     /// Default `0` so no existing implementor changes.
     fn generation(&self) -> u64 {
         0
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::sync::Arc;
+
+    use super::DynPluginToolExecutor;
+
+    /// A type-erased executor crosses tasks: the registry holds it in
+    /// `ToolBackend::Plugin` and calls it from spawned work.
+    #[test]
+    fn a_held_plugin_tool_executor_is_send_and_sync() {
+        fn send_and_sync<T: Send + Sync + ?Sized>() {}
+        send_and_sync::<Arc<DynPluginToolExecutor<'static>>>();
     }
 }

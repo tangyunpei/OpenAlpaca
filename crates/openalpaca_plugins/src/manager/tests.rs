@@ -586,6 +586,7 @@ mcp_compatible = true
         let live_pid = h.child_pid("echo-test").await;
 
         // The stale proxy's own call: its channel's writer is gone.
+        use openalpaca_api::plugin_traits::PluginToolExecutor;
         let ToolBackend::Plugin(executor) = &stale.backend else {
             panic!("the stub's tool is not plugin-backed")
         };

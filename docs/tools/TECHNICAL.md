@@ -280,7 +280,7 @@ pub enum ToolBackend {
         timeout_secs: u64,                    // 1-300, its calls' default; a call's
                                               // timeout_secs lifts it to the ceiling
     },
-    Plugin(Arc<dyn openalpaca_api::plugin_traits::PluginToolExecutor>),
+    Plugin(Arc<openalpaca_api::plugin_traits::DynPluginToolExecutor<'static>>),
     Mcp {
         client: Arc<openalpaca_mcp::McpClient>,
         remote_name: String,                  // Tool name on the server
@@ -1155,7 +1155,9 @@ depends on the registry dropping the last reference.
 ## 10. Plugin Tools
 
 `ToolBackend::Plugin` wraps an
-`openalpaca_api::plugin_traits::PluginToolExecutor`.  The out-of-process
+`openalpaca_api::plugin_traits::PluginToolExecutor`, held type-erased as
+`Arc<DynPluginToolExecutor<'static>>` (dynosaur; built with
+`DynPluginToolExecutor::new_arc` or `from_arc`).  The out-of-process
 plugin system (`crates/openalpaca_plugins`) registers plugin-provided
 tools into the shared registry when the plugin loads:
 

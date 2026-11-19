@@ -2290,7 +2290,6 @@ async fn a_caller_supplied_cut_is_discarded() {
 /// A plugin's tool, `slow-plugin::slow`, whose executor answers after 2 s.
 fn slow_plugin_tool() -> ToolRegistry {
     struct AnswersLate;
-    #[async_trait]
     impl openalpaca_api::plugin_traits::PluginToolExecutor for AnswersLate {
         async fn execute(
             &self,
@@ -2314,7 +2313,9 @@ fn slow_plugin_tool() -> ToolRegistry {
                 strict: None,
                 input_examples: None,
             },
-            backend: ToolBackend::Plugin(Arc::new(AnswersLate)),
+            backend: ToolBackend::Plugin(
+                openalpaca_api::plugin_traits::DynPluginToolExecutor::new_arc(AnswersLate),
+            ),
             provides_capabilities: vec![],
             exempt_from_timeout: false,
             annotations: None,
@@ -2400,7 +2401,6 @@ async fn a_plugin_tool_cut_at_the_ceiling_is_told_that_is_the_most() {
 #[derive(Default)]
 struct RecordsTheCut(std::sync::Mutex<Vec<Option<Duration>>>);
 
-#[async_trait]
 impl openalpaca_api::plugin_traits::PluginToolExecutor for RecordsTheCut {
     async fn execute(
         &self,
@@ -2440,7 +2440,9 @@ async fn the_sandbox_hands_a_plugin_tool_the_figure_it_cuts_at() {
                 strict: None,
                 input_examples: None,
             },
-            backend: ToolBackend::Plugin(recorder.clone()),
+            backend: ToolBackend::Plugin(
+                openalpaca_api::plugin_traits::DynPluginToolExecutor::from_arc(recorder.clone()),
+            ),
             provides_capabilities: vec![],
             exempt_from_timeout: false,
             annotations: None,

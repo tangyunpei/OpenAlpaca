@@ -1035,7 +1035,6 @@ fn make_tool_with_name(name: &str) -> RegisteredTool {
 #[tokio::test]
 async fn test_plugin_backend_execution() {
     struct MockPluginExecutor;
-    #[async_trait]
     impl openalpaca_api::plugin_traits::PluginToolExecutor for MockPluginExecutor {
         async fn execute(
             &self,
@@ -1059,7 +1058,9 @@ async fn test_plugin_backend_execution() {
                 strict: None,
                 input_examples: None,
             },
-            backend: ToolBackend::Plugin(Arc::new(MockPluginExecutor)),
+            backend: ToolBackend::Plugin(
+                openalpaca_api::plugin_traits::DynPluginToolExecutor::new_arc(MockPluginExecutor),
+            ),
             provides_capabilities: vec![],
             exempt_from_timeout: false,
             annotations: None,
@@ -1081,7 +1082,6 @@ async fn test_plugin_backend_execution() {
 #[tokio::test]
 async fn a_plugin_backend_is_handed_the_sandboxs_cut_from_the_context() {
     struct Says;
-    #[async_trait]
     impl openalpaca_api::plugin_traits::PluginToolExecutor for Says {
         async fn execute(
             &self,
@@ -1113,7 +1113,9 @@ async fn a_plugin_backend_is_handed_the_sandboxs_cut_from_the_context() {
                 strict: None,
                 input_examples: None,
             },
-            backend: ToolBackend::Plugin(Arc::new(Says)),
+            backend: ToolBackend::Plugin(
+                openalpaca_api::plugin_traits::DynPluginToolExecutor::new_arc(Says),
+            ),
             provides_capabilities: vec![],
             exempt_from_timeout: false,
             annotations: None,
@@ -1963,7 +1965,6 @@ fn lookup_during_rebuild_eventually_sees_full_result() {
 
 struct ExtMockPluginExec;
 
-#[async_trait]
 impl openalpaca_api::plugin_traits::PluginToolExecutor for ExtMockPluginExec {
     async fn execute(
         &self,
@@ -2003,7 +2004,9 @@ fn test_extension_tool_defs_filters_by_origin() {
     registry
         .register(make_tool_with_backend(
             "plug::do",
-            ToolBackend::Plugin(Arc::new(ExtMockPluginExec)),
+            ToolBackend::Plugin(
+                openalpaca_api::plugin_traits::DynPluginToolExecutor::new_arc(ExtMockPluginExec),
+            ),
         ))
         .unwrap();
     registry
@@ -2044,7 +2047,6 @@ struct GenPluginExec {
     ext: ExtensionId,
 }
 
-#[async_trait]
 impl openalpaca_api::plugin_traits::PluginToolExecutor for GenPluginExec {
     async fn execute(
         &self,
@@ -2084,7 +2086,9 @@ fn mcp_tool(name: &str, server: &str, generation: u64) -> RegisteredTool {
 
 fn plugin_tool(name: &str, plugin: &str, executor: Arc<GenPluginExec>) -> RegisteredTool {
     let mut tool = make_tool(name, "ok");
-    tool.backend = ToolBackend::Plugin(executor);
+    tool.backend = ToolBackend::Plugin(
+        openalpaca_api::plugin_traits::DynPluginToolExecutor::from_arc(executor),
+    );
     tool.author = format!("plugin:{plugin}");
     tool
 }
@@ -3014,7 +3018,9 @@ fn only_a_first_party_builtin_is_spared_the_traversal_rule() {
     registry
         .register(make_tool_with_backend(
             "plug::do",
-            ToolBackend::Plugin(Arc::new(ExtMockPluginExec)),
+            ToolBackend::Plugin(
+                openalpaca_api::plugin_traits::DynPluginToolExecutor::new_arc(ExtMockPluginExec),
+            ),
         ))
         .unwrap();
 
@@ -3194,7 +3200,9 @@ fn runs_concurrently_admits_read_only_tools_and_the_leads_coordination_tools() {
     ));
     register(make_tool_with_backend(
         "plug::reads",
-        ToolBackend::Plugin(Arc::new(ExtMockPluginExec)),
+        ToolBackend::Plugin(
+            openalpaca_api::plugin_traits::DynPluginToolExecutor::new_arc(ExtMockPluginExec),
+        ),
     ));
 
     for together in [
@@ -3263,7 +3271,9 @@ fn a_command_an_http_and_an_mcp_tool_have_their_own_figures() {
     registry
         .register(make_tool_with_backend(
             "plug::tool",
-            ToolBackend::Plugin(Arc::new(ExtMockPluginExec)),
+            ToolBackend::Plugin(
+                openalpaca_api::plugin_traits::DynPluginToolExecutor::new_arc(ExtMockPluginExec),
+            ),
         ))
         .unwrap();
     registry

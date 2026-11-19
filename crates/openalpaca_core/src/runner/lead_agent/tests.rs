@@ -3056,7 +3056,6 @@ struct CountingPluginExec {
     calls: std::sync::atomic::AtomicUsize,
 }
 
-#[async_trait]
 impl openalpaca_api::plugin_traits::PluginToolExecutor for CountingPluginExec {
     async fn execute(
         &self,
@@ -3195,9 +3194,11 @@ async fn test_lead_loop_request_carries_extension_defs_and_invoke_skill() {
     register_extension_tool(
         &registry,
         "plug::do",
-        crate::tools::registry::ToolBackend::Plugin(Arc::new(CountingPluginExec {
-            calls: std::sync::atomic::AtomicUsize::new(0),
-        })),
+        crate::tools::registry::ToolBackend::Plugin(
+            openalpaca_api::plugin_traits::DynPluginToolExecutor::new_arc(CountingPluginExec {
+                calls: std::sync::atomic::AtomicUsize::new(0),
+            }),
+        ),
     );
 
     let provider = ScriptedProvider::new(vec![scripted_response("done", vec![])]);
@@ -3482,7 +3483,9 @@ async fn test_lead_executes_extension_tool_through_sandbox() {
     register_extension_tool(
         &registry,
         "plug::do",
-        crate::tools::registry::ToolBackend::Plugin(exec.clone()),
+        crate::tools::registry::ToolBackend::Plugin(
+            openalpaca_api::plugin_traits::DynPluginToolExecutor::from_arc(exec.clone()),
+        ),
     );
     // An MCP-named tool on the surface too, so the allowlist covers both
     // extension namespaces (execution is exercised via the plugin backend —
@@ -7867,7 +7870,6 @@ fn a_spent_local_timeout_is_one_a_retry_cannot_help() {
 /// A plugin's tool still running at test scale (`test_util::SLOW_TOOL_RUNS`).
 struct SlowPluginExec;
 
-#[async_trait]
 impl openalpaca_api::plugin_traits::PluginToolExecutor for SlowPluginExec {
     async fn execute(
         &self,
@@ -7893,7 +7895,9 @@ async fn a_leads_template_timeout_is_not_its_per_tool_bound() {
     register_extension_tool(
         &registry,
         "plug::slow",
-        crate::tools::registry::ToolBackend::Plugin(Arc::new(SlowPluginExec)),
+        crate::tools::registry::ToolBackend::Plugin(
+            openalpaca_api::plugin_traits::DynPluginToolExecutor::new_arc(SlowPluginExec),
+        ),
     );
     let mut lead = lead_subagent();
     lead.constraints.timeout_seconds = Some(600);

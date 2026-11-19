@@ -240,7 +240,6 @@ async fn a_command_tool_above_the_bound_is_a_failed_run_when_cut() {
 /// A plugin's tool that answers after 2 s, its schema `parameters`.
 fn slow_plugin(parameters: serde_json::Value) -> ToolRegistry {
     struct AnswersLate;
-    #[async_trait::async_trait]
     impl openalpaca_api::plugin_traits::PluginToolExecutor for AnswersLate {
         async fn execute(
             &self,
@@ -259,7 +258,9 @@ fn slow_plugin(parameters: serde_json::Value) -> ToolRegistry {
         .register(tool(
             "slow-plugin::slow",
             parameters,
-            ToolBackend::Plugin(Arc::new(AnswersLate)),
+            ToolBackend::Plugin(
+                openalpaca_api::plugin_traits::DynPluginToolExecutor::new_arc(AnswersLate),
+            ),
         ))
         .unwrap();
     registry

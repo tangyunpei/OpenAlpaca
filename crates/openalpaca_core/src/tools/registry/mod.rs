@@ -1,5 +1,6 @@
 use async_trait::async_trait;
 use dashmap::DashMap;
+use openalpaca_api::plugin_traits::{DynPluginToolExecutor, PluginToolExecutor};
 use openalpaca_llm::ToolDefinition;
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -332,7 +333,7 @@ pub enum ToolBackend {
         args_template: Option<String>,
         timeout_secs: u64,
     },
-    Plugin(Arc<dyn openalpaca_api::plugin_traits::PluginToolExecutor>),
+    Plugin(Arc<DynPluginToolExecutor<'static>>),
     Mcp {
         client: Arc<openalpaca_mcp::McpClient>,
         remote_name: String,

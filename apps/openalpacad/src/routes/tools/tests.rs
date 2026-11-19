@@ -79,7 +79,6 @@ fn config_tool(name: &str) -> RegisteredTool {
 
 struct PluginExec(&'static str);
 
-#[async_trait::async_trait]
 impl openalpaca_api::plugin_traits::PluginToolExecutor for PluginExec {
     async fn execute(&self, _tool: &str, _arguments: &serde_json::Value) -> Result<String, String> {
         Ok(String::new())
@@ -92,7 +91,9 @@ impl openalpaca_api::plugin_traits::PluginToolExecutor for PluginExec {
 fn plugin_tool(plugin: &'static str, name: &str) -> RegisteredTool {
     RegisteredTool {
         definition: definition(name),
-        backend: ToolBackend::Plugin(Arc::new(PluginExec(plugin))),
+        backend: ToolBackend::Plugin(
+            openalpaca_api::plugin_traits::DynPluginToolExecutor::new_arc(PluginExec(plugin)),
+        ),
         provides_capabilities: vec![name.to_string()],
         exempt_from_timeout: false,
         annotations: None,

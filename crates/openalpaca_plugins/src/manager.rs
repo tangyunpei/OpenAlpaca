@@ -1640,7 +1640,9 @@ impl PluginManager {
                     strict: None,
                     input_examples: None,
                 },
-                backend: ToolBackend::Plugin(Arc::new(proxy)),
+                backend: ToolBackend::Plugin(
+                    openalpaca_api::plugin_traits::DynPluginToolExecutor::new_arc(proxy),
+                ),
                 provides_capabilities: manifest.capabilities.provides.clone(),
                 exempt_from_timeout: false,
                 annotations: None,

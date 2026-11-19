@@ -766,7 +766,6 @@ mod tests {
 
     struct FakePluginExec;
 
-    #[async_trait::async_trait]
     impl openalpaca_api::plugin_traits::PluginToolExecutor for FakePluginExec {
         async fn execute(
             &self,
@@ -816,7 +815,9 @@ mod tests {
     }
 
     fn plugin_backend() -> crate::tools::registry::ToolBackend {
-        crate::tools::registry::ToolBackend::Plugin(Arc::new(FakePluginExec))
+        crate::tools::registry::ToolBackend::Plugin(
+            openalpaca_api::plugin_traits::DynPluginToolExecutor::new_arc(FakePluginExec),
+        )
     }
 
     /// Minimal provider so a real `LlmRouter` can be constructed; never called.

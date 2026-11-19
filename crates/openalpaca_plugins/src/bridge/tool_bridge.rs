@@ -1,7 +1,6 @@
 use std::sync::Arc;
 use std::time::Duration;
 
-use async_trait::async_trait;
 use openalpaca_api::plugin_traits::PluginToolExecutor;
 use openalpaca_core::tools::extensions::ExtensionLedger;
 use serde_json::Value;
@@ -128,7 +127,6 @@ fn read_call_result(result: &Value) -> Result<String, String> {
     }
 }
 
-#[async_trait]
 impl PluginToolExecutor for PluginToolProxy {
     async fn execute(&self, tool_name: &str, arguments: &Value) -> Result<String, String> {
         self.call(tool_name, arguments, None).await
