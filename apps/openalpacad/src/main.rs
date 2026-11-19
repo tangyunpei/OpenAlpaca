@@ -50,7 +50,7 @@ use openalpaca_core::{
     lane::LaneManager,
     middleware::identity::identity_document_has_content,
     middleware::user::user_document_has_content,
-    orchestrator::Orchestrator,
+    orchestrator::{DynConnectorSendProvider, Orchestrator},
     runner::LoopConfig,
 };
 use openalpaca_llm::keys::key_encryption::KeyEncryptor;
@@ -687,11 +687,10 @@ async fn async_main(
 
     // Create send bridge before connector-awareness block so it's available for both
     // the orchestrator and the notification dispatcher.
-    let send_bridge: Arc<dyn openalpaca_core::orchestrator::ConnectorSendProvider> =
-        Arc::new(connector_bridge::ConnectorSendBridge::new(
-            db.clone(),
-            local_user_id.clone(),
-        ));
+    let send_bridge = Arc::new(connector_bridge::ConnectorSendBridge::new(
+        db.clone(),
+        local_user_id.clone(),
+    ));
 
     // Connector awareness: cached status + send bridge wiring
     {
@@ -704,7 +703,7 @@ async fn async_main(
         orchestrator.set_connector_send_provider(send_bridge.clone());
         // Populate the shared lock so the send tool can access it
         if let Ok(mut guard) = svcs.connector_send_lock.write() {
-            *guard = Some(send_bridge.clone());
+            *guard = Some(DynConnectorSendProvider::from_arc(send_bridge.clone()));
         }
 
         // 3. Spawn EventBus subscriber to keep cached status fresh
@@ -736,7 +735,7 @@ async fn async_main(
             notif_rx,
             db.clone(),
             cancel_token.clone(),
-            Some(send_bridge),
+            Some(DynConnectorSendProvider::from_arc(send_bridge)),
         );
         tokio::spawn(dispatcher.run());
     }

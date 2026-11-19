@@ -1,6 +1,7 @@
 //! Discord notification delivery.
 
 use super::NotificationDispatcher;
+use openalpaca_core::orchestrator::ConnectorSendProvider;
 use openalpaca_storage::{ConfigRepository, PreferenceRepository};
 use tracing::warn;
 

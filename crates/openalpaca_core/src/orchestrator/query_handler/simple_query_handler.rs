@@ -17,7 +17,9 @@ use crate::memory::scope_context::MemoryScopeContext;
 use crate::middleware::bootstrap::bootstrap_to_prompt_block;
 use crate::middleware::guard::{OutputGuard, detect_hallucinated_send};
 use crate::middleware::prompt::AgentPersona;
-use crate::orchestrator::{ConversationContext, MAIN_LOOP_AGENT_ID, Orchestrator};
+use crate::orchestrator::{
+    ConnectorSendProvider, ConversationContext, MAIN_LOOP_AGENT_ID, Orchestrator,
+};
 use crate::prompt_ctx::{SectionPriority, sources::{ContextRequest, ExecutionPath}};
 use crate::runner::{LoopConfig, LoopFinishReason, run_agentic_loop_routed};
 use crate::security::capabilities::Allowlist;

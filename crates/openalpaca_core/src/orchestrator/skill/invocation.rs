@@ -18,7 +18,7 @@ use crate::middleware::bootstrap::bootstrap_to_prompt_block;
 use crate::middleware::guard::{OutputGuard, detect_hallucinated_send};
 use crate::middleware::prompt::AgentPersona;
 use crate::middleware::skill::skill_to_prompt_block;
-use crate::orchestrator::{ConversationContext, Orchestrator};
+use crate::orchestrator::{ConnectorSendProvider, ConversationContext, Orchestrator};
 use crate::prompt_ctx::SectionPriority;
 use crate::prompt_ctx::sources::{ContextRequest, ExecutionPath};
 use crate::runner::{LoopConfig, LoopFinishReason, run_agentic_loop_routed};

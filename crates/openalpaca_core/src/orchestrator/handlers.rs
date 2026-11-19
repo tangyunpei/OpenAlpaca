@@ -1,5 +1,5 @@
 use super::handler_attachments::{TurnAttachments, skipped};
-use super::{Orchestrator, principal_id};
+use super::{ConnectorSendProvider, Orchestrator, principal_id};
 use crate::events::SystemEvent;
 use crate::gateway::HandleRequest;
 use crate::memory::scope_context::MemoryScopeContext;

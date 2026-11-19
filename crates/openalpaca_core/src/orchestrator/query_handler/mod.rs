@@ -1,4 +1,4 @@
-use super::Orchestrator;
+use super::{ConnectorSendProvider, Orchestrator};
 use openalpaca_llm::{ChatMessage, ContentPart, ImageSource, Role, ToolChoice};
 
 /// Optional overrides for handle_simple_query loop configuration.

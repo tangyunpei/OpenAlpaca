@@ -2,7 +2,7 @@
 
 use std::path::{Path, PathBuf};
 
-use openalpaca_core::orchestrator::ConnectorSendProvider;
+use openalpaca_core::orchestrator::{ConnectorSendProvider, DynConnectorSendProvider};
 use openalpaca_storage::store::StoreScope;
 use openalpaca_storage::{ArtifactRecord, ArtifactStore, Database, FileAssetRepository};
 use tracing::warn;
@@ -118,7 +118,7 @@ fn deliverable_path(record: &ArtifactRecord, run_project: Option<&str>) -> Resul
 /// run whose project cannot be read delivers nothing.
 pub(super) async fn deliver_artifacts(
     db: &Database,
-    send: &dyn ConnectorSendProvider,
+    send: &DynConnectorSendProvider<'_>,
     task_id: &str,
     channel: &str,
     recipient: &str,
@@ -231,7 +231,6 @@ mod tests {
         files: Mutex<Vec<(String, String, String)>>,
     }
 
-    #[async_trait::async_trait]
     impl ConnectorSendProvider for RecordingSender {
         async fn send_message(&self, _: &str, _: &str, _: &str) -> Result<String, String> {
             Ok("sent".to_string())
@@ -330,7 +329,7 @@ mod tests {
         let send = RecordingSender::default();
         deliver_artifacts(
             &db,
-            &send,
+            DynConnectorSendProvider::from_ref(&send),
             TASK_ID,
             "telegram",
             "12345",
@@ -370,7 +369,7 @@ mod tests {
         let send = RecordingSender::default();
         deliver_artifacts(
             &db,
-            &send,
+            DynConnectorSendProvider::from_ref(&send),
             TASK_ID,
             "telegram",
             "12345",
@@ -404,7 +403,7 @@ mod tests {
         let send = RecordingSender::default();
         deliver_artifacts(
             &db,
-            &send,
+            DynConnectorSendProvider::from_ref(&send),
             TASK_ID,
             "telegram",
             "12345",
@@ -440,7 +439,7 @@ mod tests {
     async fn deliver(db: &Database, send: &RecordingSender, id: &str) {
         deliver_artifacts(
             db,
-            send,
+            DynConnectorSendProvider::from_ref(send),
             TASK_ID,
             "telegram",
             "12345",

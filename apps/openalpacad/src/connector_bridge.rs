@@ -4,7 +4,6 @@
 //! `ConnectorSendBridge` — outbound message sending via Telegram + iMessage.
 
 use arc_swap::ArcSwap;
-use async_trait::async_trait;
 use openalpaca_core::orchestrator::{ConnectorSendProvider, ConnectorStatusProvider};
 use openalpaca_storage::{Database, PreferenceRepository};
 use std::sync::Arc;
@@ -159,7 +158,6 @@ impl ConnectorSendBridge {
     }
 }
 
-#[async_trait]
 impl ConnectorSendProvider for ConnectorSendBridge {
     async fn send_message(
         &self,

@@ -3,7 +3,7 @@
 //! When the user's intent is an unambiguous "send X to channel", bypass the LLM
 //! entirely and call the connector backend directly.
 
-use super::Orchestrator;
+use super::{ConnectorSendProvider, Orchestrator};
 use openalpaca_storage::Database;
 use openalpaca_storage::repository::PreferenceRepository;
 use regex::Regex;

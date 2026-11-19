@@ -1,6 +1,7 @@
 use super::ConnectorSendLock;
 use super::annotations_for_builtin;
 use super::helpers::{acting_folder, named_folder, resolve_workspace_path};
+use crate::orchestrator::{ConnectorSendProvider, DynConnectorSendProvider};
 use crate::tools::registry::{BuiltInTool, RegisteredTool, ToolBackend, ToolContext};
 use crate::utils::text::{escape_hidden_line, hidden_notice};
 use openalpaca_llm::ToolDefinition;
@@ -144,9 +145,7 @@ fn file_card(file: &SendFile, channel: &str, recipient: &str, filename: &str) ->
 }
 
 impl SendTool {
-    fn acquire_provider(
-        &self,
-    ) -> Result<Arc<dyn crate::orchestrator::ConnectorSendProvider>, String> {
+    fn acquire_provider(&self) -> Result<Arc<DynConnectorSendProvider<'static>>, String> {
         let guard = self
             .provider
             .read()
@@ -455,8 +454,6 @@ pub(super) fn send_tool(provider: ConnectorSendLock, db: Option<Database>) -> Re
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::orchestrator::ConnectorSendProvider;
-    use async_trait::async_trait;
     use openalpaca_storage::store::StoreScope;
     use openalpaca_storage::{ArtifactKind, ArtifactRecord, NewArtifact};
     use std::sync::{Mutex, RwLock};
@@ -477,7 +474,6 @@ mod tests {
         files: Mutex<Vec<(String, String, String)>>,
     }
 
-    #[async_trait]
     impl ConnectorSendProvider for RecordingSender {
         async fn send_message(&self, _: &str, _: &str, _: &str) -> Result<String, String> {
             Ok("sent".to_string())
@@ -509,9 +505,10 @@ mod tests {
     /// `send` with `sender` as its connector. It acts in the call's working
     /// folder (storage design §10, R26).
     fn tool_with(sender: &Arc<RecordingSender>) -> SendTool {
-        let provider: Arc<dyn ConnectorSendProvider> = sender.clone();
         SendTool {
-            provider: Arc::new(RwLock::new(Some(provider))),
+            provider: Arc::new(RwLock::new(Some(DynConnectorSendProvider::from_arc(
+                sender.clone(),
+            )))),
             db: None,
         }
     }
@@ -820,9 +817,10 @@ mod tests {
     }
 
     fn artifact_tool(saved: &Saved, sender: &Arc<RecordingSender>) -> SendTool {
-        let provider: Arc<dyn ConnectorSendProvider> = sender.clone();
         SendTool {
-            provider: Arc::new(RwLock::new(Some(provider))),
+            provider: Arc::new(RwLock::new(Some(DynConnectorSendProvider::from_arc(
+                sender.clone(),
+            )))),
             db: Some(saved.db.clone()),
         }
     }
@@ -1363,9 +1361,9 @@ mod tests {
             .unwrap();
         let sender = Arc::new(RecordingSender::default());
         let tool = SendTool {
-            provider: Arc::new(RwLock::new(Some(
-                sender.clone() as Arc<dyn crate::orchestrator::ConnectorSendProvider>
-            ))),
+            provider: Arc::new(RwLock::new(Some(DynConnectorSendProvider::from_arc(
+                sender.clone(),
+            )))),
             db: Some(db.clone()),
         };
 
@@ -1466,9 +1464,9 @@ mod tests {
             .unwrap();
         let sender = Arc::new(RecordingSender::default());
         let tool = SendTool {
-            provider: Arc::new(RwLock::new(Some(
-                sender.clone() as Arc<dyn crate::orchestrator::ConnectorSendProvider>
-            ))),
+            provider: Arc::new(RwLock::new(Some(DynConnectorSendProvider::from_arc(
+                sender.clone(),
+            )))),
             db: Some(db.clone()),
         };
         let refused = format!(
@@ -1537,9 +1535,9 @@ mod tests {
             .unwrap();
         let sender = Arc::new(RecordingSender::default());
         let tool = SendTool {
-            provider: Arc::new(RwLock::new(Some(
-                sender.clone() as Arc<dyn crate::orchestrator::ConnectorSendProvider>
-            ))),
+            provider: Arc::new(RwLock::new(Some(DynConnectorSendProvider::from_arc(
+                sender.clone(),
+            )))),
             db: Some(db.clone()),
         };
         let ctx = ToolContext {

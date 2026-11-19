@@ -39,7 +39,7 @@ pub use task_status::{task_status_tool_definition, TaskStatusTool};
 
 use crate::daemon_config::DaemonConfig;
 use crate::orchestrator::task_state::{TaskState, WorkspaceEntryType};
-use crate::orchestrator::ConnectorSendProvider;
+use crate::orchestrator::DynConnectorSendProvider;
 use crate::tools::registry::{BuiltInTool, ToolContext};
 use arc_swap::ArcSwap;
 use openalpaca_llm::{ToolDefinition, WebSearchConfig};
@@ -48,7 +48,7 @@ use std::sync::{Arc, RwLock};
 use tokio::process::Command;
 
 /// Shared lock type for the connector send provider, set post-construction.
-pub type ConnectorSendLock = Arc<RwLock<Option<Arc<dyn ConnectorSendProvider>>>>;
+pub type ConnectorSendLock = Arc<RwLock<Option<Arc<DynConnectorSendProvider<'static>>>>>;
 
 use self::artifact_write::artifact_write_tool;
 use self::artifact_read::artifact_read_tool;

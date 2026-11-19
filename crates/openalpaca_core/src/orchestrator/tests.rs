@@ -7341,7 +7341,6 @@ async fn a_deterministic_tier_reports_the_turns_attachments_skipped() {
 #[tokio::test]
 async fn a_direct_send_reports_the_turns_attachments_skipped() {
     struct RecordingSender;
-    #[async_trait::async_trait]
     impl crate::orchestrator::ConnectorSendProvider for RecordingSender {
         async fn send_message(
             &self,
@@ -7431,7 +7430,6 @@ async fn a_direct_send_reports_the_turns_attachments_skipped() {
 #[tokio::test]
 async fn the_direct_send_and_send_context_read_the_same_default_recipient() {
     struct AllChannels;
-    #[async_trait::async_trait]
     impl crate::orchestrator::ConnectorSendProvider for AllChannels {
         async fn send_message(
             &self,
@@ -11071,6 +11069,21 @@ Build it.
         "{description}"
     );
     assert!(description.contains("up to 7 seconds"), "{description}");
+}
+
+/// A held connector send provider crosses threads, and each async method's
+/// future is `Send` (the declared `+ Send`, the default body included).
+#[test]
+fn a_held_connector_send_provider_is_send_and_sync() {
+    fn send_and_sync<T: Send + Sync + ?Sized>() {}
+    send_and_sync::<Arc<DynConnectorSendProvider<'static>>>();
+
+    fn is_send<T: Send>(_: &T) {}
+    fn futures_are_send<P: ConnectorSendProvider + ?Sized>(provider: &P) {
+        is_send(&provider.send_message("telegram", "someone", "hello"));
+        is_send(&provider.send_file("telegram", "someone", "/f", "f", "text/plain", None));
+    }
+    let _ = futures_are_send::<DynConnectorSendProvider<'static>>;
 }
 
 mod usage_rows;

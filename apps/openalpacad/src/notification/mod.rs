@@ -15,7 +15,7 @@ mod tests;
 use artifacts::deliver_artifacts;
 use formatting::{format_completion_message, format_failure_message};
 use openalpaca_core::events::SystemEvent;
-use openalpaca_core::orchestrator::ConnectorSendProvider;
+use openalpaca_core::orchestrator::DynConnectorSendProvider;
 use openalpaca_storage::{
     Database, IdentityRepository, PreferenceRepository, TaskRepository,
 };
@@ -33,7 +33,7 @@ pub struct NotificationDispatcher {
     bus_rx: broadcast::Receiver<SystemEvent>,
     db: Database,
     cancel_token: CancellationToken,
-    connector_send: Option<Arc<dyn ConnectorSendProvider>>,
+    connector_send: Option<Arc<DynConnectorSendProvider<'static>>>,
 }
 
 impl NotificationDispatcher {
@@ -41,7 +41,7 @@ impl NotificationDispatcher {
         bus_rx: broadcast::Receiver<SystemEvent>,
         db: Database,
         cancel_token: CancellationToken,
-        connector_send: Option<Arc<dyn ConnectorSendProvider>>,
+        connector_send: Option<Arc<DynConnectorSendProvider<'static>>>,
     ) -> Self {
         Self {
             bus_rx,
@@ -347,8 +347,17 @@ impl NotificationDispatcher {
             tokio::spawn(async move {
                 let _ = tokio::time::timeout(
                     std::time::Duration::from_mins(1),
-                    deliver_artifacts(&db, &*send, &task_id, "telegram", &chat_id_str, outcome_json.as_deref(), &owner),
-                ).await;
+                    deliver_artifacts(
+                        &db,
+                        &send,
+                        &task_id,
+                        "telegram",
+                        &chat_id_str,
+                        outcome_json.as_deref(),
+                        &owner,
+                    ),
+                )
+                .await;
             });
         }
     }
