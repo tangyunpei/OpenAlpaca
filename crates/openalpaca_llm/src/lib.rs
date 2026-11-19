@@ -226,10 +226,26 @@ mod tests {
 
     /// A type-erased provider is held in the router's `ProviderEntry` and
     /// its CLI backends, and every call through it runs in spawned work.
+    ///
+    /// The supertraits alone make the held form `Send + Sync`, so the test
+    /// also holds each async method's declared `+ Send`: the generic body
+    /// sees only the trait's declaration, and naming it at the Dyn compiles
+    /// it.
     #[test]
     fn a_held_llm_provider_is_send_and_sync() {
         fn send_and_sync<T: Send + Sync + ?Sized>() {}
         send_and_sync::<std::sync::Arc<DynLlmProvider<'static>>>();
+
+        fn is_send<T: Send>(_: &T) {}
+        fn futures_are_send<P: LlmProvider + ?Sized>(p: &P, request: ChatRequest) {
+            is_send(&p.chat(request.clone()));
+            is_send(&p.chat_with_key("k", request.clone()));
+            is_send(&p.list_models_with_key("k"));
+            is_send(&p.discover_models("k"));
+            is_send(&p.chat_streaming(request.clone()));
+            is_send(&p.chat_streaming_with_key("k", request));
+        }
+        let _ = futures_are_send::<DynLlmProvider<'static>>;
     }
 
     #[test]
