@@ -41,7 +41,6 @@ discord = ["dep:twilight-gateway", "dep:twilight-http", "dep:twilight-model", "d
 # Async runtime
 tokio.workspace = true
 tracing.workspace = true
-async-trait = { workspace = true }
 thiserror.workspace = true
 arc-swap.workspace = true
 

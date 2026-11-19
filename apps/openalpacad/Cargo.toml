@@ -35,7 +35,6 @@ openalpaca_mcp = { path = "../../crates/openalpaca_mcp" }
 toml.workspace = true
 toml_edit.workspace = true
 rand.workspace = true
-async-trait.workspace = true
 openalpaca_plugins = { workspace = true }
 openalpaca_llm = { workspace = true, features = ["anthropic", "openai", "ollama"] }
 teloxide = { workspace = true }

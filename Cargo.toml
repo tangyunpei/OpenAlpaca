@@ -146,7 +146,6 @@ regex = "1.12.3"
 # Linux): its default features minus `native-tls`. Its rustls features go
 # through reqwest 0.12's `__rustls-ring`, so `ring` stays compiled for it.
 teloxide = { version = "0.17.0", default-features = false, features = ["macros", "ctrlc_handler", "rustls-native-roots"] }
-async-trait = "0.1.89"
 # Native async fn in trait with `dyn` support (M58): `DynX` for each trait
 # a `dyn` site holds.
 dynosaur = "0.3.1"

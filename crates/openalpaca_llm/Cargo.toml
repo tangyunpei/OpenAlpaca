@@ -25,7 +25,6 @@ test-endpoint-guard = []
 live-eval = []
 
 [dependencies]
-async-trait.workspace = true
 dynosaur.workspace = true
 serde.workspace = true
 serde_json.workspace = true
