@@ -2605,7 +2605,6 @@ pub enum SecretStorage {
 
 // ── The trait ───────────────────────────────────────────────────────────
 
-#[async_trait::async_trait]
 impl ExtensionSupervisor for PluginManager {
     /// W (`enabled = true`) then E0 → E-PRE → E1–E5. `200` even when bring-up
     /// fails: the write succeeded and the intent is durable; the outcome is a

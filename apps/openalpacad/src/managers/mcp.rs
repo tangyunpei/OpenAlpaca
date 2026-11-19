@@ -2120,7 +2120,6 @@ impl Drop for ReaderGuard {
 // The trait
 // ============================================================================
 
-#[async_trait::async_trait]
 impl ExtensionSupervisor for McpSupervisor {
     /// W (`enabled = true`) then E0–E5. `200` even when bring-up fails: the
     /// write succeeded and the intent is durable; the connection outcome is a

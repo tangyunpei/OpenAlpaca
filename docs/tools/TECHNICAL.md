@@ -643,21 +643,25 @@ meets:
 ### ExtensionSupervisor
 
 ```rust
-#[async_trait]
 pub trait ExtensionSupervisor: Send + Sync {
-    async fn enable(&self, id: &ExtensionId) -> Result<ExtensionRecord, ExtensionError>;
-    async fn disable(&self, id: &ExtensionId) -> Result<ExtensionRecord, ExtensionError>;
-    async fn reload(&self, id: &ExtensionId) -> Result<ExtensionRecord, ExtensionError>;
-    async fn reconcile(&self, id: &ExtensionId) -> Result<ExtensionRecord, ExtensionError>;
-    async fn reconcile_all(&self);
-    async fn list(&self) -> Vec<ExtensionRecord>;
-    async fn shutdown_all(&self);
+    fn enable(&self, id: &ExtensionId)
+        -> impl Future<Output = Result<ExtensionRecord, ExtensionError>> + Send;
+    fn disable(&self, id: &ExtensionId)
+        -> impl Future<Output = Result<ExtensionRecord, ExtensionError>> + Send;
+    fn reload(&self, id: &ExtensionId)
+        -> impl Future<Output = Result<ExtensionRecord, ExtensionError>> + Send;
+    fn reconcile(&self, id: &ExtensionId)
+        -> impl Future<Output = Result<ExtensionRecord, ExtensionError>> + Send;
+    fn reconcile_all(&self) -> impl Future<Output = ()> + Send;
+    fn list(&self) -> impl Future<Output = Vec<ExtensionRecord>> + Send;
+    fn shutdown_all(&self) -> impl Future<Output = ()> + Send;
 }
 ```
 
-Implemented by `McpSupervisor` (daemon) and `PluginManager` (plugins crate).
-The trait lives in `openalpaca_core` because both implementors are
-downstream of it.
+Implemented by `McpSupervisor` (daemon) and `PluginManager` (plugins crate),
+each with plain `async fn`. The trait lives in `openalpaca_core` because both
+implementors are downstream of it. It is not dyn-compatible: the daemon's
+`Extensions` dispatches a verb by kind through a closed enum of the two.
 
 ### Routes and CLI
 
