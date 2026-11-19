@@ -15,7 +15,8 @@ test-utils = []
 serde_json.workspace = true
 thiserror.workspace = true
 tracing.workspace = true
-tokio = { workspace = true, features = ["process"] }
+# `io-util` reads a stdio server's piped stderr (N-MCP-5).
+tokio = { workspace = true, features = ["process", "io-util"] }
 tokio-util.workspace = true
 reqwest.workspace = true
 url.workspace = true

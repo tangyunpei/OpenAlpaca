@@ -20,7 +20,7 @@ use tokio::sync::mpsc::{
 
 use crate::error::McpError;
 use crate::lifecycle::{ConnectionSnapshot, ConnectionState, ProtocolMode};
-use crate::transport::{ExitObserver, Transport, TransportInner, TransportKind};
+use crate::transport::{ExitObserver, StderrTail, Transport, TransportInner, TransportKind};
 
 /// Something the *server* changed about itself mid-session, announced over one
 /// of MCP's `notifications/*_list_changed` methods.
@@ -165,6 +165,10 @@ pub struct McpClientConfig {
     pub request_timeout: Duration,
     pub max_reconnect_attempts: u32,
     pub reconnect_backoff_ms: u64,
+    /// Where each stdio process this client spawns keeps its stderr's tail
+    /// (N-MCP-5): the caller's handle, so a connect that fails still leaves
+    /// it the tail. Unused over HTTP. Its `Debug` prints only a length.
+    pub stderr_tail: StderrTail,
 }
 
 impl Default for McpClientConfig {
@@ -182,6 +186,7 @@ impl Default for McpClientConfig {
             request_timeout: Duration::from_secs(30),
             max_reconnect_attempts: 3,
             reconnect_backoff_ms: 100,
+            stderr_tail: StderrTail::default(),
         }
     }
 }
@@ -410,6 +415,14 @@ impl McpClient {
     /// Async because the state lives under a `tokio::sync::RwLock`.
     pub async fn connection_state(&self) -> ConnectionSnapshot {
         ConnectionSnapshot::from(&*self.inner.state.read().await)
+    }
+
+    /// The handle the stdio processes this client spawns keep their stderr's
+    /// tail in (N-MCP-5) — the last spawn's is [`StderrTail::current`]. Never
+    /// part of an [`McpError`]'s text or of the connection state's reason: a
+    /// caller composes it into what it shows, redacted and escaped.
+    pub fn stderr_tail(&self) -> &StderrTail {
+        &self.inner.config.stderr_tail
     }
 
     /// Install the receiver of this client's [`ConnectionEvent`]s. **Once** —
@@ -884,7 +897,8 @@ fn build_transport(
         } => {
             let mut t = StdioTransport::new(&cfg.server_name, command)
                 .with_args(args.clone())
-                .with_exit_observer(exit_observer);
+                .with_exit_observer(exit_observer)
+                .with_stderr_tail(cfg.stderr_tail.clone());
             for (k, v) in env {
                 t = t.with_env(k, v);
             }
@@ -1966,6 +1980,7 @@ mod tests {
             request_timeout: Duration::from_secs(1),
             max_reconnect_attempts: 0,
             reconnect_backoff_ms: 100,
+            stderr_tail: Default::default(),
         };
         // `McpClient` doesn't implement `Debug` (RunningService isn't Debug in our config),
         // so avoid `.unwrap_err()` and match manually.
@@ -2058,6 +2073,7 @@ mod tests {
             request_timeout: Duration::from_secs(1),
             max_reconnect_attempts: 2,
             reconnect_backoff_ms: 10, // fast test
+            stderr_tail: Default::default(),
         };
 
         // A live client whose call just failed retriably — the only state from

@@ -26,7 +26,7 @@
 - `pub use client::{ ConnectionEvent, ConnectionEventHandler, McpClient, McpClientConfig, NotifyingHandler, ServerChange, };`
 - `pub use error::{ErrorCategory, McpError};`
 - `pub use lifecycle::{ConnectionSnapshot, ProtocolMode};`
-- `pub use transport::{ExitObserver, HttpAuth, StdioTransport, Transport, TransportKind};`
+- `pub use transport::{ ExitObserver, HttpAuth, STDERR_SETTLE, SpawnTail, StderrTail, StdioTransport, TAIL_BYTES, TailSnapshot, Transport, TransportKind, };`
 - `pub use rmcp::model::{ CallToolResult, ContentBlock, Implementation, Prompt, PromptMessage, ProtocolVersion, Resource, ResourceContents, Tool, ToolAnnotations, };`
 
 ## Related Links

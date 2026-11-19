@@ -21,7 +21,10 @@ pub use client::{
 };
 pub use error::{ErrorCategory, McpError};
 pub use lifecycle::{ConnectionSnapshot, ProtocolMode};
-pub use transport::{ExitObserver, HttpAuth, StdioTransport, Transport, TransportKind};
+pub use transport::{
+    ExitObserver, HttpAuth, STDERR_SETTLE, SpawnTail, StderrTail, StdioTransport, TAIL_BYTES,
+    TailSnapshot, Transport, TransportKind,
+};
 
 // Re-exports from rmcp — data types pass through unchanged.
 pub use rmcp::model::{

@@ -36,6 +36,7 @@ fn config(name: &str, transport: TransportKind) -> McpClientConfig {
         request_timeout: Duration::from_secs(5),
         max_reconnect_attempts: 0,
         reconnect_backoff_ms: 10,
+        stderr_tail: Default::default(),
     }
 }
 

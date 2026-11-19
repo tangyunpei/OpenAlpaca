@@ -1000,11 +1000,20 @@ impl ToolRegistry {
                         {
                             // The `detail` is rendered from the client's own
                             // terminal state, not inferred from the last error
-                            // string (design §3.2 T4b, X-5 c).
+                            // string (design §3.2 T4b, X-5 c), and ends with
+                            // the stderr tail of the last process the client
+                            // spawned — the last reconnect's, when one ran —
+                            // which never enters `e`'s text, the result below
+                            // (N-MCP-5).
                             let detail = match client.connection_state().await {
                                 openalpaca_mcp::ConnectionSnapshot::Failed { reason } => reason,
                                 _ => e.to_string(),
                             };
+                            let detail = crate::tools::extensions::stderr::detail_with_stderr(
+                                detail,
+                                client.stderr_tail(),
+                            )
+                            .await;
                             self.extensions.mark_failed(
                                 &ExtensionId::mcp(server_name),
                                 *generation,

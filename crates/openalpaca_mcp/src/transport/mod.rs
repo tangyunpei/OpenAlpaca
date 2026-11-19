@@ -9,8 +9,10 @@ use crate::error::McpError;
 
 mod stdio;
 mod http;
+mod stderr_tail;
 
 pub use http::StreamableHttpTransport;
+pub use stderr_tail::{STDERR_SETTLE, SpawnTail, StderrTail, TAIL_BYTES, TailSnapshot};
 pub use stdio::{ExitObserver, StdioTransport};
 
 /// How bytes reach an MCP server: one variant per transport, a closed set.

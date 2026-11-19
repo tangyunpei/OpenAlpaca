@@ -1197,11 +1197,23 @@ depends on the registry dropping the last reference.
   every spawn (`transport/stdio.rs`, `ReportExit`) hands the client the
   status the process's wait returned, the client reports it as
   `ConnectionEvent::Exited` unless it is sealed, and the supervisor's
-  receiver runs `ExtensionLedger::mark_exited` — the row `Failed{Crashed}`,
-  its detail the status, announced once, not reaped, the gate still
-  admitting calls (`admits_calls`).  The next call's reconnect, on success,
-  is `ConnectionEvent::Reconnected` and `mark_recovered` (back to `Enabled`,
-  same generation); `ReconnectExhausted` takes the row to the reaper.
+  receiver runs `ExtensionLedger::mark_exited` once the exited process's
+  stderr has ended (at most `STDERR_SETTLE`, 250 ms, on a task of its own;
+  a reconnect reported meanwhile is applied after it) — the row
+  `Failed{Crashed}`, its detail the status and the stderr tail, announced
+  once, not reaped, the gate still admitting calls (`admits_calls`).  The
+  next call's reconnect, on success, is `ConnectionEvent::Reconnected` and
+  `mark_recovered` (back to `Enabled`, same generation);
+  `ReconnectExhausted` takes the row to the reaper.
+- A stdio child's stderr is piped, never inherited (N-MCP-5): a reader task
+  drains it in 1 KB chunks into the client's `StderrTail`
+  (`McpClientConfig::stderr_tail`, the caller's handle, a fresh tail per
+  spawn), keeping the last 4 KB, and stops 250 ms after the reap.
+  `tools::extensions::stderr` masks it (the load's values, inherited
+  secret-named variables, generic shapes: `<masked>`), cuts it to 4 KB
+  from the end and escapes it (`escape_hidden`) into a `Failed` row's
+  `detail` only — at the four places a `Failed` detail is written — never
+  into an `McpError`'s text or `ConnectionSnapshot::Failed`'s reason.
 
 ---
 
