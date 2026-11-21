@@ -405,3 +405,53 @@ fn a_file_under_a_non_ascii_project_root_is_revealed() {
 
     assert_eq!(revealable_path(&file), Ok(file.canonicalize().unwrap()));
 }
+
+/// Step 9's golden (M20): every variant's sentence byte for byte, under `{}`
+/// and `{:#}`, with no `source()` — written against the hand-written
+/// `Display` and kept on the derive. The `match` has no `_` arm, so a new
+/// variant does not compile without its row.
+#[test]
+fn every_reveal_refusal_prints_its_sentence_whole_and_has_no_source() {
+    let rows = [
+        RevealRefusal::Missing(PathBuf::from("/s/\u{202e}a\u{200b}.md")),
+        RevealRefusal::NotAFile(PathBuf::from("/s/dir")),
+        RevealRefusal::OutsideStore(PathBuf::from("/x/a.md")),
+        RevealRefusal::ProjectMissing(PathBuf::from("/w/app")),
+    ];
+    for refusal in rows {
+        let want = match &refusal {
+            RevealRefusal::Missing(_) => {
+                "/s/\u{202e}a\u{200b}.md is not there any more, so it cannot be shown in its folder."
+            }
+            RevealRefusal::NotAFile(_) => {
+                "/s/dir is not a file, so it cannot be shown in its folder."
+            }
+            RevealRefusal::OutsideStore(_) => {
+                "/x/a.md is not in an OpenAlpaca store or one of your projects, so it is not shown in its folder."
+            }
+            RevealRefusal::ProjectMissing(_) => {
+                "/w/app: this project's folder is gone or has moved; re-point the project to read its files."
+            }
+        };
+        assert_eq!(refusal.to_string(), want);
+        assert_eq!(format!("{refusal:#}"), want);
+        assert!(std::error::Error::source(&refusal).is_none(), "{want}");
+    }
+}
+
+/// M20's golden over a path that is not UTF-8: each byte that is not prints
+/// as U+FFFD, as `Path::display` showed it.
+#[cfg(unix)]
+#[test]
+fn a_reveal_refusal_shows_a_non_utf8_path_as_path_display_does() {
+    use std::os::unix::ffi::OsStrExt;
+    let path = PathBuf::from(std::ffi::OsStr::from_bytes(b"/s/\xff.md"));
+    assert_eq!(
+        RevealRefusal::Missing(path.clone()).to_string(),
+        "/s/\u{fffd}.md is not there any more, so it cannot be shown in its folder."
+    );
+    assert_eq!(
+        RevealRefusal::ProjectMissing(path).to_string(),
+        "/s/\u{fffd}.md: this project's folder is gone or has moved; re-point the project to read its files."
+    );
+}

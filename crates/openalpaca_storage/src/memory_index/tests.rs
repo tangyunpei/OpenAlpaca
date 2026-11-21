@@ -4100,3 +4100,26 @@ fn a_glued_literal_found_spaced_hides_its_parts() {
         .unwrap();
     assert_eq!(ids(&scan), vec!["spaced"]);
 }
+
+/// Step 9's golden (M23): each variant's text byte for byte, under `{}` and
+/// `{:#}`, with no `source()` — written against the hand-written `Display`
+/// and kept on the derive. The `match` has no `_` arm, so a new variant does
+/// not compile without its row.
+#[test]
+fn every_index_error_prints_its_text_whole_and_has_no_source() {
+    let rows = [
+        IndexError::InvalidInput("q \u{202e}x\u{200b}".to_string()),
+        IndexError::Sqlite(rusqlite::Error::QueryReturnedNoRows),
+        IndexError::Io(std::io::Error::other("disk full")),
+    ];
+    for error in rows {
+        let want = match &error {
+            IndexError::InvalidInput(_) => "invalid input: q \u{202e}x\u{200b}",
+            IndexError::Sqlite(_) => "memory index database: Query returned no rows",
+            IndexError::Io(_) => "memory index io: disk full",
+        };
+        assert_eq!(error.to_string(), want);
+        assert_eq!(format!("{error:#}"), want);
+        assert!(std::error::Error::source(&error).is_none(), "{want}");
+    }
+}

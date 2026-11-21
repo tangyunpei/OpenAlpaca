@@ -1430,3 +1430,54 @@ fn a_root_renamed_by_case_only_still_looks_up_and_registers_as_its_own_project()
     assert_eq!(register(&root).unwrap().id, own.id);
     assert_eq!(list().unwrap().len(), 2);
 }
+
+/// Step 9's golden (M19): every variant's sentence byte for byte, under `{}`
+/// and `{:#}`, with no `source()` — written against the hand-written
+/// `Display` and kept on the derive. The `match` has no `_` arm, so a new
+/// variant does not compile without its row.
+#[test]
+fn every_project_error_prints_its_sentence_whole_and_has_no_source() {
+    let rows = [
+        ProjectError::NotRegistered {
+            root: "/w/\u{202e}evil\u{200b}".to_string(),
+        },
+        ProjectError::IsHome {
+            path: "/work/app".to_string(),
+        },
+        ProjectError::NotADirectory {
+            path: "/work/app".to_string(),
+        },
+        ProjectError::Exists {
+            path: "/work/app".to_string(),
+        },
+        ProjectError::RepointUnfinished {
+            path: "/work/app".to_string(),
+        },
+        ProjectError::SamePath {
+            path: "/work/app".to_string(),
+        },
+    ];
+    for error in rows {
+        let want = match &error {
+            ProjectError::NotRegistered { .. } => {
+                "/w/\u{202e}evil\u{200b} is not a project OpenAlpaca knows: no folder under projects/ records it"
+            }
+            ProjectError::IsHome { .. } => {
+                "/work/app is, contains or lies inside the OpenAlpaca home store, so it cannot be a project. Name the project directory itself"
+            }
+            ProjectError::NotADirectory { .. } => {
+                "/work/app is not a directory. Create it first, or name the folder the project is in now"
+            }
+            ProjectError::Exists { .. } => {
+                "/work/app is already a project of its own, or OpenAlpaca's records already name it. Re-pointing onto it would merge two projects: delete that project's data first, or re-point onto another path"
+            }
+            ProjectError::RepointUnfinished { .. } => {
+                "/work/app is either path of another project's re-point that has not finished; the next start of the daemon finishes that re-point. Re-pointing onto it would merge two projects: re-point onto another path"
+            }
+            ProjectError::SamePath { .. } => "/work/app is already where the project is",
+        };
+        assert_eq!(error.to_string(), want);
+        assert_eq!(format!("{error:#}"), want);
+        assert!(std::error::Error::source(&error).is_none(), "{want}");
+    }
+}

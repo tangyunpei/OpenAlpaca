@@ -6795,3 +6795,152 @@ fn cut_bytes_backs_off_to_the_char_boundary_at_or_below_the_cut() {
     assert_eq!(cut_bytes(text, 0), (String::new(), true));
     assert_eq!(cut_bytes(text, 7), (text.to_string(), false));
 }
+
+/// Step 9's golden (M29): each variant's text byte for byte, under `{}` and
+/// `{:#}`, with no `source()` — written against the hand-written `Display`
+/// and kept on the derive. `Internal` prints its chain whole. The `match`
+/// has no `_` arm, so a new variant does not compile without its row.
+#[test]
+fn every_memory_error_prints_its_text_whole_and_has_no_source() {
+    let id = NoteId::parse("55e811b6-3220-4758-a47b-034bd1023f38").unwrap();
+    let rows = [
+        MemoryError::NoOwner("system\u{202e}".to_string()),
+        MemoryError::CapabilityDenied {
+            capability: "memory_write",
+        },
+        MemoryError::InvalidInput("limit \u{200b}".to_string()),
+        MemoryError::NotFound(id),
+        MemoryError::RevisionUnavailable {
+            id,
+            revision: "sha256:ab".to_string(),
+        },
+        MemoryError::RevisionConflict {
+            id,
+            current_revision: "sha256:cd".to_string(),
+        },
+        MemoryError::AuthorityConflict {
+            id,
+            message: "a \u{202e}user note".to_string(),
+        },
+        MemoryError::ConfirmRefused {
+            id,
+            message: "not a person's surface".to_string(),
+        },
+        MemoryError::NotUndoable {
+            id,
+            origin: Origin::User,
+        },
+        MemoryError::NotASuggestion {
+            id,
+            message: "not a suggestion".to_string(),
+        },
+        MemoryError::ApprovalRequired { id },
+        MemoryError::Quarantined {
+            partition_key: "home-k".to_string(),
+            reason: "no snapshot".to_string(),
+        },
+        MemoryError::WritePending {
+            key: "proj-k".to_string(),
+        },
+        MemoryError::IndexRebuilding,
+        MemoryError::Internal(anyhow::anyhow!("disk full").context("writing note")),
+    ];
+    for error in rows {
+        let want = match &error {
+            MemoryError::NoOwner(_) => {
+                "no memory owner: `system\u{202e}` is not a known user of this daemon, so nothing is remembered for it"
+            }
+            MemoryError::CapabilityDenied { .. } => {
+                "this context was not granted the `memory_write` capability, so the memory service refused the call"
+            }
+            MemoryError::InvalidInput(_) => "invalid input: limit \u{200b}",
+            MemoryError::NotFound(_) => "note 55e811b6-3220-4758-a47b-034bd1023f38 not found",
+            MemoryError::RevisionUnavailable { .. } => {
+                "note 55e811b6-3220-4758-a47b-034bd1023f38 has no kept revision sha256:ab: .history holds the last 5 service-written revisions only"
+            }
+            MemoryError::RevisionConflict { .. } => {
+                "note 55e811b6-3220-4758-a47b-034bd1023f38 changed since it was read: current revision is sha256:cd"
+            }
+            MemoryError::AuthorityConflict { .. } => "a \u{202e}user note",
+            MemoryError::ConfirmRefused { .. } => "not a person's surface",
+            MemoryError::NotUndoable { .. } => {
+                "note 55e811b6-3220-4758-a47b-034bd1023f38 is not undoable: its origin is `user` — neither learned from your words (`extracted_user`) nor a pending suggestion; forget it instead"
+            }
+            MemoryError::NotASuggestion { .. } => "not a suggestion",
+            MemoryError::ApprovalRequired { .. } => {
+                "note 55e811b6-3220-4758-a47b-034bd1023f38 was not confirmed: only the user's Approve on the confirmation card for this call confirms a suggestion, and there was none. Nothing was written."
+            }
+            MemoryError::Quarantined { .. } => {
+                "memory partition home-k is quarantined (no snapshot); run `openalpaca memory doctor --repair`"
+            }
+            MemoryError::WritePending { .. } => "a memory write for proj-k is in flight; try again",
+            MemoryError::IndexRebuilding => {
+                "the memory search index is being rebuilt, so the timeline cannot be read now; try again in a minute. memory_search and memory_read answer meanwhile"
+            }
+            MemoryError::Internal(_) => "writing note: disk full",
+        };
+        assert_eq!(error.to_string(), want);
+        assert_eq!(format!("{error:#}"), want);
+        assert!(std::error::Error::source(&error).is_none(), "{want}");
+    }
+}
+
+/// Step 9's `{:#}` wrapper golden: what the storage errors read as through
+/// `MemoryError` — the 500 `MEMORY_INTERNAL` body, a tool's result — and
+/// through an anyhow context over it. Written against the hand-written
+/// impls; a `#[source]` or `transparent` on any of the three types turns a
+/// row red (the chain would print twice, or lose its context).
+#[test]
+fn the_storage_errors_read_the_same_through_memory_error_and_a_context() {
+    use openalpaca_storage::memory_index::IndexError;
+
+    let rows = [
+        (
+            MemoryError::from(IndexError::Sqlite(rusqlite::Error::QueryReturnedNoRows)),
+            "memory index database: Query returned no rows",
+        ),
+        (
+            MemoryError::from(IndexError::Io(std::io::Error::other("disk \u{202e}full"))),
+            "memory index io: disk \u{202e}full",
+        ),
+        (
+            MemoryError::from(IndexError::InvalidInput("q".to_string())),
+            "invalid input: q",
+        ),
+        (
+            MemoryError::from(MemoryFilesError::PathRefused {
+                component: std::path::PathBuf::from("/s/owners"),
+                reason: "a symlink".to_string(),
+            }),
+            "memory partition refused: /s/owners is a symlink",
+        ),
+        (
+            MemoryError::from(MemoryFilesError::Io(
+                anyhow::anyhow!("disk full").context("Failed to write y"),
+            )),
+            "Failed to write y: disk full",
+        ),
+        (
+            MemoryError::from(MemoryFilesError::NotRegistered {
+                root: std::path::PathBuf::from("/w\u{200b}"),
+            }),
+            "the project /w\u{200b} is not registered; its notes read as empty",
+        ),
+        (
+            MemoryError::from(anyhow::anyhow!("disk full").context("writing note")),
+            "writing note: disk full",
+        ),
+    ];
+    for (error, want) in rows {
+        assert_eq!(error.to_string(), want);
+        assert_eq!(format!("{error:#}"), want);
+        assert!(std::error::Error::source(&error).is_none(), "{want}");
+        let wrapped = anyhow::Error::new(error).context("recall");
+        assert_eq!(format!("{wrapped:#}"), format!("recall: {want}"));
+        assert_eq!(wrapped.chain().count(), 2, "{want}");
+    }
+    let internal = MemoryError::from(IndexError::Io(std::io::Error::other("x")));
+    assert!(matches!(internal, MemoryError::Internal(_)));
+    let invalid = MemoryError::from(IndexError::InvalidInput("q".to_string()));
+    assert!(matches!(invalid, MemoryError::InvalidInput(_)));
+}

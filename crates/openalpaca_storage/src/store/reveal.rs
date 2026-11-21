@@ -15,7 +15,6 @@
 //! reveal as an argument, never through a shell. Nothing here opens, reads
 //! or changes the file.
 
-use std::fmt;
 use std::path::{Path, PathBuf};
 
 use super::projects;
@@ -23,13 +22,15 @@ use openalpaca_app_support::paths::home_root;
 
 /// Why [`revealable_path`] refused a path. `Display` is one sentence, written
 /// to be shown as it is in a toast.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
 pub enum RevealRefusal {
     /// Nothing is there, or the path cannot be resolved. Carries the path as
     /// it was asked for.
+    #[error("{0} is not there any more, so it cannot be shown in its folder.")]
     Missing(PathBuf),
     /// A directory, or anything else that is not a regular file. Carries the
     /// resolved path.
+    #[error("{0} is not a file, so it cannot be shown in its folder.")]
     NotAFile(PathBuf),
     /// The resolved file is under neither the home root nor the root of a
     /// registered project that is not missing — a missing project's root
@@ -40,6 +41,10 @@ pub enum RevealRefusal {
     /// file is under its root and is shown: showing a file in its folder
     /// reads nothing, and the file tools refuse `.openalpaca` themselves
     /// (R32).
+    #[error(
+        "{0} is not in an OpenAlpaca store or one of your projects, so it is not shown in \
+         its folder."
+    )]
     OutsideStore(PathBuf),
     /// The path, as asked for, lies under the recorded root of a project
     /// that is missing (ST-23) — its folder gone, renamed by case only, or
@@ -47,36 +52,15 @@ pub enum RevealRefusal {
     /// it (S6a M6, the lead's ruling R-T26). Carries that root; the sentence
     /// is the one every reader of such a file shows
     /// ([`projects::missing_project_sentence`]).
+    #[error(fmt = project_missing)]
     ProjectMissing(PathBuf),
 }
 
-impl fmt::Display for RevealRefusal {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            RevealRefusal::Missing(path) => write!(
-                f,
-                "{} is not there any more, so it cannot be shown in its folder.",
-                path.display()
-            ),
-            RevealRefusal::NotAFile(path) => write!(
-                f,
-                "{} is not a file, so it cannot be shown in its folder.",
-                path.display()
-            ),
-            RevealRefusal::OutsideStore(path) => write!(
-                f,
-                "{} is not in an OpenAlpaca store or one of your projects, so it is not shown in \
-                 its folder.",
-                path.display()
-            ),
-            RevealRefusal::ProjectMissing(root) => {
-                f.write_str(&projects::missing_project_sentence(root))
-            }
-        }
-    }
+/// [`RevealRefusal::ProjectMissing`]'s sentence: the one every reader of a
+/// missing project's file shows ([`projects::missing_project_sentence`]).
+fn project_missing(root: &Path, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+    f.write_str(&projects::missing_project_sentence(root))
 }
-
-impl std::error::Error for RevealRefusal {}
 
 /// The canonical form of `path` when it may be shown in its folder: a
 /// regular file whose canonical path is under the canonical home root

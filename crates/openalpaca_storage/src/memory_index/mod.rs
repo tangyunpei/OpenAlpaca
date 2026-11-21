@@ -128,30 +128,21 @@ pub const SUBSTRING_SCAN_CAP: usize = 4096;
 // ============================================================================
 
 /// What the index can refuse or fail with.
-#[derive(Debug)]
+#[derive(Debug, thiserror::Error)]
 pub enum IndexError {
     /// A caller-supplied value the index will not accept: an empty or
     /// over-long query, a limit outside 1–20, an over-size body, a timestamp
     /// that is not RFC 3339. The message names the field.
+    #[error("invalid input: {0}")]
     InvalidInput(String),
     /// The cache database itself.
+    #[error("memory index database: {0}")]
     Sqlite(rusqlite::Error),
     /// The scanner callback of [`MemoryIndex::reconcile`], or the cache file's
     /// directory.
+    #[error("memory index io: {0}")]
     Io(std::io::Error),
 }
-
-impl fmt::Display for IndexError {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            Self::InvalidInput(msg) => write!(f, "invalid input: {msg}"),
-            Self::Sqlite(e) => write!(f, "memory index database: {e}"),
-            Self::Io(e) => write!(f, "memory index io: {e}"),
-        }
-    }
-}
-
-impl std::error::Error for IndexError {}
 
 impl IndexError {
     /// Whether the cache file itself is damaged — SQLite's `SQLITE_CORRUPT`

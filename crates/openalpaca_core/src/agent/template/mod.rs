@@ -9,7 +9,6 @@
 //! - Level 2: full document with body sections (on demand)
 
 use std::collections::HashMap;
-use std::fmt;
 use std::sync::Arc;
 
 // ---------------------------------------------------------------------------
@@ -92,33 +91,20 @@ pub struct AgentTemplate {
 }
 
 /// Errors that can occur while parsing an agent template.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
 pub enum AgentParseError {
+    #[error("Missing YAML frontmatter")]
     MissingFrontmatter,
+    #[error("Unterminated YAML frontmatter")]
     UnterminatedFrontmatter,
+    #[error("Missing required frontmatter field '{0}'")]
     MissingField(&'static str),
+    #[error("Invalid value for '{field}': {message}")]
     InvalidValue {
         field: &'static str,
         message: String,
     },
 }
-
-impl fmt::Display for AgentParseError {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            Self::MissingFrontmatter => write!(f, "Missing YAML frontmatter"),
-            Self::UnterminatedFrontmatter => write!(f, "Unterminated YAML frontmatter"),
-            Self::MissingField(field) => {
-                write!(f, "Missing required frontmatter field '{}'", field)
-            }
-            Self::InvalidValue { field, message } => {
-                write!(f, "Invalid value for '{}': {}", field, message)
-            }
-        }
-    }
-}
-
-impl std::error::Error for AgentParseError {}
 
 // ---------------------------------------------------------------------------
 // Frontmatter helpers (same patterns as middleware/skill.rs)

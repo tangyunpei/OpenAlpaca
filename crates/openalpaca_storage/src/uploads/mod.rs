@@ -107,13 +107,16 @@ use crate::store::{
 /// The typed failures a caller branches on. Returned inside `anyhow::Error`, so
 /// a route recovers them with `err.downcast_ref::<UploadError>()` and maps
 /// [`UploadError::code`] onto the error code it already returns.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
 pub enum UploadError {
     /// The storage path could not be computed.
+    #[error("{0}")]
     Path(String),
     /// Creating the directory or writing the bytes failed.
+    #[error("{0}")]
     Io(String),
     /// The row could not be inserted or read back.
+    #[error("{0}")]
     Db(String),
 }
 
@@ -127,16 +130,6 @@ impl UploadError {
         }
     }
 }
-
-impl fmt::Display for UploadError {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            Self::Path(m) | Self::Io(m) | Self::Db(m) => f.write_str(m),
-        }
-    }
-}
-
-impl std::error::Error for UploadError {}
 
 fn path_error(e: impl fmt::Display) -> anyhow::Error {
     anyhow::Error::new(UploadError::Path(format!(

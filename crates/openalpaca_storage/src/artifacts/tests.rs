@@ -3540,3 +3540,63 @@ fn a_result_file_of_a_project_moved_behind_a_link_is_not_read_through_its_old_ro
     assert!(!back.missing(), "found again");
     assert_eq!(back.sha256, sha256_hex(b"# Plan, moved and edited\n"));
 }
+
+/// Step 9's golden (M28): each variant's text byte for byte, under `{}` and
+/// `{:#}`, with no `source()` — written against the hand-written `Display`
+/// and kept on the derive. The `match` has no `_` arm, so a new variant does
+/// not compile without its row.
+#[test]
+fn every_artifact_error_prints_its_text_whole_and_has_no_source() {
+    let rows = [
+        ArtifactError::NotFound {
+            id: "a1".to_string(),
+        },
+        ArtifactError::Gone {
+            id: "a1".to_string(),
+            path: "/s/\u{202e}a\u{200b}.md".to_string(),
+        },
+        ArtifactError::ProjectMissing {
+            id: "a1".to_string(),
+            root: "/w/app".to_string(),
+        },
+        ArtifactError::VersionNotFound {
+            id: "a1".to_string(),
+            version: 3,
+        },
+        ArtifactError::NotDiffable {
+            id: "a1".to_string(),
+            kind: "image",
+        },
+        ArtifactError::DiffTooLarge {
+            id: "a1".to_string(),
+            version: 2,
+            size_bytes: 5_000_000,
+            limit: 1_048_576,
+        },
+        ArtifactError::NameTaken {
+            path: "/s/plan.md".to_string(),
+        },
+    ];
+    for error in rows {
+        let want = match &error {
+            ArtifactError::NotFound { .. } => "artifact a1 not found",
+            ArtifactError::Gone { .. } => {
+                "artifact a1 is gone: /s/\u{202e}a\u{200b}.md no longer exists"
+            }
+            ArtifactError::ProjectMissing { .. } => {
+                "/w/app: this project's folder is gone or has moved; re-point the project to read its files."
+            }
+            ArtifactError::VersionNotFound { .. } => "artifact a1 has no version 3",
+            ArtifactError::NotDiffable { .. } => "artifact a1 of kind image is not diffable",
+            ArtifactError::DiffTooLarge { .. } => {
+                "artifact a1 version 2 is 5000000 bytes, above the 1048576-byte diff limit; its stored line counts are the summary"
+            }
+            ArtifactError::NameTaken { .. } => {
+                "no free name in 32 tries from /s/plan.md: each is held by a file this store will not replace; move them aside and write again"
+            }
+        };
+        assert_eq!(error.to_string(), want);
+        assert_eq!(format!("{error:#}"), want);
+        assert!(std::error::Error::source(&error).is_none(), "{want}");
+    }
+}

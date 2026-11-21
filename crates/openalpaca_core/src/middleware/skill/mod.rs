@@ -15,39 +15,46 @@ pub mod types;
 pub use renderer::{render_skill_markdown, skill_document_has_content, skill_to_prompt_block};
 pub use types::*;
 
-use std::fmt;
-
 /// Errors that can occur while parsing a SKILL.md file.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
 pub enum SkillParseError {
+    #[error("Missing YAML frontmatter")]
     MissingFrontmatter,
+    #[error("Unterminated YAML frontmatter")]
     UnterminatedFrontmatter,
+    #[error("Missing required frontmatter field '{0}'")]
     MissingField(&'static str),
+    #[error("Invalid YAML: {0}")]
     InvalidYaml(String),
     // What the catalog's scan meets beside a parse (its diagnostics,
     // N-SKILL-2): the first two skip the skill, the last six load it anyway.
+    #[error("Could not read SKILL.md: {0}")]
     ReadFailed(String),
-    TooLarge {
-        bytes: u64,
-        limit: u64,
-    },
-    IdMismatch {
-        declared: String,
-        directory: String,
-    },
+    #[error("SKILL.md is {bytes} bytes, over the {limit}-byte limit")]
+    TooLarge { bytes: u64, limit: u64 },
+    #[error("Frontmatter id '{declared}' does not match directory name '{directory}'")]
+    IdMismatch { declared: String, directory: String },
+    #[error("'{field}' is deprecated and has no effect. {note}")]
     DeprecatedField {
         field: &'static str,
         note: &'static str,
     },
-    SlashConflict {
-        command: String,
-        other: String,
-    },
+    #[error(
+        "Slash command '/{command}' is also claimed by skill '{other}'; this skill now answers it"
+    )]
+    SlashConflict { command: String, other: String },
+    #[error("Unknown frontmatter key '{0}' is ignored")]
     UnknownKey(String),
+    #[error(
+        "The skill declares no tools: 'requires_capabilities', 'tools.allow', 'scripts' and 'depends_on' are all empty, so it runs with none"
+    )]
     NoTools,
     /// A file of a folder that overrides a bundled skill is the version an
     /// earlier build shipped at its path, which the bundle has since changed:
     /// the override runs the old file (subagent design §2.8 W-2).
+    #[error(
+        "{file} is the version an earlier build shipped; the built-in {skill}'s differs, and this override runs the old file"
+    )]
     StaleShippedFile {
         /// The file, as on disk.
         file: String,
@@ -55,48 +62,6 @@ pub enum SkillParseError {
         skill: String,
     },
 }
-
-impl fmt::Display for SkillParseError {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            Self::MissingFrontmatter => write!(f, "Missing YAML frontmatter"),
-            Self::UnterminatedFrontmatter => write!(f, "Unterminated YAML frontmatter"),
-            Self::MissingField(field) => {
-                write!(f, "Missing required frontmatter field '{}'", field)
-            }
-            Self::InvalidYaml(msg) => write!(f, "Invalid YAML: {}", msg),
-            Self::ReadFailed(why) => write!(f, "Could not read SKILL.md: {why}"),
-            Self::TooLarge { bytes, limit } => {
-                write!(f, "SKILL.md is {bytes} bytes, over the {limit}-byte limit")
-            }
-            Self::IdMismatch {
-                declared,
-                directory,
-            } => write!(
-                f,
-                "Frontmatter id '{declared}' does not match directory name '{directory}'"
-            ),
-            Self::DeprecatedField { field, note } => {
-                write!(f, "'{field}' is deprecated and has no effect. {note}")
-            }
-            Self::SlashConflict { command, other } => write!(
-                f,
-                "Slash command '/{command}' is also claimed by skill '{other}'; this skill now answers it"
-            ),
-            Self::UnknownKey(key) => write!(f, "Unknown frontmatter key '{key}' is ignored"),
-            Self::NoTools => write!(
-                f,
-                "The skill declares no tools: 'requires_capabilities', 'tools.allow', 'scripts' and 'depends_on' are all empty, so it runs with none"
-            ),
-            Self::StaleShippedFile { file, skill } => write!(
-                f,
-                "{file} is the version an earlier build shipped; the built-in {skill}'s differs, and this override runs the old file"
-            ),
-        }
-    }
-}
-
-impl std::error::Error for SkillParseError {}
 
 // ---------------------------------------------------------------------------
 // Public API

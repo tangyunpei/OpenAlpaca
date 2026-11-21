@@ -1128,3 +1128,33 @@ fn a_plugin_template_gets_no_ambient_memory_read() {
     assert_eq!(memory_read_entries(&agent), (1, 1));
     assert!(memory_read_admitted(&agent));
 }
+
+/// Step 9's golden (M33): each variant's text byte for byte, under `{}` and
+/// `{:#}`, with no `source()` — written against the hand-written `Display`
+/// and kept on the derive. The `match` has no `_` arm, so a new variant does
+/// not compile without its row.
+#[test]
+fn every_agent_parse_error_prints_its_text_whole_and_has_no_source() {
+    let rows = [
+        AgentParseError::MissingFrontmatter,
+        AgentParseError::UnterminatedFrontmatter,
+        AgentParseError::MissingField("name"),
+        AgentParseError::InvalidValue {
+            field: "model",
+            message: "not \u{202e}a model\u{200b}".to_string(),
+        },
+    ];
+    for error in rows {
+        let want = match &error {
+            AgentParseError::MissingFrontmatter => "Missing YAML frontmatter",
+            AgentParseError::UnterminatedFrontmatter => "Unterminated YAML frontmatter",
+            AgentParseError::MissingField(_) => "Missing required frontmatter field 'name'",
+            AgentParseError::InvalidValue { .. } => {
+                "Invalid value for 'model': not \u{202e}a model\u{200b}"
+            }
+        };
+        assert_eq!(error.to_string(), want);
+        assert_eq!(format!("{error:#}"), want);
+        assert!(std::error::Error::source(&error).is_none(), "{want}");
+    }
+}

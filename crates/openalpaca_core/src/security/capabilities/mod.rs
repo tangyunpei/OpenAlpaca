@@ -5,68 +5,36 @@
 use crate::agent::subagent::AgentConstraints;
 use crate::security::policy::{Principal, Scope, TrustGate};
 use crate::types::Capability;
-use std::fmt;
 
 /// A security policy violation.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, thiserror::Error)]
 pub enum SecurityViolation {
     /// TrustGate denied access for a principal.
+    #[error("Access denied: {reason}")]
     AccessDenied { reason: String },
     /// Agent tried to use a capability on the deny list.
+    #[error("Capability '{capability}' denied for agent '{agent_id}'")]
     CapabilityDenied {
         agent_id: String,
         capability: String,
     },
     /// Agent tried to use a capability not on the allow list.
+    #[error("Capability '{capability}' not in allow list for agent '{agent_id}'")]
     CapabilityNotAllowed {
         agent_id: String,
         capability: String,
     },
     /// User input was blocked by sanitization.
+    #[error("Input blocked: {reason}")]
     InputBlocked { reason: String },
     /// Agent tried to use a model it's not authorized for.
+    #[error("Model access denied: agent='{agent_id}', model='{model_id}', reason='{reason}'")]
     UnauthorizedModelAccess {
         agent_id: String,
         model_id: String,
         reason: String,
     },
 }
-
-impl fmt::Display for SecurityViolation {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            Self::AccessDenied { reason } => write!(f, "Access denied: {}", reason),
-            Self::CapabilityDenied {
-                agent_id,
-                capability,
-            } => write!(
-                f,
-                "Capability '{}' denied for agent '{}'",
-                capability, agent_id
-            ),
-            Self::CapabilityNotAllowed {
-                agent_id,
-                capability,
-            } => write!(
-                f,
-                "Capability '{}' not in allow list for agent '{}'",
-                capability, agent_id
-            ),
-            Self::InputBlocked { reason } => write!(f, "Input blocked: {}", reason),
-            Self::UnauthorizedModelAccess {
-                agent_id,
-                model_id,
-                reason,
-            } => write!(
-                f,
-                "Model access denied: agent='{}', model='{}', reason='{}'",
-                agent_id, model_id, reason
-            ),
-        }
-    }
-}
-
-impl std::error::Error for SecurityViolation {}
 
 /// The ALLOW axis of tool governance: which capabilities a policy admits.
 ///

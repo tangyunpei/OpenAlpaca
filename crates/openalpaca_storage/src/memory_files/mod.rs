@@ -72,7 +72,6 @@ pub use snapshot::{
 };
 
 use crate::store::projects::ProjectId;
-use std::fmt;
 use std::path::PathBuf;
 
 // ============================================================================
@@ -206,26 +205,34 @@ pub fn is_partition_key(s: &str) -> bool {
 
 /// Every refusal the file layer can answer with, by the class the design and
 /// the fixtures name (design §7a, fixtures README *Error classes*).
-#[derive(Debug)]
+#[derive(Debug, thiserror::Error)]
 pub enum MemoryFilesError {
     /// `invalid_input`: a limit, a grammar or a shape was violated; nothing was
     /// written.
+    #[error("invalid input: {0}")]
     InvalidInput(String),
     /// `not_found`: no note of this partition has that id.
+    #[error("note {0} not found")]
     NotFound(NoteId),
     /// `revision_conflict`: the note's current revision is not the one the
     /// caller expected. Carries the current one.
+    #[error("note {id} changed since it was read: current revision is {current_revision}")]
     RevisionConflict {
         id: NoteId,
         current_revision: String,
     },
     /// `authority_conflict`: a tool call tried to edit, archive or supersede a
     /// `user`-origin note (design §4, G2).
+    #[error("{message}")]
     AuthorityConflict { id: NoteId, message: String },
     /// `confirm_refused`: `confirm` from a context that is not a user-directed
     /// surface (design §4).
+    #[error("{message}")]
     ConfirmRefused { id: NoteId, message: String },
     /// `quarantined`: the partition's snapshot is missing or invalid (design §2).
+    #[error(
+        "memory partition {partition_key} is quarantined ({reason}); run `openalpaca memory doctor --repair`"
+    )]
     Quarantined {
         partition_key: String,
         reason: String,
@@ -233,74 +240,46 @@ pub enum MemoryFilesError {
     /// The path to the partition has a symlink, a junction or a non-directory
     /// at `component` (design §3 rule 1); the partition is refused. The caller
     /// decides the fallback and logs the one WARN.
+    #[error("memory partition refused: {component} is {reason}")]
     PathRefused { component: PathBuf, reason: String },
     /// `doctor --repair` met two files sharing one id (design §6).
+    #[error(fmt = duplicate_id)]
     DuplicateId { id: NoteId, files: Vec<PathBuf> },
     /// `adopt` met an existing partition of the current owner in a scope it
     /// would rename into (design §6). (An argument that is not an owner key
     /// is `InvalidInput`, refused before anything is looked at.)
+    #[error("adopt refused: {0}")]
     AdoptCollision(String),
     /// R12: the scope names a project root with no folder under the home
     /// store's `projects/`. A reader treats it as an empty project (the
     /// service, the doctor, `doctor --repair`); a writer reports it. Decided
     /// before a path is joined, so nothing is created.
+    #[error("the project {root} is not registered; its notes read as empty")]
     NotRegistered { root: PathBuf },
     /// A test-injected crash: the mutation stopped after the named step with
     /// the on-disk state exactly as it was at that point.
     #[cfg(test)]
+    #[error("crashed after {0:?}")]
     Crashed(CrashPoint),
     /// Anything the file system refused.
+    #[error("{0:#}")]
     Io(anyhow::Error),
 }
 
-impl fmt::Display for MemoryFilesError {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            Self::InvalidInput(m) => write!(f, "invalid input: {m}"),
-            Self::NotFound(id) => write!(f, "note {id} not found"),
-            Self::RevisionConflict {
-                id,
-                current_revision,
-            } => write!(
-                f,
-                "note {id} changed since it was read: current revision is {current_revision}"
-            ),
-            Self::AuthorityConflict { message, .. } => write!(f, "{message}"),
-            Self::ConfirmRefused { message, .. } => write!(f, "{message}"),
-            Self::Quarantined {
-                partition_key,
-                reason,
-            } => write!(
-                f,
-                "memory partition {partition_key} is quarantined ({reason}); run `openalpaca memory doctor --repair`"
-            ),
-            Self::PathRefused { component, reason } => write!(
-                f,
-                "memory partition refused: {} is {reason}",
-                component.display()
-            ),
-            Self::DuplicateId { id, files } => {
-                let names: Vec<String> = files.iter().map(|p| p.display().to_string()).collect();
-                write!(
-                    f,
-                    "two note files share the id {id}: {}; the service cannot choose, remove one by hand",
-                    names.join(" and ")
-                )
-            }
-            Self::AdoptCollision(m) => write!(f, "adopt refused: {m}"),
-            Self::NotRegistered { root } => write!(
-                f,
-                "the project {} is not registered; its notes read as empty",
-                root.display()
-            ),
-            #[cfg(test)]
-            Self::Crashed(point) => write!(f, "crashed after {point:?}"),
-            Self::Io(e) => write!(f, "{e:#}"),
-        }
-    }
+/// [`MemoryFilesError::DuplicateId`]'s sentence, each file as `Path::display`
+/// shows it.
+fn duplicate_id(
+    id: &NoteId,
+    files: &[PathBuf],
+    f: &mut std::fmt::Formatter<'_>,
+) -> std::fmt::Result {
+    let names: Vec<String> = files.iter().map(|p| p.display().to_string()).collect();
+    write!(
+        f,
+        "two note files share the id {id}: {}; the service cannot choose, remove one by hand",
+        names.join(" and ")
+    )
 }
-
-impl std::error::Error for MemoryFilesError {}
 
 impl From<anyhow::Error> for MemoryFilesError {
     fn from(e: anyhow::Error) -> Self {

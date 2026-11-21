@@ -213,19 +213,12 @@ pub(crate) fn unauthorized_status(
 /// What the streamable-HTTP client's redirect rule hands reqwest for a hop it
 /// refuses (`transport/http.rs`). reqwest keeps it as the source of the
 /// redirect error it returns, which is how [`typed_http_failure`] finds it.
-#[derive(Debug)]
+#[derive(Debug, thiserror::Error)]
+#[error("redirect to {origin} refused")]
 pub(crate) struct RefusedRedirect {
     /// The target's origin — scheme, host and port, never a path or query.
     pub(crate) origin: String,
 }
-
-impl std::fmt::Display for RefusedRedirect {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "redirect to {} refused", self.origin)
-    }
-}
-
-impl std::error::Error for RefusedRedirect {}
 
 /// The typed failure a streamable-HTTP transport error carries, if any: a
 /// credential the server rejected ([`McpError::Unauthorized`]) or a redirect
@@ -476,5 +469,19 @@ mod tests {
             .to_string(),
             "server redirected to https://other.example:8443; set `url` to the canonical endpoint"
         );
+    }
+
+    /// Step 9's golden (E1 (b)): `RefusedRedirect`'s text byte for byte,
+    /// under `{}` and `{:#}`, with no `source()` — written against the
+    /// hand-written `Display` and kept on the derive.
+    #[test]
+    fn a_refused_redirect_names_its_origin_and_has_no_source() {
+        let refused = RefusedRedirect {
+            origin: "https://other\u{202e}.example\u{200b}:8443".to_string(),
+        };
+        let want = "redirect to https://other\u{202e}.example\u{200b}:8443 refused";
+        assert_eq!(refused.to_string(), want);
+        assert_eq!(format!("{refused:#}"), want);
+        assert!(std::error::Error::source(&refused).is_none());
     }
 }

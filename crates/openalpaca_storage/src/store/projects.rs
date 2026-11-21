@@ -306,24 +306,41 @@ impl Project {
 /// Why a project operation was refused — returned **inside** `anyhow::Error`
 /// (the `ArtifactError` convention, `artifacts/mod.rs`), recovered with
 /// `downcast_ref`. `Display` is one sentence a person can act on.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
 pub enum ProjectError {
     /// R12: a root with no folder under `projects/`. `store_root` returns it (S3).
+    #[error("{root} is not a project OpenAlpaca knows: no folder under projects/ records it")]
     NotRegistered { root: String },
     /// R13: the path is the home store, inside it, or contains it.
+    #[error(
+        "{path} is, contains or lies inside the OpenAlpaca home store, so it cannot be a \
+         project. Name the project directory itself"
+    )]
     IsHome { path: String },
     /// The path does not exist or is not a directory (register, choose,
     /// re-point target).
+    #[error("{path} is not a directory. Create it first, or name the folder the project is in now")]
     NotADirectory { path: String },
     /// ST-20: the re-point target is already a project, or one of the five
     /// path columns names it.
+    #[error(
+        "{path} is already a project of its own, or OpenAlpaca's records already name it. \
+         Re-pointing onto it would merge two projects: delete that project's data first, \
+         or re-point onto another path"
+    )]
     Exists { path: String },
     /// ST-20 against a re-point that has not finished: the target is that
     /// project's new root or its old one. The same code as [`Self::Exists`];
     /// its sentence names the start of the daemon that finishes the re-point,
     /// since deleting that project's data is refused until then (residual X7).
+    #[error(
+        "{path} is either path of another project's re-point that has not finished; the \
+         next start of the daemon finishes that re-point. Re-pointing onto it would merge \
+         two projects: re-point onto another path"
+    )]
     RepointUnfinished { path: String },
     /// A re-point onto the path the project already has.
+    #[error("{path} is already where the project is")]
     SamePath { path: String },
 }
 
@@ -339,41 +356,6 @@ impl ProjectError {
         }
     }
 }
-
-impl fmt::Display for ProjectError {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            Self::NotRegistered { root } => write!(
-                f,
-                "{root} is not a project OpenAlpaca knows: no folder under projects/ records it"
-            ),
-            Self::IsHome { path } => write!(
-                f,
-                "{path} is, contains or lies inside the OpenAlpaca home store, so it cannot be a \
-                 project. Name the project directory itself"
-            ),
-            Self::NotADirectory { path } => write!(
-                f,
-                "{path} is not a directory. Create it first, or name the folder the project is in now"
-            ),
-            Self::Exists { path } => write!(
-                f,
-                "{path} is already a project of its own, or OpenAlpaca's records already name it. \
-                 Re-pointing onto it would merge two projects: delete that project's data first, \
-                 or re-point onto another path"
-            ),
-            Self::RepointUnfinished { path } => write!(
-                f,
-                "{path} is either path of another project's re-point that has not finished; the \
-                 next start of the daemon finishes that re-point. Re-pointing onto it would merge \
-                 two projects: re-point onto another path"
-            ),
-            Self::SamePath { path } => write!(f, "{path} is already where the project is"),
-        }
-    }
-}
-
-impl std::error::Error for ProjectError {}
 
 /// Whether `e`, anywhere in its chain, is [`ProjectError::NotRegistered`] —
 /// how a reader learns after the fact that a root is unregistered (R12).

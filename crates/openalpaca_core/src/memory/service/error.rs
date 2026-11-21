@@ -3,27 +3,38 @@
 
 use openalpaca_storage::memory_files::{MemoryFilesError, NoteId, Origin};
 use openalpaca_storage::memory_index::IndexError;
-use std::fmt;
 
-#[derive(Debug)]
+#[derive(Debug, thiserror::Error)]
 pub enum MemoryError {
     /// `fixture:no_owner` (design §3): the id is not a `global_user` row —
     /// the `system` sentinel, a `provider:id` string, or a daemon with no
     /// database to ask.
+    #[error(
+        "no memory owner: `{0}` is not a known user of this daemon, so nothing is remembered for it"
+    )]
     NoOwner(String),
     /// `fixture:capability_denied` (design §7a): the context lacks the
     /// capability the operation needs. Names it (`memory_read`,
     /// `memory_write`, `memory_forget`).
+    #[error(
+        "this context was not granted the `{capability}` capability, so the memory service refused the call"
+    )]
     CapabilityDenied { capability: &'static str },
     /// `invalid_input`: a limit, a grammar, a shape or an unknown field.
+    #[error("invalid input: {0}")]
     InvalidInput(String),
     /// `not_found`: no note of this owner's partitions has that id.
+    #[error("note {0} not found")]
     NotFound(NoteId),
     /// `not_found`, for `?revision=`: the note exists but `.history` keeps
     /// no copy under that revision (design §2: the last 5 service-written
     /// revisions, and none of an external edit).
+    #[error(
+        "note {id} has no kept revision {revision}: .history holds the last 5 service-written revisions only"
+    )]
     RevisionUnavailable { id: NoteId, revision: String },
     /// `revision_conflict`: carries the current revision.
+    #[error("note {id} changed since it was read: current revision is {current_revision}")]
     RevisionConflict {
         id: NoteId,
         current_revision: String,
@@ -32,11 +43,16 @@ pub enum MemoryError {
     /// of one that changes nothing a suggestion carries (design §4, G2), or
     /// an edit of a saved note a forget took out of recall (the L8
     /// close-out, design §6).
+    #[error("{message}")]
     AuthorityConflict { id: NoteId, message: String },
     /// `confirm_refused`: `confirm` from a context that is not a
     /// user-directed surface (design §4).
+    #[error("{message}")]
     ConfirmRefused { id: NoteId, message: String },
     /// `not_undoable` (design §6): the origin is no longer `extracted_user`.
+    #[error(
+        "note {id} is not undoable: its origin is `{origin}` — neither learned from your words (`extracted_user`) nor a pending suggestion; forget it instead"
+    )]
     NotUndoable { id: NoteId, origin: Origin },
     /// `not_a_suggestion` (design 09 §4.2 rule 5): `memory_confirm` names a
     /// note that is not a suggestion confirmable in chat — not a candidate
@@ -45,27 +61,40 @@ pub enum MemoryError {
     /// suggestion and, since LQ11, the chat model's own are confirmable in
     /// chat when they cite one.) A note refused so is confirmable, if at
     /// all, only in the Memory view or the CLI.
+    #[error("{message}")]
     NotASuggestion { id: NoteId, message: String },
     /// `approval_required` (design 09 §4.2 rule 6): `memory_confirm` ran
     /// without a person's Approve on its card for this call. Nothing is
     /// written.
+    #[error(
+        "note {id} was not confirmed: only the user's Approve on the confirmation card for this call confirms a suggestion, and there was none. Nothing was written."
+    )]
     ApprovalRequired { id: NoteId },
     /// `quarantined` (design §2): the partition's snapshot is missing or
     /// invalid; only `doctor --repair` lifts it.
+    #[error(
+        "memory partition {partition_key} is quarantined ({reason}); run `openalpaca memory doctor --repair`"
+    )]
     Quarantined {
         partition_key: String,
         reason: String,
     },
     /// `fixture:write_pending` (design §3, workspace move step 1): a memory
     /// write for that project is in flight.
+    #[error("a memory write for {key} is in flight; try again")]
     WritePending { key: String },
     /// `index_rebuilding` (the L8 product slice's P8): a read only the
     /// search index can answer — `memory_timeline` — met a whole rebuild of
     /// it, owed or running, and answers at once rather than wait it out (up
     /// to half a minute at 100K notes). Search and recall read the note
     /// files meanwhile; the timeline answers once the index is back.
+    #[error(
+        "the memory search index is being rebuilt, so the timeline cannot be read now; \
+         try again in a minute. memory_search and memory_read answer meanwhile"
+    )]
     IndexRebuilding,
     /// Anything the file system or the index refused.
+    #[error("{0:#}")]
     Internal(anyhow::Error),
 }
 
@@ -94,62 +123,6 @@ impl MemoryError {
         Self::InvalidInput(msg.into())
     }
 }
-
-impl fmt::Display for MemoryError {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            Self::NoOwner(id) => write!(
-                f,
-                "no memory owner: `{id}` is not a known user of this daemon, so nothing is remembered for it"
-            ),
-            Self::CapabilityDenied { capability } => write!(
-                f,
-                "this context was not granted the `{capability}` capability, so the memory service refused the call"
-            ),
-            Self::InvalidInput(m) => write!(f, "invalid input: {m}"),
-            Self::NotFound(id) => write!(f, "note {id} not found"),
-            Self::RevisionUnavailable { id, revision } => write!(
-                f,
-                "note {id} has no kept revision {revision}: .history holds the last 5 service-written revisions only"
-            ),
-            Self::RevisionConflict {
-                id,
-                current_revision,
-            } => write!(
-                f,
-                "note {id} changed since it was read: current revision is {current_revision}"
-            ),
-            Self::AuthorityConflict { message, .. }
-            | Self::ConfirmRefused { message, .. }
-            | Self::NotASuggestion { message, .. } => f.write_str(message),
-            Self::ApprovalRequired { id } => write!(
-                f,
-                "note {id} was not confirmed: only the user's Approve on the confirmation card for this call confirms a suggestion, and there was none. Nothing was written."
-            ),
-            Self::NotUndoable { id, origin } => write!(
-                f,
-                "note {id} is not undoable: its origin is `{origin}` — neither learned from your words (`extracted_user`) nor a pending suggestion; forget it instead"
-            ),
-            Self::Quarantined {
-                partition_key,
-                reason,
-            } => write!(
-                f,
-                "memory partition {partition_key} is quarantined ({reason}); run `openalpaca memory doctor --repair`"
-            ),
-            Self::WritePending { key } => {
-                write!(f, "a memory write for {key} is in flight; try again")
-            }
-            Self::IndexRebuilding => f.write_str(
-                "the memory search index is being rebuilt, so the timeline cannot be read now; \
-                 try again in a minute. memory_search and memory_read answer meanwhile",
-            ),
-            Self::Internal(e) => write!(f, "{e:#}"),
-        }
-    }
-}
-
-impl std::error::Error for MemoryError {}
 
 impl From<MemoryFilesError> for MemoryError {
     fn from(e: MemoryFilesError) -> Self {
