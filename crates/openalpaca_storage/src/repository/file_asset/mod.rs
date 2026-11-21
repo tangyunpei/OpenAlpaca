@@ -133,22 +133,70 @@ impl<'a> FileAssetRepository<'a> {
     }
 
     /// Every row found [`FileAssetStatus::Processing`] made
-    /// [`FileAssetStatus::Uploaded`] again, so the file-processing worker
-    /// lists it on its next poll; returns how many.
+    /// [`FileAssetStatus::Error`], its attempt counted as a failed one;
+    /// returns how many.
+    ///
+    /// The worker's `Processing` write tags `extract_error` with the attempt
+    /// it starts (`[attempt:N] …`); this keeps that tag and puts `reason`
+    /// after it, so the poll's retry check counts the cut attempt like any
+    /// failure and a file that takes the process down with it is tried at
+    /// most `extraction_retry_count + 1` times. A row with no tag (written
+    /// before the worker tagged it) counts as attempt 1. Only `status`,
+    /// `extract_error` and `updated_at` change.
     ///
     /// Only for the worker's start: a row is `Processing` while a task of the
     /// process that wrote it extracts its text, so one found at the start was
     /// left by a process that stopped mid-extraction. Called at any later
-    /// time it would take up a row still in flight, and extract it twice.
-    pub fn requeue_processing(&self) -> Result<usize> {
+    /// time it would fail a row still in flight.
+    pub fn fail_interrupted_processing(&self, reason: &str) -> Result<usize> {
         self.db.with_connection(|conn| {
             Ok(conn.execute(
-                "UPDATE file_assets SET status = ?1, updated_at = datetime('now') WHERE status = ?2",
+                "UPDATE file_assets
+                    SET status = ?1,
+                        extract_error = CASE
+                            WHEN extract_error LIKE '[attempt:%]%'
+                                THEN substr(extract_error, 1, instr(extract_error, ']'))
+                            ELSE '[attempt:1]'
+                        END || ' ' || ?3,
+                        updated_at = datetime('now')
+                  WHERE status = ?2",
                 rusqlite::params![
-                    FileAssetStatus::Uploaded.as_str(),
-                    FileAssetStatus::Processing.as_str()
+                    FileAssetStatus::Error.as_str(),
+                    FileAssetStatus::Processing.as_str(),
+                    reason
                 ],
             )?)
+        })
+    }
+
+    /// Up to `limit` [`FileAssetStatus::Error`] rows still within their
+    /// retries, oldest first: those whose `[attempt:N]` tag has
+    /// `N <= max_attempts`, a row with no tag counting as attempt 0.
+    ///
+    /// The check is in the query, before the limit, so rows that have spent
+    /// their retries never crowd out one that has not.
+    pub fn list_retryable_errors(&self, max_attempts: u32, limit: usize) -> Result<Vec<FileAsset>> {
+        self.db.with_connection(|conn| {
+            let mut stmt = conn.prepare(&format!(
+                "SELECT {FILE_ASSET_COLUMNS} FROM file_assets
+                 WHERE status = ?1
+                   AND CASE
+                           WHEN extract_error LIKE '[attempt:%]%'
+                               THEN CAST(substr(extract_error, 10, instr(extract_error, ']') - 10) AS INTEGER)
+                           ELSE 0
+                       END <= ?2
+                 ORDER BY created_at ASC LIMIT ?3"
+            ))?;
+            let mut assets = Vec::new();
+            let mut rows = stmt.query(rusqlite::params![
+                FileAssetStatus::Error.as_str(),
+                i64::from(max_attempts),
+                limit as i64
+            ])?;
+            while let Some(row) = rows.next()? {
+                assets.push(row_to_file_asset(row)?);
+            }
+            Ok(assets)
         })
     }
 
