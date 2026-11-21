@@ -132,6 +132,26 @@ impl<'a> FileAssetRepository<'a> {
         })
     }
 
+    /// Every row found [`FileAssetStatus::Processing`] made
+    /// [`FileAssetStatus::Uploaded`] again, so the file-processing worker
+    /// lists it on its next poll; returns how many.
+    ///
+    /// Only for the worker's start: a row is `Processing` while a task of the
+    /// process that wrote it extracts its text, so one found at the start was
+    /// left by a process that stopped mid-extraction. Called at any later
+    /// time it would take up a row still in flight, and extract it twice.
+    pub fn requeue_processing(&self) -> Result<usize> {
+        self.db.with_connection(|conn| {
+            Ok(conn.execute(
+                "UPDATE file_assets SET status = ?1, updated_at = datetime('now') WHERE status = ?2",
+                rusqlite::params![
+                    FileAssetStatus::Uploaded.as_str(),
+                    FileAssetStatus::Processing.as_str()
+                ],
+            )?)
+        })
+    }
+
     /// Get total storage bytes used by uploads.
     ///
     /// Read at `routes/files.rs` against the 500 MB upload cap, so it counts

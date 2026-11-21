@@ -483,3 +483,30 @@ fn a_runs_result_files_are_listed_apart_from_its_by_products() {
     assert_eq!(results[0].agent_id.as_deref(), Some("writing_agent::a1"));
     assert!(repo.project_files_for_task("task-none").unwrap().is_empty());
 }
+
+/// PROCESSING-PICKUP: the worker's start-only requeue moves `Processing`
+/// rows, and nothing else, back to `Uploaded`, keeping what the row holds.
+#[test]
+fn requeue_processing_moves_only_processing_rows() {
+    let db = test_db();
+    let repo = FileAssetRepository::new(&db);
+    for (id, status) in [
+        ("left", FileAssetStatus::Processing),
+        ("new", FileAssetStatus::Uploaded),
+        ("done", FileAssetStatus::Ready),
+        ("failed", FileAssetStatus::Error),
+    ] {
+        let mut row = asset(id, 10);
+        row.status = status;
+        repo.insert(&row).unwrap();
+    }
+
+    assert_eq!(repo.requeue_processing().unwrap(), 1);
+    assert_eq!(repo.requeue_processing().unwrap(), 0, "nothing left");
+
+    let status = |id: &str| repo.get_by_id(id).unwrap().unwrap().status;
+    assert_eq!(status("left"), FileAssetStatus::Uploaded);
+    assert_eq!(status("new"), FileAssetStatus::Uploaded);
+    assert_eq!(status("done"), FileAssetStatus::Ready);
+    assert_eq!(status("failed"), FileAssetStatus::Error);
+}

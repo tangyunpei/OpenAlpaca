@@ -63,12 +63,28 @@ pub fn spawn_chat_cleanup(
 /// Polls for newly-uploaded file assets and extracts text content (PDF, plain text).
 /// Vision-model-native formats (images) are left with empty extracted_text.
 /// Failed extractions go to `Error` status and are retried up to `extraction_retry_count` times.
+///
+/// At its start, once, before its first poll, every row found `Processing`
+/// is made `Uploaded` again: a daemon stopped mid-extraction leaves its row
+/// there, which the poll never lists and the chat service reads as pending.
+/// None can be in flight then — this process has started no extraction, and
+/// the singleton lock keeps any other daemon off the store. A later poll
+/// never does this: a row `Processing` then is a task of this process.
 pub fn spawn_file_processing_worker(
     db: Database,
     daemon_config: Arc<ArcSwap<openalpaca_core::daemon_config::DaemonConfig>>,
     cancel: CancellationToken,
 ) {
     tokio::spawn(async move {
+        match FileAssetRepository::new(&db).requeue_processing() {
+            Ok(0) => {}
+            Ok(n) => tracing::info!(
+                "File processing worker: {n} assets left processing at a stop are queued again"
+            ),
+            Err(e) => tracing::warn!(
+                "File processing worker: failed to queue again the assets left processing: {e}"
+            ),
+        }
         loop {
             let cfg = daemon_config.load();
             let gov = &cfg.upload.governance;
@@ -571,6 +587,126 @@ mod tests {
                 .unwrap()
                 .is_some(),
             "the row stays"
+        );
+    }
+
+    /// One upload row: a small text file the worker can extract.
+    fn upload_row(db: &Database, dir: &std::path::Path, id: &str, status: FileAssetStatus) {
+        let file = dir.join(format!("{id}.txt"));
+        std::fs::write(&file, format!("text of {id}")).unwrap();
+        FileAssetRepository::new(db)
+            .insert(&openalpaca_storage::FileAsset {
+                id: id.to_string(),
+                owner_id: "owner-1".to_string(),
+                sha256: id.to_string(),
+                filename: format!("{id}.txt"),
+                mime_type: "text/plain".to_string(),
+                size_bytes: 12,
+                storage_path: file.to_string_lossy().into_owned(),
+                status,
+                extracted_text: None,
+                extract_error: None,
+                metadata_json: None,
+                created_at: String::new(),
+                updated_at: String::new(),
+            })
+            .expect("insert upload row");
+    }
+
+    fn status_of(db: &Database, id: &str) -> FileAssetStatus {
+        FileAssetRepository::new(db)
+            .get_by_id(id)
+            .unwrap()
+            .expect("the row exists")
+            .status
+    }
+
+    /// Waits (real time: the worker extracts on a blocking thread) until the
+    /// row leaves the pending states, or the deadline passes.
+    async fn settled(db: &Database, id: &str) -> FileAssetStatus {
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
+        loop {
+            let status = status_of(db, id);
+            if matches!(status, FileAssetStatus::Ready | FileAssetStatus::Error)
+                || std::time::Instant::now() >= deadline
+            {
+                return status;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+        }
+    }
+
+    /// The worker on a 1 s poll (below what validation allows a person to
+    /// set, so the test is quick), with its token to stop it.
+    fn start_worker(db: &Database) -> CancellationToken {
+        let mut cfg = openalpaca_core::daemon_config::DaemonConfig::default();
+        cfg.upload.governance.processing_poll_interval_secs = 1;
+        let cancel = CancellationToken::new();
+        spawn_file_processing_worker(
+            db.clone(),
+            Arc::new(ArcSwap::from_pointee(cfg)),
+            cancel.clone(),
+        );
+        cancel
+    }
+
+    /// PROCESSING-PICKUP: a daemon stopped mid-extraction leaves its row
+    /// `Processing`, which the chat service reads as pending and the poll
+    /// never lists — so the attachment stayed pending forever. The worker,
+    /// at its start, takes such a row up again and it reaches Ready.
+    #[tokio::test]
+    async fn a_row_left_processing_at_a_stop_is_picked_up_when_the_worker_starts() {
+        let home = tempfile::tempdir().unwrap();
+        let _env = crate::test_util::HomeStoreGuard::set(&home.path().join("home"));
+        let dir = tempfile::tempdir().unwrap();
+        let db = test_db(&dir);
+        // As a stop between the worker's `Processing` write and its last
+        // write leaves it.
+        upload_row(&db, dir.path(), "stuck", FileAssetStatus::Processing);
+        assert_eq!(status_of(&db, "stuck"), FileAssetStatus::Processing);
+
+        let cancel = start_worker(&db);
+        let status = settled(&db, "stuck").await;
+        cancel.cancel();
+
+        assert_eq!(status, FileAssetStatus::Ready, "picked up at the start");
+        let row = FileAssetRepository::new(&db)
+            .get_by_id("stuck")
+            .unwrap()
+            .unwrap();
+        assert_eq!(row.extracted_text.as_deref(), Some("text of stuck"));
+        assert_eq!(row.extract_error, None);
+    }
+
+    /// Regression guard: only the worker's start takes `Processing` rows up
+    /// again. A row that turns `Processing` while the worker runs is in
+    /// flight in this process, so a later poll must leave it alone, or one
+    /// file would be extracted twice.
+    #[tokio::test]
+    async fn a_row_that_turns_processing_after_the_start_is_left_to_its_task() {
+        let home = tempfile::tempdir().unwrap();
+        let _env = crate::test_util::HomeStoreGuard::set(&home.path().join("home"));
+        let dir = tempfile::tempdir().unwrap();
+        let db = test_db(&dir);
+
+        let cancel = start_worker(&db);
+        // A first row through: the worker's start is behind it.
+        upload_row(&db, dir.path(), "first", FileAssetStatus::Uploaded);
+        assert_eq!(settled(&db, "first").await, FileAssetStatus::Ready);
+
+        // As a task of this process leaves it while it extracts.
+        upload_row(&db, dir.path(), "in-flight", FileAssetStatus::Processing);
+        // Two more polls, each proven by a row it took through.
+        for id in ["second", "third"] {
+            upload_row(&db, dir.path(), id, FileAssetStatus::Uploaded);
+            assert_eq!(settled(&db, id).await, FileAssetStatus::Ready);
+        }
+        cancel.cancel();
+
+        assert_eq!(
+            status_of(&db, "in-flight"),
+            FileAssetStatus::Processing,
+            "a later poll never takes up a row in flight"
         );
     }
 }
