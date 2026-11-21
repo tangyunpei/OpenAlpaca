@@ -596,7 +596,10 @@ Never runs.
         }
 
         async fn chat(&self, _request: ChatRequest) -> Result<ChatResponse, LlmError> {
-            Err(LlmError::Http("provider down".to_string()))
+            Err(LlmError::Transport {
+                kind: openalpaca_llm::error::TransportKind::ConnectRefused,
+                message: "provider down".to_string(),
+            })
         }
     }
 

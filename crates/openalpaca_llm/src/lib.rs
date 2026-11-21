@@ -353,34 +353,12 @@ mod tests {
                 status: 500,
                 message: "boom".to_string(),
             },
-            LlmError::Http("operation timed out".to_string()),
+            LlmError::Transport {
+                kind: crate::error::TransportKind::ConnectTimeout,
+                message: "operation timed out".to_string(),
+            },
         ] {
             assert!(err.is_transient() && err.is_retryable_on_key(), "{err}");
-        }
-    }
-
-    /// The `Http` arm still reads its text: no provider builds it any more
-    /// (the plugin provider bridge, whose failed `provider/chat` did, is
-    /// removed, M86), but a test standing in for a provider may, and these
-    /// are the words it is read for. These strings pinned the providers'
-    /// errors before M57, which never carried them.
-    #[test]
-    fn the_http_arm_reads_its_own_text() {
-        for (text, transient) in [
-            ("error sending request: operation timed out", true),
-            ("connection reset by peer", true),
-            ("error sending request: broken pipe", true),
-            ("connection closed before message completed", true),
-            ("error reading response: incomplete message", true),
-            ("dns error: failed to lookup address", false),
-            (
-                "error trying to connect: ssl connect error: certificate verify failed",
-                false,
-            ),
-            ("tcp connect error: Connection refused (os error 61)", false),
-        ] {
-            let err = LlmError::Http(text.into());
-            assert_eq!(err.is_transient(), transient, "{text}");
         }
     }
 

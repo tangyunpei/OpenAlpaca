@@ -837,9 +837,10 @@ mod tests {
             &self,
             _request: openalpaca_llm::ChatRequest,
         ) -> Result<openalpaca_llm::ChatResponse, openalpaca_llm::LlmError> {
-            Err(openalpaca_llm::LlmError::Http(
-                "stub provider is never called".to_string(),
-            ))
+            Err(openalpaca_llm::LlmError::Transport {
+                kind: openalpaca_llm::error::TransportKind::ConnectRefused,
+                message: "stub provider is never called".to_string(),
+            })
         }
     }
 

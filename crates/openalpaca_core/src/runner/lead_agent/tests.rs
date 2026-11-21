@@ -3017,12 +3017,12 @@ impl openalpaca_llm::LlmProvider for ScriptedProvider {
             .lock()
             .unwrap()
             .push(request.messages.as_ref().clone());
-        let response = self
-            .responses
-            .lock()
-            .unwrap()
-            .pop_front()
-            .ok_or_else(|| openalpaca_llm::LlmError::Http("script exhausted".to_string()));
+        let response = self.responses.lock().unwrap().pop_front().ok_or_else(|| {
+            openalpaca_llm::LlmError::Transport {
+                kind: openalpaca_llm::error::TransportKind::TlsOrOther,
+                message: "script exhausted".to_string(),
+            }
+        });
         let delay = self.delays.lock().unwrap().get(&call).copied();
         if let Some(by) = delay {
             tokio::time::sleep(by).await;
@@ -7780,7 +7780,11 @@ fn a_subagent_failure_says_a_retry_will_not_help_only_where_it_cannot() {
     }
     for transient in [
         LlmRouterError::MaxRetriesExceeded.to_string(),
-        LlmRouterError::Llm(LlmError::Http("connection reset".to_string())).to_string(),
+        LlmRouterError::Llm(LlmError::Transport {
+            kind: openalpaca_llm::error::TransportKind::ResetOrClosed,
+            message: "connection reset".to_string(),
+        })
+        .to_string(),
         LlmRouterError::Llm(LlmError::Api {
             status: 529,
             message: "overloaded".to_string(),

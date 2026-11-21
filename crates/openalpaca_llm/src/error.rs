@@ -1,12 +1,5 @@
 #[derive(Debug, Clone, thiserror::Error)]
 pub enum LlmError {
-    /// A transport failure described by its text alone. No provider builds it
-    /// any more — they map `reqwest::Error` to [`Self::Transport`] (M57), and
-    /// the plugin provider bridge that did is removed (M86) — but tests
-    /// standing in for a provider do.
-    #[error("HTTP error: {0}")]
-    Http(String),
-
     /// The request or its answer failed in transit, classified from reqwest's
     /// own predicates rather than from its text (M57).
     ///
@@ -143,23 +136,6 @@ impl TransportKind {
     }
 }
 
-/// Check if an [`LlmError::Http`] message indicates a transient network issue.
-/// Only timeout, connection reset, broken pipe, and premature close are transient.
-/// DNS failures, TLS errors, and connection refused are NOT transient.
-///
-/// It reads text, so it serves only the variant that carries nothing else; a
-/// provider's own failures are [`LlmError::Transport`], classified by kind.
-fn is_transient_http_error(msg: &str) -> bool {
-    let lower = msg.to_lowercase();
-    lower.contains("timed out")
-        || lower.contains("timeout")
-        || lower.contains("reset by peer")
-        || lower.contains("connection reset")
-        || lower.contains("broken pipe")
-        || lower.contains("connection closed")
-        || lower.contains("incomplete message")
-}
-
 impl LlmError {
     /// Whether this error is transient: worth trying again. The fallback chain
     /// and the agentic loop retry every transient error; the router's key
@@ -170,7 +146,6 @@ impl LlmError {
     /// retries (LOCAL-HOUR-NO-RETRY).
     pub fn is_transient(&self) -> bool {
         match self {
-            Self::Http(msg) => is_transient_http_error(msg),
             Self::Transport { kind, .. } => kind.is_transient(),
             Self::RateLimited { .. } => true,
             Self::Overloaded { .. } => true,
