@@ -1239,8 +1239,11 @@ depends on the registry dropping the last reference.
   drains it in 1 KB chunks into the client's `StderrTail`
   (`McpClientConfig::stderr_tail`, the caller's handle, a fresh tail per
   spawn), keeping the last 4 KB, and stops 250 ms after the reap.
-  `tools::extensions::stderr` masks it (the load's values, a value cut at
-  the tail's head or at the end of an unterminated last line, inherited
+  `tools::extensions::stderr` masks it (the load's values, a value's
+  `\r\n` read as `\n`; a value cut at the tail's head (for one holding
+  a newline, every later line of it); a value cut at the end of an
+  unterminated last line (for one holding a newline, also just after
+  one of its newlines); inherited
   secret-named variables, generic shapes: `<masked>`), cuts it to 4 KB
   from the end and escapes it (`escape_hidden`) into a `Failed` row's
   `detail` only — at the four places a `Failed` detail is written — never
