@@ -1470,9 +1470,10 @@ plugin awaiting consent, `Configure` on one missing keys (one input per missing
 key, posted one at a time — setting the last one starts the plugin without a
 second call), `Retry` on a crashed or unreachable one, and `Remove` on an orphan
 row. A stdio MCP server whose process exited reads crashed at once, its detail
-naming the exit status and ending with the last 4 KB the process wrote to its
-stderr, credentials masked (any failed stdio server's detail ends so: the
-Daemon Manual's MCP Servers section says what is masked); its tools stay
+naming the exit status and ending, when the process wrote to its stderr, with
+up to the last 4 KB it wrote there, credentials masked (so does any failed
+stdio server's detail whose process wrote any: the Daemon Manual's MCP
+Servers section says what is masked); its tools stay
 available, and the next call to one of them starts it again and turns the row
 back on — `Retry` does the same sooner.
 `Reload`, `Update` and `Uninstall` live in the row's overflow menu instead,

@@ -2692,7 +2692,8 @@ async fn a_server_that_writes_1_mb_to_its_stderr_still_answers_tools_list() {
 /// takes its pre-send reconnect, the row ending `Enabled`. The respawn's
 /// fresh tail ends the old spawn's wait, so the wait does not run its whole
 /// 250 ms here and the queueing of a reconnect behind a waiting exit is not
-/// exercised (a mutation applying it at once still passes). A REGRESSION
+/// exercised (a mutation applying it at once still passes; the next test
+/// pins it). A REGRESSION
 /// GUARD of "an exit followed at once by a call reconnects once and
 /// answers", green before N-MCP-5 too.
 #[tokio::test]
@@ -2764,6 +2765,57 @@ printf 'starting\n' >&2"#,
         Some(ExtensionState::Enabled),
         "and it stays"
     );
+
+    h.supervisor.shutdown_all().await;
+}
+
+/// **A reconnect reported while an exit still waits for its stderr goes
+/// after it** (D22's ordering): the exit's `mark_exited` waits for the
+/// exited spawn's stderr, and a `Reconnected` reported meanwhile is queued
+/// behind it, so the row ends `Enabled` — never a late exit turning a
+/// recovered row `Failed`. A real respawn ends the old spawn's wait before
+/// its handshake can report the reconnect (the exit-then-call test above), so
+/// the two events are handed to the load's receiver directly here, the
+/// exit's tail a live server's stderr, which has not ended: its wait runs the
+/// whole [`openalpaca_mcp::STDERR_SETTLE`].
+#[tokio::test]
+async fn a_reconnect_reported_while_an_exit_waits_for_its_stderr_is_applied_after_it() {
+    use std::os::unix::process::ExitStatusExt;
+
+    let h = Harness::new(1);
+    let stub = stub_server(h.path(), "order", StubOpts::default());
+    h.declare(&stub, true);
+    h.supervisor.reconcile_all().await;
+    assert_eq!(h.state("srv"), Some(ExtensionState::Enabled));
+    let generation = h.record("srv").expect("record").generation;
+    let client = h.client_of("srv__echo").expect("the client");
+    assert!(
+        !client.stderr_tail().current().snapshot().ended,
+        "the live server's stderr has not ended, so an exit's wait runs its bound"
+    );
+    let mut events = h.bus.subscribe();
+
+    let handler = connection_handler(
+        Arc::clone(h.ledger()),
+        mcp("srv"),
+        generation,
+        client.stderr_tail().clone(),
+    );
+    handler(ConnectionEvent::Exited(std::process::ExitStatus::from_raw(
+        3 << 8,
+    )));
+    handler(ConnectionEvent::Reconnected);
+
+    assert_eq!(
+        state_events(&mut events, Duration::from_millis(600)).await,
+        vec![
+            ("failed".to_string(), generation),
+            ("enabled".to_string(), generation)
+        ],
+        "the exit, then the reconnect reported while it waited"
+    );
+    assert_eq!(h.state("srv"), Some(ExtensionState::Enabled));
+    drop(handler);
 
     h.supervisor.shutdown_all().await;
 }

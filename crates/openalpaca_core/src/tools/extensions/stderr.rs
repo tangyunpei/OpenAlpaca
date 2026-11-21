@@ -11,7 +11,9 @@
 //!    values, credential-bearing arguments, the daemon's own variables with
 //!    secret-like names — replaced by [`MASKED`], longest first;
 //! 3. a value cut by the ring's own bound at the head masked too, or the
-//!    partial first line dropped;
+//!    partial first line dropped; and the start of a value that ends an
+//!    unterminated last line (a tail read before the server finished
+//!    writing it) masked;
 //! 4. the generic shapes of a credential masked: a URL's userinfo, a bearer
 //!    token, an `Authorization` or `Cookie` header's value, a `key=value` or
 //!    `"key": "value"` whose name looks like a secret, a sensitive query
@@ -96,6 +98,9 @@ fn shown_tail(tail: &TailSnapshot, secrets: &[String]) -> String {
     if partial_head && !text.contains('\n') {
         text = mask_head_fragment(&text, secrets);
     }
+    if !text.ends_with('\n') {
+        text = mask_end_fragment(&text, secrets);
+    }
     let text = mask_shapes(&text);
     let text = text.trim_end_matches('\n');
     let (pieces, cut) = last_pieces(text, TAIL_BYTES);
@@ -148,6 +153,29 @@ fn mask_head_fragment(text: &str, secrets: &[String]) -> String {
         .max();
     match longest {
         Some(len) => format!("{MASKED}{}", &text[len..]),
+        None => text.to_string(),
+    }
+}
+
+/// A tail read before the spawn's stderr reached a line's end — read at the
+/// settle's bound, between two reads of the pipe, or ended by a respawn or
+/// the reap's bound rather than by the pipe's end — may end with the start
+/// of a value: the longest start of any `secrets` value that `text` ends
+/// with is masked.
+fn mask_end_fragment(text: &str, secrets: &[String]) -> String {
+    let longest = secrets
+        .iter()
+        .flat_map(|secret| {
+            secret
+                .char_indices()
+                .skip(1)
+                .map(move |(at, _)| &secret[..at])
+        })
+        .filter(|start| text.ends_with(start))
+        .map(str::len)
+        .max();
+    match longest {
+        Some(len) => format!("{}{MASKED}", &text[..text.len() - len]),
         None => text.to_string(),
     }
 }
@@ -390,6 +418,34 @@ mod tests {
             &secrets,
         );
         assert_eq!(tail_of(&detail), "whole line");
+    }
+
+    /// A tail read before its server finished writing a value — at the
+    /// settle's bound, between two reads, or ended by a respawn — shows none
+    /// of its start; a terminated last line is shown as written.
+    #[test]
+    fn a_value_cut_at_the_tail_s_end_is_masked() {
+        let secrets = vec!["tok-0123456789".to_string()];
+        for ended in [false, true] {
+            let cut = TailSnapshot {
+                bytes: b"starting\nusing tok-01234".to_vec(),
+                truncated: false,
+                ended,
+            };
+            let detail = compose_detail("x", &cut, &secrets);
+            assert_eq!(
+                tail_of(&detail),
+                "starting\nusing <masked>",
+                "ended: {ended}"
+            );
+        }
+        let whole = TailSnapshot {
+            bytes: b"a word: tok\n".to_vec(),
+            truncated: false,
+            ended: false,
+        };
+        let detail = compose_detail("x", &whole, &secrets);
+        assert_eq!(tail_of(&detail), "a word: tok");
     }
 
     /// A value straddling the output's cut: masking comes first, so the cut

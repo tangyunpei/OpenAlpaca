@@ -1417,67 +1417,15 @@ impl McpSupervisor {
     /// late exit never turns a recovered row `Failed`; with none waiting, it
     /// is applied at once, as before.
     fn watch_connection(&self, ext: &ExtensionId, generation: u64, client: &McpClient) {
-        enum Observed {
-            Exited(std::process::ExitStatus, SpawnTail),
-            Reconnected,
-        }
-        let (tx, mut rx) = unbounded_channel::<Observed>();
-        // Exits whose `mark_exited` has not run yet.
-        let pending = Arc::new(StdMutex::new(0usize));
-        let handler: ConnectionEventHandler = {
-            let ledger = Arc::clone(&self.ledger);
-            let id = ext.clone();
-            let tail = client.stderr_tail().clone();
-            let pending = Arc::clone(&pending);
-            Arc::new(move |event| {
-                let mut waiting = pending.lock_or_recover();
-                match event {
-                    ConnectionEvent::Exited(status) => {
-                        // The exited process's tail, taken now: a respawn
-                        // starts a fresh one.
-                        if tx.send(Observed::Exited(status, tail.current())).is_ok() {
-                            *waiting += 1;
-                        }
-                    }
-                    ConnectionEvent::Reconnected if *waiting == 0 => {
-                        ledger.mark_recovered(&id, generation);
-                    }
-                    ConnectionEvent::Reconnected => {
-                        let _ = tx.send(Observed::Reconnected);
-                    }
-                }
-            })
-        };
+        let handler = connection_handler(
+            Arc::clone(&self.ledger),
+            ext.clone(),
+            generation,
+            client.stderr_tail().clone(),
+        );
         if !client.on_connection_event(handler) {
             tracing::debug!(extension = %ext, "MCP connection receiver already installed");
-            return;
         }
-        let ledger = Arc::clone(&self.ledger);
-        let id = ext.clone();
-        let tail = client.stderr_tail().clone();
-        // Ends with the handler, which the client holds.
-        tokio::spawn(async move {
-            while let Some(observed) = rx.recv().await {
-                match observed {
-                    Observed::Exited(status, spawn) => {
-                        let detail = stderr::detail_with_spawn_stderr(
-                            format!(
-                                "the server's process exited ({status}); the next call starts it again"
-                            ),
-                            &spawn,
-                            tail.secrets(),
-                        )
-                        .await;
-                        let mut waiting = pending.lock_or_recover();
-                        ledger.mark_exited(&id, generation, detail);
-                        *waiting = waiting.saturating_sub(1);
-                    }
-                    Observed::Reconnected => {
-                        ledger.mark_recovered(&id, generation);
-                    }
-                }
-            }
-        });
     }
 
     // ── §3.7 — the server changes its own tool set ───────────────────────
@@ -2673,6 +2621,72 @@ impl<T> LockOrRecover<T> for StdMutex<T> {
     fn lock_or_recover(&self) -> std::sync::MutexGuard<'_, T> {
         self.lock().unwrap_or_else(|p| p.into_inner())
     }
+}
+
+/// [`McpSupervisor::watch_connection`]'s receiver for one load's client, and
+/// the task that applies an exit once its stderr has settled (N-MCP-5). The
+/// task ends with the handler, which the client holds; a handler the client
+/// refuses ends it at once.
+fn connection_handler(
+    ledger: Arc<ExtensionLedger>,
+    id: ExtensionId,
+    generation: u64,
+    tail: StderrTail,
+) -> ConnectionEventHandler {
+    enum Observed {
+        Exited(std::process::ExitStatus, SpawnTail),
+        Reconnected,
+    }
+    let (tx, mut rx) = unbounded_channel::<Observed>();
+    // Exits whose `mark_exited` has not run yet.
+    let pending = Arc::new(StdMutex::new(0usize));
+    let handler: ConnectionEventHandler = {
+        let ledger = Arc::clone(&ledger);
+        let id = id.clone();
+        let tail = tail.clone();
+        let pending = Arc::clone(&pending);
+        Arc::new(move |event| {
+            let mut waiting = pending.lock_or_recover();
+            match event {
+                ConnectionEvent::Exited(status) => {
+                    // The exited process's tail, taken now: a respawn starts
+                    // a fresh one.
+                    if tx.send(Observed::Exited(status, tail.current())).is_ok() {
+                        *waiting += 1;
+                    }
+                }
+                ConnectionEvent::Reconnected if *waiting == 0 => {
+                    ledger.mark_recovered(&id, generation);
+                }
+                ConnectionEvent::Reconnected => {
+                    let _ = tx.send(Observed::Reconnected);
+                }
+            }
+        })
+    };
+    tokio::spawn(async move {
+        while let Some(observed) = rx.recv().await {
+            match observed {
+                Observed::Exited(status, spawn) => {
+                    let detail = stderr::detail_with_spawn_stderr(
+                        format!(
+                            "the server's process exited ({status}); the next call starts it again"
+                        ),
+                        &spawn,
+                        tail.secrets(),
+                    )
+                    .await;
+                    let mut waiting = pending.lock_or_recover();
+                    ledger.mark_exited(&id, generation, detail);
+                    *waiting = waiting.saturating_sub(1);
+                }
+                Observed::Reconnected => {
+                    ledger.mark_recovered(&id, generation);
+                }
+            }
+        }
+    });
+    handler
 }
 
 #[cfg(test)]
