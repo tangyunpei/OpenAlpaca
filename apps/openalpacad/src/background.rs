@@ -147,16 +147,13 @@ pub fn spawn_file_processing_worker(
                     let _permit = sem.acquire().await.expect("semaphore closed");
                     let repo = FileAssetRepository::new(&db2);
 
-                    let prev_attempts = parse_retry_count(asset.extract_error.as_deref());
-                    if let Err(e) = repo.update_status(
-                        &asset.id,
-                        &FileAssetStatus::Processing,
-                        None,
-                        Some(&processing_tag(prev_attempts)),
-                    ) {
-                        tracing::warn!("Failed to mark asset {} as processing: {e}", asset.id);
-                        return;
-                    }
+                    let prev_attempts = match begin_attempt(&repo, &asset) {
+                        Ok(prev) => prev,
+                        Err(e) => {
+                            tracing::warn!("Failed to mark asset {} as processing: {e}", asset.id);
+                            return;
+                        }
+                    };
 
                     let storage_path = asset.storage_path.clone();
                     let mime_type = asset.mime_type.clone();
@@ -197,6 +194,23 @@ pub fn spawn_file_processing_worker(
 /// tag once the worker's next start counts it as a failed attempt.
 const INTERRUPTED_REASON: &str =
     "extraction was interrupted: the daemon stopped before it finished";
+
+/// The `Processing` write that starts an attempt on a listed row: status
+/// `Processing`, the text cleared, `extract_error` tagged with the attempt
+/// it starts ([`processing_tag`]). Returns the attempts made before it.
+fn begin_attempt(
+    repo: &FileAssetRepository<'_>,
+    asset: &openalpaca_storage::FileAsset,
+) -> anyhow::Result<u32> {
+    let prev_attempts = parse_retry_count(asset.extract_error.as_deref());
+    repo.update_status(
+        &asset.id,
+        &FileAssetStatus::Processing,
+        None,
+        Some(&processing_tag(prev_attempts)),
+    )?;
+    Ok(prev_attempts)
+}
 
 /// The `extract_error` the `Processing` write stores: the attempt it starts,
 /// so a stop or a crash before the last write still leaves the count.
@@ -756,6 +770,47 @@ mod tests {
         let prev = parse_retry_count(Some("[attempt:1] Failed to read text file"));
         assert_eq!(processing_tag(prev), "[attempt:2] extraction in progress");
         assert_eq!(parse_retry_count(Some(&processing_tag(prev))), 2);
+    }
+
+    /// The crash loop at the worker's seams: an attempt begun on a listed row
+    /// and cut off (the process dies; the next start fails the row) twice
+    /// spends the default one retry, and the row is never listed again. The
+    /// `Processing` write's tag is what carries the count across the cut.
+    #[test]
+    fn an_attempt_cut_off_on_every_try_stops_being_listed() {
+        let dir = tempfile::tempdir().unwrap();
+        let db = test_db(&dir);
+        let repo = FileAssetRepository::new(&db);
+        let retries = openalpaca_core::daemon_config::DaemonConfig::default()
+            .upload
+            .governance
+            .extraction_retry_count;
+        assert_eq!(retries, 1, "the default allows one retry");
+        upload_row(&db, dir.path(), "crashing", FileAssetStatus::Uploaded);
+
+        let mut listed = repo.get_by_id("crashing").unwrap().unwrap();
+        for attempt in 1..=2 {
+            assert_eq!(begin_attempt(&repo, &listed).unwrap(), attempt - 1);
+            // The process dies here; the next start:
+            assert_eq!(
+                repo.fail_interrupted_processing(INTERRUPTED_REASON)
+                    .unwrap(),
+                1
+            );
+            let retryable = repo.list_retryable_errors(retries, 10).unwrap();
+            if attempt == 1 {
+                assert_eq!(retryable.len(), 1, "one retry left");
+                listed = retryable.into_iter().next().unwrap();
+            } else {
+                assert!(retryable.is_empty(), "no try left after {attempt}");
+            }
+        }
+        let row = repo.get_by_id("crashing").unwrap().unwrap();
+        assert_eq!(row.status, FileAssetStatus::Error);
+        assert_eq!(
+            row.extract_error.as_deref(),
+            Some("[attempt:2] extraction was interrupted: the daemon stopped before it finished")
+        );
     }
 
     /// PROCESSING-PICKUP follow-up: a file whose extraction takes the daemon
