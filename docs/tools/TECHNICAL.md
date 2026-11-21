@@ -1229,7 +1229,8 @@ depends on the registry dropping the last reference.
   receiver runs `ExtensionLedger::mark_exited` once the exited process's
   stderr has ended (at most `STDERR_SETTLE`, 250 ms, on a task of its own;
   a reconnect reported meanwhile is applied after it) — the row
-  `Failed{Crashed}`, its detail the status and the stderr tail, announced
+  `Failed{Crashed}`, its detail the status and the stderr tail (when the
+  process wrote any), announced
   once, not reaped, the gate still admitting calls (`admits_calls`).  The
   next call's reconnect, on success, is `ConnectionEvent::Reconnected` and
   `mark_recovered` (back to `Enabled`, same generation);
@@ -1238,7 +1239,8 @@ depends on the registry dropping the last reference.
   drains it in 1 KB chunks into the client's `StderrTail`
   (`McpClientConfig::stderr_tail`, the caller's handle, a fresh tail per
   spawn), keeping the last 4 KB, and stops 250 ms after the reap.
-  `tools::extensions::stderr` masks it (the load's values, inherited
+  `tools::extensions::stderr` masks it (the load's values, a value cut at
+  the tail's head or at the end of an unterminated last line, inherited
   secret-named variables, generic shapes: `<masked>`), cuts it to 4 KB
   from the end and escapes it (`escape_hidden`) into a `Failed` row's
   `detail` only — at the four places a `Failed` detail is written — never

@@ -93,13 +93,14 @@ pub fn compose_detail(base: impl Into<String>, tail: &TailSnapshot, secrets: &[S
 /// Steps 1–6 of the module's list.
 fn shown_tail(tail: &TailSnapshot, secrets: &[String]) -> String {
     let text = String::from_utf8_lossy(&tail.bytes).replace("\r\n", "\n");
-    let mut text = mask_values(&text, secrets);
+    // An unterminated last line may end in the start of a value: the tail
+    // was read before its server finished writing it — at the settle's
+    // bound, between two reads of the pipe, or ended by a respawn or the
+    // reap's bound rather than by the pipe's end.
+    let mut text = mask_values(&text, secrets, !text.ends_with('\n'));
     let partial_head = tail.truncated;
     if partial_head && !text.contains('\n') {
         text = mask_head_fragment(&text, secrets);
-    }
-    if !text.ends_with('\n') {
-        text = mask_end_fragment(&text, secrets);
     }
     let text = mask_shapes(&text);
     let text = text.trim_end_matches('\n');
@@ -116,8 +117,11 @@ fn shown_tail(tail: &TailSnapshot, secrets: &[String]) -> String {
 }
 
 /// Every occurrence of a `secrets` value replaced by [`MASKED`], in one pass
-/// over `text`, the longest value first at each place.
-fn mask_values(text: &str, secrets: &[String]) -> String {
+/// over `text`, the longest value first at each place; with `cut_end`, also
+/// the longest start of a value that `text` ends with — judged on the text as
+/// written, before a shorter value inside it is masked, and only where no
+/// whole value begins.
+fn mask_values(text: &str, secrets: &[String], cut_end: bool) -> String {
     if secrets.is_empty() {
         return text.to_string();
     }
@@ -130,6 +134,14 @@ fn mask_values(text: &str, secrets: &[String]) -> String {
                 rest = &rest[secret.len()..];
                 continue 'scan;
             }
+        }
+        if cut_end
+            && secrets
+                .iter()
+                .any(|secret| secret.len() > rest.len() && secret.starts_with(rest))
+        {
+            out.push_str(MASKED);
+            break;
         }
         out.push(c);
         rest = &rest[c.len_utf8()..];
@@ -153,29 +165,6 @@ fn mask_head_fragment(text: &str, secrets: &[String]) -> String {
         .max();
     match longest {
         Some(len) => format!("{MASKED}{}", &text[len..]),
-        None => text.to_string(),
-    }
-}
-
-/// A tail read before the spawn's stderr reached a line's end — read at the
-/// settle's bound, between two reads of the pipe, or ended by a respawn or
-/// the reap's bound rather than by the pipe's end — may end with the start
-/// of a value: the longest start of any `secrets` value that `text` ends
-/// with is masked.
-fn mask_end_fragment(text: &str, secrets: &[String]) -> String {
-    let longest = secrets
-        .iter()
-        .flat_map(|secret| {
-            secret
-                .char_indices()
-                .skip(1)
-                .map(move |(at, _)| &secret[..at])
-        })
-        .filter(|start| text.ends_with(start))
-        .map(str::len)
-        .max();
-    match longest {
-        Some(len) => format!("{}{MASKED}", &text[..text.len() - len]),
         None => text.to_string(),
     }
 }
@@ -446,6 +435,26 @@ mod tests {
         };
         let detail = compose_detail("x", &whole, &secrets);
         assert_eq!(tail_of(&detail), "a word: tok");
+        // A shorter value inside the cut start does not hide it from the
+        // check: the start is judged on the text as the server wrote it.
+        let with_a_short_value = vec!["tok-0123456789".to_string(), "1".to_string()];
+        let detail = compose_detail(
+            "x",
+            &snapshot(b"using tok-01234", false),
+            &with_a_short_value,
+        );
+        assert_eq!(tail_of(&detail), "using <masked>");
+        // A whole value that ends the text is masked whole, never read as
+        // the start of itself.
+        let repetitive = vec!["abcabc".to_string()];
+        for (raw, shown) in [
+            ("x abcabc", "x <masked>"),
+            ("x abcab", "x <masked>"),
+            ("x abcabcab", "x <masked><masked>"),
+        ] {
+            let detail = compose_detail("x", &snapshot(raw.as_bytes(), false), &repetitive);
+            assert_eq!(tail_of(&detail), shown, "{raw}");
+        }
     }
 
     /// A value straddling the output's cut: masking comes first, so the cut
