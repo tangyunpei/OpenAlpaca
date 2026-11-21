@@ -12,7 +12,6 @@ use super::*;
 
 struct NoopTool;
 
-#[async_trait::async_trait]
 impl BuiltInTool for NoopTool {
     async fn execute(&self, _arguments: &serde_json::Value) -> Result<String, String> {
         Ok(String::new())
@@ -52,11 +51,7 @@ fn a_command_tool_is_the_shell_by_name_or_any_command_backend() {
             timeout_secs: 5,
         },
     );
-    register(
-        &registry,
-        "file_read",
-        ToolBackend::BuiltIn(Arc::new(NoopTool)),
-    );
+    register(&registry, "file_read", ToolBackend::built_in(NoopTool));
 
     assert!(
         registry.is_command_tool("shell_execute"),

@@ -61,7 +61,6 @@ fn request(model: &str) -> RouterRequest {
         thinking: None,
         context_management: None,
         fallback_models: Vec::new(),
-        ephemeral_system_notice: None,
     }
 }
 
@@ -78,6 +77,9 @@ fn local_model_info() -> ModelInfo {
         supports_reasoning: false,
         supports_tools: true,
         declared: true,
+        long_prompt: None,
+        cache_rates: None,
+        request_contract: crate::routing::model_registry::RequestContract::NONE,
     }
 }
 
@@ -94,7 +96,7 @@ fn keyless_router(base_url: &str, model_id: &str) -> LlmRouter {
     providers.insert(
         ProviderType::Ollama,
         ProviderEntry {
-            provider,
+            provider: DynLlmProvider::from_arc(provider),
             key_pool: Arc::new(ArcSwap::from_pointee(KeyPool::new(
                 vec![],
                 SelectionStrategy::RoundRobin,
@@ -176,19 +178,23 @@ async fn a_keyless_provider_completes_through_the_streaming_path() {
 /// The slot is for providers that need no key — not a way around a missing one.
 #[tokio::test]
 async fn an_empty_pool_still_refuses_a_provider_that_needs_a_key() {
-    let server = MockHttpServer::start(|_| MockResponse::json(completion_body("gpt-5.2", "hi"))).await;
+    let server = MockHttpServer::start(|_| MockResponse::json(completion_body("gpt-6.1-sol", "hi"))).await;
 
-    let provider = Arc::new(crate::providers::openai::OpenAiProvider::new(
-        "sk-test".to_string(),
-        Some("gpt-5.2".to_string()),
-        Some(format!("{}/v1", server.base_url)),
-        None,
-    ));
+    // The mock stands in for OpenAI's own API (COMPAT-SERVER).
+    let provider = Arc::new(
+        crate::providers::openai::OpenAiProvider::new(
+            "sk-test".to_string(),
+            Some("gpt-6.1-sol".to_string()),
+            Some(format!("{}/v1", server.base_url)),
+            None,
+        )
+        .with_openai_api(true),
+    );
     let mut providers = HashMap::new();
     providers.insert(
         ProviderType::OpenAI,
         ProviderEntry {
-            provider,
+            provider: DynLlmProvider::from_arc(provider),
             key_pool: Arc::new(ArcSwap::from_pointee(KeyPool::new(
                 vec![],
                 SelectionStrategy::RoundRobin,
@@ -201,11 +207,11 @@ async fn an_empty_pool_still_refuses_a_provider_that_needs_a_key() {
         ModelRegistry::with_defaults(),
         HashMap::new(),
         Arc::new(CostTracker::new(ModelRegistry::with_defaults())),
-        "gpt-5.2".to_string(),
+        "gpt-6.1-sol".to_string(),
     );
 
     let err = router
-        .complete(request("gpt-5.2"))
+        .complete(request("gpt-6.1-sol"))
         .await
         .expect_err("a provider that needs a key and has none cannot be served");
     assert!(
@@ -369,7 +375,7 @@ fn empty_catalogue_router(base_url: &str) -> LlmRouter {
     providers.insert(
         ProviderType::Ollama,
         ProviderEntry {
-            provider,
+            provider: DynLlmProvider::from_arc(provider),
             key_pool: Arc::new(ArcSwap::from_pointee(KeyPool::new(
                 vec![],
                 SelectionStrategy::RoundRobin,
@@ -614,7 +620,7 @@ async fn a_claude_pin_falls_through_to_an_installed_ollama_model() {
     let router = empty_catalogue_router(&server.base_url);
     // The configured default is the seeded template's Claude id, and
     // `[providers.ollama] default_model` names a tag nobody pulled.
-    router.set_default_model("claude-sonnet-4-6".to_string());
+    router.set_default_model("claude-sonnet-5-5".to_string());
     router.refresh_models_for(&ProviderType::Ollama).await;
 
     assert_eq!(
@@ -624,7 +630,7 @@ async fn a_claude_pin_falls_through_to_an_installed_ollama_model() {
     );
 
     let response = router
-        .complete(request("claude-sonnet-4-6"))
+        .complete(request("claude-sonnet-5-5"))
         .await
         .expect("a Claude pin still runs when only Ollama is enabled");
     assert_eq!(response.content, "local pong");
@@ -644,7 +650,7 @@ async fn an_ollama_with_no_models_installed_says_what_to_do() {
 
     assert_eq!(router.effective_default_model(), None);
     let err = router
-        .complete(request("claude-sonnet-4-6"))
+        .complete(request("claude-sonnet-5-5"))
         .await
         .expect_err("nothing is installed");
     assert!(matches!(err, LlmRouterError::NoRoutableModel), "{err:?}");
@@ -699,6 +705,99 @@ async fn the_router_reports_a_local_provider_as_needing_no_key() {
             .expect("the provider is loaded")
             .is_empty()
     );
+}
+
+// ── LOCAL-CALL-HOUR: a call to a local model may run up to an hour ──────────
+
+/// The loop allows a streamed round an hour only where the provider needs no
+/// key, and it learns which from the stream the router hands it: the router
+/// is the one place that knows which provider is serving the round.
+#[tokio::test]
+async fn a_routed_stream_says_whether_its_provider_needs_a_key() {
+    let server = MockHttpServer::start(|req| {
+        if req.path == "/v1/chat/completions" {
+            MockResponse::sse(sse_frames(&["pong"], 11, 3))
+        } else {
+            MockResponse::not_found()
+        }
+    })
+    .await;
+
+    let local = keyless_router(&server.base_url, "local-model");
+    let routed = local
+        .complete_streaming(request("local-model"))
+        .await
+        .expect("a keyless provider streams");
+    assert!(!routed.requires_key, "Ollama needs no key");
+
+    // The mock stands in for OpenAI's own API (COMPAT-SERVER).
+    let provider = Arc::new(
+        crate::providers::openai::OpenAiProvider::new(
+            "sk-test".to_string(),
+            Some("gpt-6.1-sol".to_string()),
+            Some(format!("{}/v1", server.base_url)),
+            None,
+        )
+        .with_openai_api(true),
+    );
+    let mut providers = HashMap::new();
+    providers.insert(
+        ProviderType::OpenAI,
+        ProviderEntry {
+            provider: DynLlmProvider::from_arc(provider),
+            key_pool: Arc::new(ArcSwap::from_pointee(KeyPool::new(
+                vec![ApiKey::new(
+                    "k1".to_string(),
+                    ProviderType::OpenAI,
+                    "sk-test".to_string(),
+                )],
+                SelectionStrategy::RoundRobin,
+            ))),
+        },
+    );
+    let keyed = LlmRouter::new(
+        providers,
+        ModelRegistry::with_defaults(),
+        HashMap::new(),
+        Arc::new(CostTracker::new(ModelRegistry::with_defaults())),
+        "gpt-6.1-sol".to_string(),
+    );
+    let routed = keyed
+        .complete_streaming(request("gpt-6.1-sol"))
+        .await
+        .expect("a keyed provider streams");
+    assert!(
+        routed.requires_key,
+        "an OpenAI-compatible cloud provider needs one"
+    );
+    assert_eq!(server.hits("/v1/chat/completions").await, 2);
+}
+
+/// N-LLM-1 gave the keyless slot the per-key limiter of eight concurrent
+/// calls, and an hour's call does not change it: the slot still admits eight.
+#[tokio::test]
+async fn the_keyless_slot_still_admits_eight_calls() {
+    let server = MockHttpServer::start(|req| {
+        if req.path == "/v1/chat/completions" {
+            MockResponse::json(completion_body("local-model", "pong"))
+        } else {
+            MockResponse::not_found()
+        }
+    })
+    .await;
+    let router = keyless_router(&server.base_url, "local-model");
+
+    router
+        .complete(request("local-model"))
+        .await
+        .expect("a keyless provider answers");
+
+    let slot = keyless_slot("ollama").id;
+    let limiter = router
+        .rate_limiter_registry
+        .get(&slot)
+        .expect("the call was accounted to the keyless slot");
+    assert_eq!(limiter.concurrency.available_permits(), 8);
 }
 
 // ── M2: a small budget on a thinking model ──────────────────────────────────

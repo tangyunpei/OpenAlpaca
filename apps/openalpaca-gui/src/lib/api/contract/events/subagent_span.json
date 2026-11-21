@@ -1,0 +1,16 @@
+{
+  "agent_instance_id": "",
+  "detail": "",
+  "duration_ms": 0,
+  "ended_at": "",
+  "instance_id": "",
+  "label": "",
+  "output_preview": "",
+  "span_id": "",
+  "started_at": "",
+  "state": "",
+  "task_id": "",
+  "template_id": "",
+  "ts": "",
+  "type": "subagent_span"
+}

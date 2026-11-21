@@ -179,7 +179,7 @@ async fn read_to_close(stream: &mut TcpStream) -> String {
         .await
         .expect("the connection closes after the farewell")
         .expect("the connection reads cleanly");
-    String::from_utf8_lossy(&body).into_owned()
+    String::from_utf8_lossy_owned(body)
 }
 
 /// Read until `needle` has arrived, bounded by [`READ_TIMEOUT`].

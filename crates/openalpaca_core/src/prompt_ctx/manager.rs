@@ -1,20 +1,20 @@
 use crate::agent::subagent::AgentConstraints;
 use crate::prompt_ctx::package::{ContextPackage, HandoffContext, PackageSection, PackageSectionKind};
 use crate::prompt_ctx::section::{ContextBundle, ContextKind, ContextSection, SectionPriority};
-use crate::prompt_ctx::sources::{ContextRequest, ContextSource};
+use crate::prompt_ctx::sources::{ContextRequest, ContextSource, DynContextSource};
 use arc_swap::ArcSwap;
 use std::sync::Arc;
 
 const SUB_AGENT_CONTEXT_RATIO: f64 = 0.40;
 
 pub struct ContextManager {
-    sources: Vec<Box<dyn ContextSource>>,
+    sources: Vec<Box<DynContextSource<'static>>>,
     config: Arc<ArcSwap<crate::daemon_config::DaemonConfig>>,
 }
 
 impl ContextManager {
     pub fn new(
-        sources: Vec<Box<dyn ContextSource>>,
+        sources: Vec<Box<DynContextSource<'static>>>,
         config: Arc<ArcSwap<crate::daemon_config::DaemonConfig>>,
     ) -> Self {
         Self { sources, config }
@@ -42,7 +42,7 @@ impl ContextManager {
             .saturating_sub(buffer);
 
         // Resolve all active sources in parallel
-        let active: Vec<&dyn ContextSource> = self
+        let active: Vec<&DynContextSource<'_>> = self
             .sources
             .iter()
             .filter(|s| s.active_for(&request.path))
@@ -208,7 +208,6 @@ mod tests {
     use crate::prompt_ctx::package::{AgentSummary, HandoffContext, PackageSectionKind};
     use crate::prompt_ctx::section::{ContextKey, ContextKind, InjectionMode};
     use crate::prompt_ctx::sources::ExecutionPath;
-    use async_trait::async_trait;
 
     fn test_config_with_buffer(ratio: f64) -> Arc<ArcSwap<DaemonConfig>> {
         let mut config = DaemonConfig::default();
@@ -256,7 +255,6 @@ mod tests {
         sections: Vec<ContextSection>,
     }
 
-    #[async_trait]
     impl ContextSource for FakeSource {
         fn name(&self) -> &'static str {
             "fake"
@@ -267,16 +265,31 @@ mod tests {
         }
     }
 
+    /// A held context source crosses threads, and its async method's
+    /// future is `Send` (the declared `+ Send`).
+    #[test]
+    fn a_held_context_source_is_send_and_sync() {
+        fn send_and_sync<T: Send + Sync + ?Sized>() {}
+        send_and_sync::<Arc<DynContextSource<'static>>>();
+
+        fn is_send<T: Send>(_: &T) {}
+        fn futures_are_send<S: ContextSource + ?Sized>(source: &S, request: &ContextRequest) {
+            is_send(&source.resolve(request));
+        }
+        let _ = futures_are_send::<DynContextSource<'static>>;
+    }
+
     #[tokio::test]
     async fn test_resolve_greedy_fill() {
         // window=1000, reserved=0, buffer_ratio=0.0 => available=1000
         let config = test_config_with_buffer(0.0);
-        let sources: Vec<Box<dyn ContextSource>> = vec![Box::new(FakeSource {
-            sections: vec![
-                make_section("Section A", SectionPriority::High, 300, 0.9),
-                make_section("Section B", SectionPriority::Normal, 300, 0.8),
-            ],
-        })];
+        let sources: Vec<Box<DynContextSource<'static>>> =
+            vec![DynContextSource::new_box(FakeSource {
+                sections: vec![
+                    make_section("Section A", SectionPriority::High, 300, 0.9),
+                    make_section("Section B", SectionPriority::Normal, 300, 0.8),
+                ],
+            })];
         let manager = ContextManager::new(sources, config);
         let request = test_request(1000, 0);
         let bundle = manager.resolve(&request).await;
@@ -291,12 +304,13 @@ mod tests {
         // window=500, reserved=0, buffer_ratio=0.0 => available=500
         // High(400 tokens) fits, Low(200 tokens) would exceed budget and is below Normal threshold
         let config = test_config_with_buffer(0.0);
-        let sources: Vec<Box<dyn ContextSource>> = vec![Box::new(FakeSource {
-            sections: vec![
-                make_section("High content", SectionPriority::High, 400, 0.9),
-                make_section("Low content", SectionPriority::Low, 200, 0.5),
-            ],
-        })];
+        let sources: Vec<Box<DynContextSource<'static>>> =
+            vec![DynContextSource::new_box(FakeSource {
+                sections: vec![
+                    make_section("High content", SectionPriority::High, 400, 0.9),
+                    make_section("Low content", SectionPriority::Low, 200, 0.5),
+                ],
+            })];
         let manager = ContextManager::new(sources, config);
         let request = test_request(500, 0);
         let bundle = manager.resolve(&request).await;

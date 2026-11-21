@@ -1303,11 +1303,14 @@ async fn validate_answers_the_preview_without_installing() {
 }
 
 /// **N-PLUG-2 — a warning, never a refusal.** A top-level `tool = true` (the
-/// switch is `types.tools`) and a `types.provider = true` (no bridge is wired)
-/// used to validate clean. Now the dry run's `manifest.warnings`, the install
-/// preview and the install's row each say so, and both still install.
+/// switch is `types.tools`) and a `types.provider = true` (the plugin provider
+/// type is removed, M86) used to validate clean. Now the dry run's
+/// `manifest.warnings`, the install preview and the install's row each say
+/// so, and both still install.
 #[tokio::test]
-async fn validate_and_install_warn_on_an_unknown_key_and_an_unwired_type() {
+async fn validate_and_install_warn_on_an_unknown_key_and_an_unused_type() {
+    const PROVIDER_REMOVED: &str = "the plugin provider type is removed: LLM providers are the \
+         built-in ones, configured in llm.toml or in Settings → Models & keys";
     let h = Harness::new();
     let typo = h.source("typo", "1.0.0", "");
     std::fs::write(
@@ -1345,14 +1348,11 @@ async fn validate_and_install_warn_on_an_unknown_key_and_an_unwired_type() {
     assert!(
         names(&body["manifest"]["warnings"])
             .iter()
-            .any(|w| w.contains("provider bridge is not wired")),
-        "the dry run says the provider bridge is not wired: {body}"
+            .any(|w| w.contains(PROVIDER_REMOVED) && !w.contains("not wired")),
+        "the dry run says the plugin provider type is removed: {body}"
     );
 
-    for (source, needle) in [
-        (&typo, "'tool'"),
-        (&provider, "provider bridge is not wired"),
-    ] {
+    for (source, needle) in [(&typo, "'tool'"), (&provider, PROVIDER_REMOVED)] {
         let (status, body) = h
             .install(
                 "plugin",
@@ -1388,10 +1388,7 @@ async fn validate_and_install_warn_on_an_unknown_key_and_an_unwired_type() {
     // manifest declares: `declared.warnings`, standing, while the row's own
     // `warnings` stays per-call.
     let rows = h.rows(false).await;
-    for (id, needle) in [
-        ("typo", "'tool'"),
-        ("modelish", "provider bridge is not wired"),
-    ] {
+    for (id, needle) in [("typo", "'tool'"), ("modelish", PROVIDER_REMOVED)] {
         let row = rows
             .iter()
             .find(|r| r["id"] == id)
@@ -1776,4 +1773,90 @@ fn the_new_paths_do_not_collide_with_the_verb_paths() {
 
     // Building it is the assertion: `Router::route` panics on a conflict.
     drop(router);
+}
+
+/// `/v1/extensions*`'s JSON bodies for the API contract's folder
+/// (API-CONTRACT): a plugin validated, installed, denied, updated and
+/// uninstalled, and a switched-off MCP server added — nothing spawned.
+pub(crate) async fn contract_samples(out: &mut crate::contract::Samples) {
+    use crate::contract::ok_body;
+    let h = Harness::new();
+    let manifest = "[types]\ntools = true\n[capabilities]\nprovides = [\"notes_write\"]\n";
+    let source = h.source("notion", "1.4.0", manifest);
+    let request = serde_json::json!({ "source": "path", "path": source.display().to_string() });
+    let body = ok_body(super::validate_plugin(h.extensions.clone(), request.clone()).await).await;
+    out.response("post-extensions-plugin-validate", body);
+    let body =
+        ok_body(super::install_extension(h.extensions.clone(), "plugin", request).await).await;
+    out.response("post-extensions-plugin", body);
+    let body = ok_body(
+        super::install_extension(
+            h.extensions.clone(),
+            "mcp",
+            serde_json::json!({
+                "name": "remote",
+                "transport": "http",
+                "url": "https://example.com/mcp",
+                "connect_timeout_secs": 1,
+                "enabled": false,
+            }),
+        )
+        .await,
+    )
+    .await;
+    out.response("post-extensions-mcp", body);
+    let body = ok_body(run_verb(h.extensions.clone(), "plugin", "notion", Verb::Deny).await).await;
+    out.response("post-extensions-kind-id-verb", body);
+    let body = ok_body(super::list_extensions(&h.extensions, true).await).await;
+    out.response("get-extensions", body);
+    let newer = h.source("notion", "1.5.0", manifest);
+    let body = ok_body(
+        super::update_extension(
+            h.extensions.clone(),
+            "plugin",
+            "notion",
+            serde_json::json!({ "source": "path", "path": newer.display().to_string() }),
+        )
+        .await,
+    )
+    .await;
+    out.response("put-extensions-plugin-id", body);
+    let query = DeleteQuery {
+        uninstall: true,
+        keep_data: false,
+    };
+    let body =
+        ok_body(super::delete_extension(h.extensions.clone(), "plugin", "notion", query).await)
+            .await;
+    out.response("delete-extensions-kind-id", body);
+}
+
+/// CLI-PROTOCOL read the plugin source through `PluginSourceBody`: each
+/// body reads as the bare body read before — an object's `source` and
+/// `path`, a non-string value as the key left out, and anything but an
+/// object (serde would read an array's items as the fields in order) as
+/// nothing at all.
+#[test]
+fn a_plugin_source_is_read_as_the_bare_body_was() {
+    use serde_json::json;
+    assert_eq!(
+        plugin_source(&json!({"source": "path", "path": "/x"})).ok(),
+        Some(std::path::PathBuf::from("/x"))
+    );
+    assert_eq!(
+        plugin_source(&json!({"path": "/x"})).ok(),
+        Some(std::path::PathBuf::from("/x"))
+    );
+    for refused in [
+        json!(["path", "/x"]),
+        json!([null, "/x"]),
+        json!("/x"),
+        json!({"source": "path", "path": 7}),
+        json!({"source": 7, "path": ""}),
+    ] {
+        let refusal = plugin_source(&refused).expect_err("refused");
+        assert_eq!(refusal.code, "invalid_path", "{refused}");
+    }
+    let refusal = plugin_source(&json!({"source": "url", "path": "/x"})).expect_err("refused");
+    assert_eq!(refusal.code, "unsupported_source");
 }

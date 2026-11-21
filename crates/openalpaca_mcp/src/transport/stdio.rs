@@ -2,17 +2,18 @@
 
 use std::collections::HashMap;
 use std::path::PathBuf;
-use std::process::ExitStatus;
+use std::process::{ExitStatus, Stdio};
 use std::sync::Arc;
 
-use async_trait::async_trait;
 use process_wrap::tokio::CommandWrap;
 use rmcp::transport::TokioChildProcess;
 use tokio::process::Command;
+use tokio_util::sync::CancellationToken;
 
 use crate::error::McpError;
 
-use super::{Transport, TransportConnection, TransportInner};
+use super::stderr_tail::{self, StderrTail};
+use super::{TransportConnection, TransportInner};
 
 /// Told what a spawned server's wait returned, once per process — however the
 /// wait was reached: rmcp's close when the server's output ends, its kill
@@ -25,6 +26,9 @@ pub type ExitObserver = Arc<dyn Fn(ExitStatus) + Send + Sync>;
 /// The server runs as the leader of its own process group (in a job object on
 /// Windows), and the group ends with the connection (`server_command` below),
 /// so a disabled server leaves nothing it started behind (ADR-030).
+///
+/// Its stderr is piped and drained into a [`StderrTail`] (N-MCP-5): never
+/// inherited, so nothing a server writes there reaches the daemon's own log.
 pub struct StdioTransport {
     server_name: String,
     command: String,
@@ -32,6 +36,7 @@ pub struct StdioTransport {
     env: HashMap<String, String>,
     cwd: Option<PathBuf>,
     exit_observer: Option<ExitObserver>,
+    stderr_tail: StderrTail,
 }
 
 impl StdioTransport {
@@ -43,6 +48,7 @@ impl StdioTransport {
             env: HashMap::new(),
             cwd: None,
             exit_observer: None,
+            stderr_tail: StderrTail::default(),
         }
     }
 
@@ -67,6 +73,13 @@ impl StdioTransport {
         self
     }
 
+    /// Keep each spawned process's stderr in `tail`, the caller's handle (a
+    /// fresh one, nobody else's, by default).
+    pub fn with_stderr_tail(mut self, tail: StderrTail) -> Self {
+        self.stderr_tail = tail;
+        self
+    }
+
     /// Expose fields for testing. Not public API.
     #[cfg(test)]
     pub(crate) fn args(&self) -> &[String] {
@@ -79,9 +92,8 @@ impl StdioTransport {
     }
 }
 
-#[async_trait]
-impl Transport for StdioTransport {
-    async fn connect(&self) -> Result<TransportConnection, McpError> {
+impl StdioTransport {
+    pub async fn connect(&self) -> Result<TransportConnection, McpError> {
         let mut cmd = Command::new(&self.command);
         cmd.args(&self.args);
         for (k, v) in &self.env {
@@ -97,24 +109,44 @@ impl Transport for StdioTransport {
             "connecting MCP stdio transport"
         );
 
-        let command = server_command(cmd, &self.server_name, self.exit_observer.clone());
-        let child = TokioChildProcess::new(command).map_err(|e| {
-            // TokioChildProcess::new returns an io::Error on spawn failure.
-            McpError::Transport(std::io::Error::other(
-                format!("failed to spawn MCP server '{}': {e}", self.command),
-            ))
-        })?;
+        // A fresh tail per spawn, started before the spawn so a spawn that
+        // fails leaves an empty, ended one rather than the last process's.
+        let tail = self.stderr_tail.begin_spawn();
+        let reaped = CancellationToken::new();
+        let command = server_command(
+            cmd,
+            &self.server_name,
+            reaped.clone(),
+            self.exit_observer.clone(),
+        );
+        let spawned = TokioChildProcess::builder(command)
+            .stderr(Stdio::piped())
+            .spawn();
+        let (child, stderr) = match spawned {
+            Ok(spawned) => spawned,
+            Err(e) => {
+                tail.end();
+                return Err(McpError::Transport(std::io::Error::other(format!(
+                    "failed to spawn MCP server '{}': {e}",
+                    self.command
+                ))));
+            }
+        };
+        match stderr {
+            Some(stderr) => stderr_tail::start_reader(tail, stderr, reaped),
+            None => tail.end(),
+        }
 
         Ok(TransportConnection {
             inner: TransportInner::Stdio(child),
         })
     }
 
-    fn kind(&self) -> &'static str {
+    pub fn kind(&self) -> &'static str {
         "stdio"
     }
 
-    fn server_name(&self) -> &str {
+    pub fn server_name(&self) -> &str {
         &self.server_name
     }
 }
@@ -132,9 +164,20 @@ impl Transport for StdioTransport {
 /// On Windows the server runs in a job object; no test exercises that leg
 /// (DU-33).
 ///
+/// `reaped` is cancelled once the server has been waited for, the group
+/// already ended: the stderr reader then drains for at
+/// most [`stderr_tail::STDERR_SETTLE`] more, so a process that left the group
+/// holding the pipe does not keep it open (N-MCP-5).
+///
 /// An `observer` goes on last, outermost, so what it is told is the status
-/// the reap beneath it returned, the group already ended (N-MCP-1b).
-fn server_command(cmd: Command, server_name: &str, observer: Option<ExitObserver>) -> CommandWrap {
+/// the reap beneath it returned, the group already ended (N-MCP-1b), and the
+/// stderr reader already told.
+fn server_command(
+    cmd: Command,
+    server_name: &str,
+    reaped: CancellationToken,
+    observer: Option<ExitObserver>,
+) -> CommandWrap {
     let mut wrap = CommandWrap::from(cmd);
     #[cfg(unix)]
     wrap.wrap(process_wrap::tokio::ProcessGroup::leader())
@@ -146,10 +189,79 @@ fn server_command(cmd: Command, server_name: &str, observer: Option<ExitObserver
         let _ = server_name;
         wrap.wrap(process_wrap::tokio::JobObject);
     }
+    wrap.wrap(reap::TellOnReap { reaped });
     if let Some(observer) = observer {
         wrap.wrap(exit::ReportExit { observer });
     }
     wrap
+}
+
+/// Tells the stderr reader that the server has been reaped (N-MCP-5): a
+/// cancel, which never blocks the wait it follows. Every teardown waits for
+/// the process — rmcp's close, its kill (`start_kill`, then `wait`), its drop
+/// guard's kill — so every one reaches it.
+mod reap {
+    use std::future::Future;
+    use std::io;
+    use std::pin::Pin;
+    use std::process::ExitStatus;
+
+    use process_wrap::tokio::{ChildWrapper, CommandWrap, CommandWrapper};
+    use tokio_util::sync::CancellationToken;
+
+    #[derive(Debug)]
+    pub(super) struct TellOnReap {
+        pub(super) reaped: CancellationToken,
+    }
+
+    impl CommandWrapper for TellOnReap {
+        fn wrap_child(
+            &mut self,
+            inner: Box<dyn ChildWrapper>,
+            _core: &CommandWrap,
+        ) -> io::Result<Box<dyn ChildWrapper>> {
+            Ok(Box::new(TellingChild {
+                inner,
+                reaped: self.reaped.clone(),
+            }))
+        }
+    }
+
+    #[derive(Debug)]
+    struct TellingChild {
+        inner: Box<dyn ChildWrapper>,
+        reaped: CancellationToken,
+    }
+
+    impl ChildWrapper for TellingChild {
+        fn inner(&self) -> &dyn ChildWrapper {
+            self.inner.as_ref()
+        }
+
+        fn inner_mut(&mut self) -> &mut dyn ChildWrapper {
+            self.inner.as_mut()
+        }
+
+        fn into_inner(self: Box<Self>) -> Box<dyn ChildWrapper> {
+            self.inner
+        }
+
+        fn try_wait(&mut self) -> io::Result<Option<ExitStatus>> {
+            let status = self.inner.try_wait()?;
+            if status.is_some() {
+                self.reaped.cancel();
+            }
+            Ok(status)
+        }
+
+        fn wait(&mut self) -> Pin<Box<dyn Future<Output = io::Result<ExitStatus>> + Send + '_>> {
+            Box::pin(async move {
+                let status = self.inner.wait().await?;
+                self.reaped.cancel();
+                Ok(status)
+            })
+        }
+    }
 }
 
 /// The exit observer's wrapper (N-MCP-1b).

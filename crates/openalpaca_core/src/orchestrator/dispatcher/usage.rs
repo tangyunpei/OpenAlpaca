@@ -8,7 +8,9 @@ use openalpaca_llm::LlmRouter;
 use openalpaca_storage::Database;
 use uuid::Uuid;
 
-/// Record LLM usage metrics (cost, tokens, latency) to the database and emit an event.
+/// Record LLM usage metrics (cost, tokens, latency) to the database and emit an event:
+/// a workflow's lead row and each subagent's, priced from
+/// `LoopResult::requests_cost` (UPR-1).
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn record_llm_usage(
     router: &LlmRouter,
@@ -31,7 +33,13 @@ pub(crate) fn record_llm_usage(
         .resolve_provider(actual_model)
         .map(|p| p.to_string())
         .unwrap_or_else(|| "unknown".to_string());
-    let call_cost = loop_result.estimated_cost;
+    // UPR-1 (the advisor's (b), which the owner took on 2026-11-17): what
+    // the loop's own requests cost, each as it was counted, the request
+    // that ended the loop included — the figure a chat turn's row carries
+    // (USAGE-PER-REQUEST). Not `estimated_cost`, the agent's tracker total
+    // read at the top of the last round, which leaves that request out and,
+    // for a singleton's reused instance id, holds its earlier runs.
+    let call_cost = loop_result.requests_cost;
 
     let call_status = match &loop_result.finish_reason {
         LoopFinishReason::Complete | LoopFinishReason::MaxRounds | LoopFinishReason::Truncated => "success",
@@ -100,5 +108,71 @@ pub(crate) fn record_agent_history(
         let _ = subagent_repo.increment_completed(template_id, runtime_secs);
     } else {
         let _ = subagent_repo.increment_failed(template_id);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::test_util::{RECORDED_MODEL, RecordingProvider, router_recording};
+
+    /// **UPR-1** (the advisor's (b), which the owner took on 2026-11-17).
+    /// The lead's row and each subagent's are written from what the loop's
+    /// own requests cost, each as it was counted (`requests_cost`), the
+    /// figure a chat turn's row has carried since USAGE-PER-REQUEST — never
+    /// from `estimated_cost`, the agent's tracker total read at the top of
+    /// the last round, which leaves out the request that ended the loop
+    /// and, for a reused instance id, holds its earlier runs. On the parent
+    /// the row and the event carried the stale $0.25.
+    #[test]
+    fn a_workflow_loops_row_carries_what_its_requests_cost() {
+        let dir = tempfile::tempdir().unwrap();
+        let db = Database::open(&dir.path().join("test.db")).unwrap();
+        let bus = EventBus::new(16);
+        let mut rx = bus.subscribe();
+        let router = router_recording(RecordingProvider::new("unused"));
+        let result = LoopResult {
+            final_content: "done".to_string(),
+            rounds_used: 1,
+            total_input_tokens: 600,
+            total_output_tokens: 100,
+            tool_calls_made: 0,
+            finish_reason: LoopFinishReason::Complete,
+            model_used: Some(RECORDED_MODEL.to_string()),
+            elapsed: std::time::Duration::from_secs(1),
+            estimated_cost: 0.25,
+            cap_spend: 0.0,
+            requests_cost: 0.0011,
+            last_tool_error: None,
+            working_state: None,
+            spent_fallback_rung: false,
+        };
+
+        record_llm_usage(
+            &router,
+            &result,
+            None,
+            "research_agent",
+            "task-1",
+            1_000,
+            Some(&db),
+            &bus,
+        );
+
+        let rows = openalpaca_storage::repository::LlmUsageRepository::new(&db)
+            .get_agent_usage("research_agent", 10)
+            .unwrap();
+        assert_eq!(rows.len(), 1, "{rows:?}");
+        assert!(
+            (rows[0].cost_usd - 0.0011).abs() < 1e-12,
+            "the row: ${}",
+            rows[0].cost_usd
+        );
+        match rx.try_recv() {
+            Ok(SystemEvent::LlmCallCompleted { cost_usd, .. }) => {
+                assert!((cost_usd - 0.0011).abs() < 1e-12, "the event: ${cost_usd}");
+            }
+            other => panic!("no LlmCallCompleted: {other:?}"),
+        }
     }
 }

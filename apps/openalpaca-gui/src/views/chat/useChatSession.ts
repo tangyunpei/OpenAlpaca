@@ -931,6 +931,7 @@ export function useChatSession(): ChatSession {
         toolName: event.tool_name,
         success: event.success,
         duration: formatDurationMs(event.duration_ms),
+        timedOut: event.reason === "timeout",
         atMs: Date.now(),
         // Who ran it, and in which run — the pair a card can be matched on
         // (F5). This subscriber is unfiltered on purpose: the frame may be
@@ -947,6 +948,7 @@ export function useChatSession(): ChatSession {
         event.tool_name,
         event.success,
         formatDurationMs(event.duration_ms),
+        event.reason === "timeout",
       ),
     );
   });

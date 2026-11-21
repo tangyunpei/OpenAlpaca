@@ -1,6 +1,5 @@
 use super::*;
 use crate::keys::key_pool::{ApiKey, SelectionStrategy};
-use async_trait::async_trait;
 use std::sync::atomic::{AtomicUsize, Ordering};
 
 struct MockProvider {
@@ -30,12 +29,12 @@ impl MockProvider {
             },
             finish_reason: FinishReason::Stop,
             thinking: None,
+            echo: None,
             parts: None,
         }
     }
 }
 
-#[async_trait]
 impl LlmProvider for MockProvider {
     fn name(&self) -> &str {
         &self.name_str
@@ -77,12 +76,11 @@ fn make_request(model: Option<&str>) -> RouterRequest {
         thinking: None,
         context_management: None,
         fallback_models: Vec::new(),
-        ephemeral_system_notice: None,
     }
 }
 
 fn make_router_with_mock(
-    provider: Arc<dyn LlmProvider>,
+    provider: Arc<impl LlmProvider + 'static>,
     provider_type: ProviderType,
     model: &str,
 ) -> LlmRouter {
@@ -93,18 +91,14 @@ fn make_router_with_mock(
 async fn test_routes_to_correct_provider() {
     let provider = Arc::new(MockProvider::new(
         "anthropic",
-        vec![Ok(MockProvider::ok_response("claude-sonnet-4-5-20250929"))],
+        vec![Ok(MockProvider::ok_response("claude-sonnet-5-5"))],
     ));
-    let router = make_router_with_mock(
-        provider,
-        ProviderType::Anthropic,
-        "claude-sonnet-4-5-20250929",
-    );
+    let router = make_router_with_mock(provider, ProviderType::Anthropic, "claude-sonnet-5-5");
 
     let result = router.complete(make_request(None)).await;
     assert!(result.is_ok());
     let response = result.unwrap();
-    assert_eq!(response.model, "claude-sonnet-4-5-20250929");
+    assert_eq!(response.model, "claude-sonnet-5-5");
 }
 
 #[tokio::test]
@@ -115,7 +109,7 @@ async fn test_key_rotation_on_rate_limit() {
             Err(LlmError::RateLimited {
                 retry_after_ms: 1000,
             }),
-            Ok(MockProvider::ok_response("claude-sonnet-4-5-20250929")),
+            Ok(MockProvider::ok_response("claude-sonnet-5-5")),
         ],
     ));
 
@@ -139,7 +133,7 @@ async fn test_key_rotation_on_rate_limit() {
     providers.insert(
         ProviderType::Anthropic,
         ProviderEntry {
-            provider,
+            provider: DynLlmProvider::from_arc(provider),
             key_pool: Arc::new(ArcSwap::from_pointee(key_pool)),
         },
     );
@@ -149,7 +143,7 @@ async fn test_key_rotation_on_rate_limit() {
         ModelRegistry::with_defaults(),
         HashMap::new(),
         Arc::new(CostTracker::new(ModelRegistry::with_defaults())),
-        "claude-sonnet-4-5-20250929".to_string(),
+        "claude-sonnet-5-5".to_string(),
     );
 
     let result = router.complete(make_request(None)).await;
@@ -165,7 +159,7 @@ async fn test_overloaded_error_does_not_cooldown_key() {
                 status: 529,
                 retry_after_ms: Some(5),
             }),
-            Ok(MockProvider::ok_response("claude-sonnet-4-5-20250929")),
+            Ok(MockProvider::ok_response("claude-sonnet-5-5")),
         ],
     ));
 
@@ -182,7 +176,7 @@ async fn test_overloaded_error_does_not_cooldown_key() {
     providers.insert(
         ProviderType::Anthropic,
         ProviderEntry {
-            provider,
+            provider: DynLlmProvider::from_arc(provider),
             key_pool: Arc::new(ArcSwap::from_pointee(key_pool)),
         },
     );
@@ -192,7 +186,7 @@ async fn test_overloaded_error_does_not_cooldown_key() {
         ModelRegistry::with_defaults(),
         HashMap::new(),
         Arc::new(CostTracker::new(ModelRegistry::with_defaults())),
-        "claude-sonnet-4-5-20250929".to_string(),
+        "claude-sonnet-5-5".to_string(),
     );
 
     let result = router.complete(make_request(None)).await;
@@ -216,7 +210,7 @@ async fn test_openai_overloaded_error_does_not_cooldown_key() {
                 status: 503,
                 retry_after_ms: Some(10),
             }),
-            Ok(MockProvider::ok_response("gpt-5.2")),
+            Ok(MockProvider::ok_response("gpt-6-astra")),
         ],
     ));
 
@@ -233,7 +227,7 @@ async fn test_openai_overloaded_error_does_not_cooldown_key() {
     providers.insert(
         ProviderType::OpenAI,
         ProviderEntry {
-            provider,
+            provider: DynLlmProvider::from_arc(provider),
             key_pool: Arc::new(ArcSwap::from_pointee(key_pool)),
         },
     );
@@ -243,10 +237,10 @@ async fn test_openai_overloaded_error_does_not_cooldown_key() {
         ModelRegistry::with_defaults(),
         HashMap::new(),
         Arc::new(CostTracker::new(ModelRegistry::with_defaults())),
-        "gpt-5.2".to_string(),
+        "gpt-6-astra".to_string(),
     );
 
-    let result = router.complete(make_request(Some("gpt-5.2"))).await;
+    let result = router.complete(make_request(Some("gpt-6-astra"))).await;
     assert!(result.is_ok());
 
     let statuses = router
@@ -269,14 +263,14 @@ async fn test_fallback_chain() {
     ));
     let openai = Arc::new(MockProvider::new(
         "openai",
-        vec![Ok(MockProvider::ok_response("gpt-5.2"))],
+        vec![Ok(MockProvider::ok_response("gpt-6-astra"))],
     ));
 
     let mut providers = HashMap::new();
     providers.insert(
         ProviderType::Anthropic,
         ProviderEntry {
-            provider: anthropic,
+            provider: DynLlmProvider::from_arc(anthropic),
             key_pool: Arc::new(ArcSwap::from_pointee(KeyPool::new(
                 vec![ApiKey::new(
                     "k1".to_string(),
@@ -290,7 +284,7 @@ async fn test_fallback_chain() {
     providers.insert(
         ProviderType::OpenAI,
         ProviderEntry {
-            provider: openai,
+            provider: DynLlmProvider::from_arc(openai),
             key_pool: Arc::new(ArcSwap::from_pointee(KeyPool::new(
                 vec![ApiKey::new(
                     "k1".to_string(),
@@ -304,8 +298,8 @@ async fn test_fallback_chain() {
 
     let mut fallback_chains = HashMap::new();
     fallback_chains.insert(
-        "claude-sonnet-4-5-20250929".to_string(),
-        vec!["gpt-5.2".to_string()],
+        "claude-sonnet-5-5".to_string(),
+        vec!["gpt-6-astra".to_string()],
     );
 
     let router = LlmRouter::new(
@@ -313,25 +307,21 @@ async fn test_fallback_chain() {
         ModelRegistry::with_defaults(),
         fallback_chains,
         Arc::new(CostTracker::new(ModelRegistry::with_defaults())),
-        "claude-sonnet-4-5-20250929".to_string(),
+        "claude-sonnet-5-5".to_string(),
     );
 
     let result = router.complete(make_request(None)).await;
     assert!(result.is_ok());
-    assert_eq!(result.unwrap().model, "gpt-5.2");
+    assert_eq!(result.unwrap().model, "gpt-6-astra");
 }
 
 #[tokio::test]
 async fn test_cost_recording() {
     let provider = Arc::new(MockProvider::new(
         "anthropic",
-        vec![Ok(MockProvider::ok_response("claude-sonnet-4-5-20250929"))],
+        vec![Ok(MockProvider::ok_response("claude-sonnet-5-5"))],
     ));
-    let router = make_router_with_mock(
-        provider,
-        ProviderType::Anthropic,
-        "claude-sonnet-4-5-20250929",
-    );
+    let router = make_router_with_mock(provider, ProviderType::Anthropic, "claude-sonnet-5-5");
 
     let mut req = make_request(None);
     req.context.agent_id = Some("agent1".to_string());
@@ -353,19 +343,15 @@ async fn test_cost_recording() {
 async fn an_unroutable_model_falls_through_to_the_effective_default() {
     let provider = Arc::new(MockProvider::new(
         "anthropic",
-        vec![Ok(MockProvider::ok_response("claude-sonnet-4-5-20250929"))],
+        vec![Ok(MockProvider::ok_response("claude-sonnet-5-5"))],
     ));
-    let router = make_router_with_mock(
-        provider,
-        ProviderType::Anthropic,
-        "claude-sonnet-4-5-20250929",
-    );
+    let router = make_router_with_mock(provider, ProviderType::Anthropic, "claude-sonnet-5-5");
 
     let response = router
         .complete(make_request(Some("nonexistent-model-xyz")))
         .await
         .expect("the ladder answers instead of failing on UnknownModel");
-    assert_eq!(response.model, "claude-sonnet-4-5-20250929");
+    assert_eq!(response.model, "claude-sonnet-5-5");
 }
 
 /// With no provider loaded there is nothing to fall through *to*, and the
@@ -377,7 +363,7 @@ async fn nothing_routable_is_one_error_that_names_the_fix() {
         ModelRegistry::with_defaults(),
         HashMap::new(),
         Arc::new(CostTracker::new(ModelRegistry::with_defaults())),
-        "claude-sonnet-4-5-20250929".to_string(),
+        "claude-sonnet-5-5".to_string(),
     );
 
     assert_eq!(router.effective_default_model(), None);
@@ -396,14 +382,10 @@ async fn nothing_routable_is_one_error_that_names_the_fix() {
 #[tokio::test]
 async fn the_effective_default_prefers_the_configured_model() {
     let provider = Arc::new(MockProvider::new("anthropic", vec![]));
-    let router = make_router_with_mock(
-        provider,
-        ProviderType::Anthropic,
-        "claude-sonnet-4-5-20250929",
-    );
+    let router = make_router_with_mock(provider, ProviderType::Anthropic, "claude-sonnet-5-5");
     assert_eq!(
         router.effective_default_model().as_deref(),
-        Some("claude-sonnet-4-5-20250929")
+        Some("claude-sonnet-5-5")
     );
 
     // A configured default the registry has never heard of falls through to
@@ -423,11 +405,7 @@ async fn the_effective_default_prefers_the_configured_model() {
 #[tokio::test]
 async fn an_unset_default_model_is_absent_not_empty() {
     let provider = Arc::new(MockProvider::new("anthropic", vec![]));
-    let router = make_router_with_mock(
-        provider,
-        ProviderType::Anthropic,
-        "claude-sonnet-4-5-20250929",
-    );
+    let router = make_router_with_mock(provider, ProviderType::Anthropic, "claude-sonnet-5-5");
 
     router.set_default_model(String::new());
     assert_eq!(router.configured_default_model(), None);
@@ -439,10 +417,10 @@ async fn an_unset_default_model_is_absent_not_empty() {
     router.set_default_model("   ".to_string());
     assert_eq!(router.configured_default_model(), None, "nor is whitespace");
 
-    router.set_default_model("claude-sonnet-4-5-20250929".to_string());
+    router.set_default_model("claude-sonnet-5-5".to_string());
     assert_eq!(
         router.configured_default_model().as_deref(),
-        Some("claude-sonnet-4-5-20250929")
+        Some("claude-sonnet-5-5")
     );
 }
 
@@ -452,13 +430,13 @@ async fn an_unset_default_model_is_absent_not_empty() {
 async fn the_orchestrator_chain_is_on_the_ladder_for_any_model() {
     let provider = Arc::new(MockProvider::new(
         "openai",
-        vec![Ok(MockProvider::ok_response("gpt-5-mini"))],
+        vec![Ok(MockProvider::ok_response("gpt-6.1-terra"))],
     ));
     let mut providers = HashMap::new();
     providers.insert(
         ProviderType::OpenAI,
         ProviderEntry {
-            provider,
+            provider: DynLlmProvider::from_arc(provider),
             key_pool: Arc::new(ArcSwap::from_pointee(KeyPool::new(
                 vec![ApiKey::new(
                     "k1".to_string(),
@@ -474,8 +452,8 @@ async fn the_orchestrator_chain_is_on_the_ladder_for_any_model() {
     // loaded; its chain names an OpenAI id that is.
     let mut fallback_chains = HashMap::new();
     fallback_chains.insert(
-        "claude-sonnet-4-5-20250929".to_string(),
-        vec!["gpt-5-mini".to_string()],
+        "claude-sonnet-5-5".to_string(),
+        vec!["gpt-6.1-terra".to_string()],
     );
 
     let router = LlmRouter::new(
@@ -483,16 +461,16 @@ async fn the_orchestrator_chain_is_on_the_ladder_for_any_model() {
         ModelRegistry::with_defaults(),
         fallback_chains,
         Arc::new(CostTracker::new(ModelRegistry::with_defaults())),
-        "claude-sonnet-4-5-20250929".to_string(),
+        "claude-sonnet-5-5".to_string(),
     );
 
     // A *third* model, with no chain of its own, still reaches the
     // orchestrator's chain.
     let response = router
-        .complete(make_request(Some("claude-opus-4-6")))
+        .complete(make_request(Some("claude-opus-5-5")))
         .await
         .expect("the orchestrator chain is on every ladder");
-    assert_eq!(response.model, "gpt-5-mini");
+    assert_eq!(response.model, "gpt-6.1-terra");
 }
 
 #[tokio::test]
@@ -517,7 +495,7 @@ async fn test_all_failed_no_fallback() {
     providers.insert(
         ProviderType::Anthropic,
         ProviderEntry {
-            provider,
+            provider: DynLlmProvider::from_arc(provider),
             key_pool: Arc::new(ArcSwap::from_pointee(key_pool)),
         },
     );
@@ -527,7 +505,7 @@ async fn test_all_failed_no_fallback() {
         ModelRegistry::with_defaults(),
         HashMap::new(), // No fallback chains
         Arc::new(CostTracker::new(ModelRegistry::with_defaults())),
-        "claude-sonnet-4-5-20250929".to_string(),
+        "claude-sonnet-5-5".to_string(),
     );
 
     let result = router.complete(make_request(None)).await;
@@ -539,8 +517,8 @@ async fn test_hot_reload_keys() {
     let provider = Arc::new(MockProvider::new(
         "anthropic",
         vec![
-            Ok(MockProvider::ok_response("claude-sonnet-4-5-20250929")),
-            Ok(MockProvider::ok_response("claude-sonnet-4-5-20250929")),
+            Ok(MockProvider::ok_response("claude-sonnet-5-5")),
+            Ok(MockProvider::ok_response("claude-sonnet-5-5")),
         ],
     ));
 
@@ -557,7 +535,7 @@ async fn test_hot_reload_keys() {
     providers.insert(
         ProviderType::Anthropic,
         ProviderEntry {
-            provider,
+            provider: DynLlmProvider::from_arc(provider),
             key_pool: Arc::new(ArcSwap::from_pointee(key_pool)),
         },
     );
@@ -567,7 +545,7 @@ async fn test_hot_reload_keys() {
         ModelRegistry::with_defaults(),
         HashMap::new(),
         Arc::new(CostTracker::new(ModelRegistry::with_defaults())),
-        "claude-sonnet-4-5-20250929".to_string(),
+        "claude-sonnet-5-5".to_string(),
     );
 
     // First call works
@@ -605,7 +583,7 @@ async fn test_hot_reload_keys() {
 async fn test_register_provider_new() {
     let provider = Arc::new(MockProvider::new(
         "openai",
-        vec![Ok(MockProvider::ok_response("gpt-5.2"))],
+        vec![Ok(MockProvider::ok_response("gpt-6-astra"))],
     ));
     let pool = KeyPool::new(
         vec![ApiKey::new(
@@ -621,14 +599,18 @@ async fn test_register_provider_new() {
         ModelRegistry::with_defaults(),
         HashMap::new(),
         Arc::new(CostTracker::new(ModelRegistry::with_defaults())),
-        "gpt-5.2".to_string(),
+        "gpt-6-astra".to_string(),
     );
 
     assert!(!router.reload_keys(
         &ProviderType::OpenAI,
         KeyPool::new(vec![], SelectionStrategy::RoundRobin)
     ));
-    assert!(router.register_provider(ProviderType::OpenAI, provider, pool));
+    assert!(router.register_provider(
+        ProviderType::OpenAI,
+        DynLlmProvider::from_arc(provider),
+        pool
+    ));
     assert!(
         router
             .configured_providers()
@@ -654,7 +636,7 @@ async fn test_try_fallback_to_cli() {
     providers.insert(
         ProviderType::Anthropic,
         ProviderEntry {
-            provider: api_provider,
+            provider: DynLlmProvider::from_arc(api_provider),
             key_pool: Arc::new(ArcSwap::from_pointee(KeyPool::new(
                 vec![ApiKey::new(
                     "k1".to_string(),
@@ -671,7 +653,7 @@ async fn test_try_fallback_to_cli() {
         ModelRegistry::with_defaults(),
         HashMap::new(), // No model-level fallback chains
         Arc::new(CostTracker::new(ModelRegistry::with_defaults())),
-        "claude-sonnet-4-5-20250929".to_string(),
+        "claude-sonnet-5-5".to_string(),
     );
 
     router.register_cli_backend(ProviderType::Anthropic, cli_provider);
@@ -685,7 +667,7 @@ async fn test_try_fallback_to_cli() {
 async fn test_cli_fallback_not_called_when_api_succeeds() {
     let api_provider = Arc::new(MockProvider::new(
         "anthropic",
-        vec![Ok(MockProvider::ok_response("claude-sonnet-4-5-20250929"))],
+        vec![Ok(MockProvider::ok_response("claude-sonnet-5-5"))],
     ));
     let cli_provider = Arc::new(MockProvider::new(
         "claude_cli",
@@ -695,21 +677,20 @@ async fn test_cli_fallback_not_called_when_api_succeeds() {
     let router = LlmRouter::single_provider(
         api_provider,
         ProviderType::Anthropic,
-        "claude-sonnet-4-5-20250929".to_string(),
+        "claude-sonnet-5-5".to_string(),
     );
     router.register_cli_backend(ProviderType::Anthropic, cli_provider);
 
     let result = router.complete(make_request(None)).await;
     assert!(result.is_ok());
     // Should use API, not CLI
-    assert_eq!(result.unwrap().model, "claude-sonnet-4-5-20250929");
+    assert_eq!(result.unwrap().model, "claude-sonnet-5-5");
 }
 
 // ── Key-aware mock provider ────────────────────────────────────
 
 struct KeyAwareMockProvider;
 
-#[async_trait]
 impl LlmProvider for KeyAwareMockProvider {
     fn name(&self) -> &str {
         "key_aware_mock"
@@ -753,7 +734,7 @@ async fn test_no_api_keys_triggers_cli_fallback() {
     providers.insert(
         ProviderType::Anthropic,
         ProviderEntry {
-            provider: key_aware,
+            provider: DynLlmProvider::from_arc(key_aware),
             key_pool: Arc::new(ArcSwap::from_pointee(key_pool)),
         },
     );
@@ -763,7 +744,7 @@ async fn test_no_api_keys_triggers_cli_fallback() {
         ModelRegistry::with_defaults(),
         HashMap::new(),
         Arc::new(CostTracker::new(ModelRegistry::with_defaults())),
-        "claude-sonnet-4-5-20250929".to_string(),
+        "claude-sonnet-5-5".to_string(),
     );
 
     router.register_cli_backend(ProviderType::Anthropic, cli_provider);
@@ -799,7 +780,7 @@ async fn test_mixed_pool_uses_api_key_only() {
     providers.insert(
         ProviderType::Anthropic,
         ProviderEntry {
-            provider: key_aware,
+            provider: DynLlmProvider::from_arc(key_aware),
             key_pool: Arc::new(ArcSwap::from_pointee(key_pool)),
         },
     );
@@ -809,7 +790,7 @@ async fn test_mixed_pool_uses_api_key_only() {
         ModelRegistry::with_defaults(),
         HashMap::new(),
         Arc::new(CostTracker::new(ModelRegistry::with_defaults())),
-        "claude-sonnet-4-5-20250929".to_string(),
+        "claude-sonnet-5-5".to_string(),
     );
 
     // Should succeed using the API key, not the managed key
@@ -829,6 +810,8 @@ fn test_flatten_messages() {
             tool_calls: None,
             tool_call_id: None,
             is_error: false,
+            echo: None,
+            notice: false,
         },
         ChatMessage::user("Hello"),
         ChatMessage {
@@ -838,6 +821,8 @@ fn test_flatten_messages() {
             tool_calls: None,
             tool_call_id: None,
             is_error: false,
+            echo: None,
+            notice: false,
         },
     ];
     let flattened = flatten_messages(&messages);
@@ -856,6 +841,8 @@ fn test_truncate_messages_for_cli_small_input() {
             tool_calls: None,
             tool_call_id: None,
             is_error: false,
+            echo: None,
+            notice: false,
         },
         ChatMessage::user("Hello"),
         ChatMessage {
@@ -865,6 +852,8 @@ fn test_truncate_messages_for_cli_small_input() {
             tool_calls: None,
             tool_call_id: None,
             is_error: false,
+            echo: None,
+            notice: false,
         },
     ];
     let result = truncate_messages_for_cli(&messages);
@@ -886,6 +875,8 @@ fn test_truncate_messages_for_cli_large_input() {
             tool_calls: None,
             tool_call_id: None,
             is_error: false,
+            echo: None,
+            notice: false,
         },
         ChatMessage::user(&big_content), // middle — should be dropped
         ChatMessage {
@@ -895,6 +886,8 @@ fn test_truncate_messages_for_cli_large_input() {
             tool_calls: None,
             tool_call_id: None,
             is_error: false,
+            echo: None,
+            notice: false,
         }, // middle — should be dropped
         ChatMessage::user(&big_content), // middle — should be dropped
         ChatMessage {
@@ -904,6 +897,8 @@ fn test_truncate_messages_for_cli_large_input() {
             tool_calls: None,
             tool_call_id: None,
             is_error: false,
+            echo: None,
+            notice: false,
         }, // second-to-last — kept
         ChatMessage::user("What next?"), // last — kept
     ];
@@ -923,238 +918,6 @@ fn test_truncate_messages_for_cli_empty() {
     assert!(result.is_empty());
 }
 
-// ── estimated_llm_capacity tests ─────────────────────────────────
-
-#[tokio::test]
-async fn test_estimated_llm_capacity_single_key() {
-    // Single provider, single key, default rate config (per_key_concurrency=2, global=4)
-    let provider = Arc::new(MockProvider::new(
-        "anthropic",
-        vec![Ok(MockProvider::ok_response("claude-sonnet-4-5-20250929"))],
-    ));
-    let router = make_router_with_mock(
-        provider,
-        ProviderType::Anthropic,
-        "claude-sonnet-4-5-20250929",
-    );
-
-    // 1 available key * 5 per-key concurrency = 5, capped by global (10) = 5
-    let info = router.estimated_llm_capacity(None).await;
-    assert_eq!(info.available_api_keys, 1);
-    assert_eq!(info.per_key_concurrency, 5);
-    assert_eq!(info.key_capacity, 5);
-    assert!(!info.has_cli_fallback);
-    assert_eq!(info.effective_capacity, 5);
-}
-
-#[tokio::test]
-async fn test_estimated_llm_capacity_multiple_keys() {
-    let provider = Arc::new(MockProvider::new(
-        "anthropic",
-        vec![Ok(MockProvider::ok_response("claude-sonnet-4-5-20250929"))],
-    ));
-
-    let key_pool = KeyPool::new(
-        vec![
-            ApiKey::new(
-                "k1".to_string(),
-                ProviderType::Anthropic,
-                "sk-1".to_string(),
-            ),
-            ApiKey::new(
-                "k2".to_string(),
-                ProviderType::Anthropic,
-                "sk-2".to_string(),
-            ),
-            ApiKey::new(
-                "k3".to_string(),
-                ProviderType::Anthropic,
-                "sk-3".to_string(),
-            ),
-        ],
-        SelectionStrategy::RoundRobin,
-    );
-
-    let mut providers = HashMap::new();
-    providers.insert(
-        ProviderType::Anthropic,
-        ProviderEntry {
-            provider,
-            key_pool: Arc::new(ArcSwap::from_pointee(key_pool)),
-        },
-    );
-
-    let router = LlmRouter::new(
-        providers,
-        ModelRegistry::with_defaults(),
-        HashMap::new(),
-        Arc::new(CostTracker::new(ModelRegistry::with_defaults())),
-        "claude-sonnet-4-5-20250929".to_string(),
-    );
-
-    // 3 keys * 5 per-key = 15, capped by global concurrency (10) = 10
-    let info = router.estimated_llm_capacity(None).await;
-    assert_eq!(info.available_api_keys, 3);
-    assert_eq!(info.key_capacity, 15);
-    assert!(!info.has_cli_fallback);
-    assert_eq!(info.effective_capacity, 10);
-}
-
-#[tokio::test]
-async fn test_estimated_llm_capacity_rate_limited_keys() {
-    let provider = Arc::new(MockProvider::new(
-        "anthropic",
-        vec![Ok(MockProvider::ok_response("claude-sonnet-4-5-20250929"))],
-    ));
-
-    let key_pool = KeyPool::new(
-        vec![
-            ApiKey::new(
-                "k1".to_string(),
-                ProviderType::Anthropic,
-                "sk-1".to_string(),
-            ),
-            ApiKey::new(
-                "k2".to_string(),
-                ProviderType::Anthropic,
-                "sk-2".to_string(),
-            ),
-        ],
-        SelectionStrategy::RoundRobin,
-    );
-
-    // Rate-limit one key
-    key_pool
-        .report_result(
-            "k1",
-            CallResult::RateLimited {
-                retry_after_ms: 60_000,
-            },
-        )
-        .await;
-
-    let mut providers = HashMap::new();
-    providers.insert(
-        ProviderType::Anthropic,
-        ProviderEntry {
-            provider,
-            key_pool: Arc::new(ArcSwap::from_pointee(key_pool)),
-        },
-    );
-
-    let router = LlmRouter::new(
-        providers,
-        ModelRegistry::with_defaults(),
-        HashMap::new(),
-        Arc::new(CostTracker::new(ModelRegistry::with_defaults())),
-        "claude-sonnet-4-5-20250929".to_string(),
-    );
-
-    // 1 available key * 5 per-key = 5, capped by global (10) = 5
-    let info = router.estimated_llm_capacity(None).await;
-    assert_eq!(info.available_api_keys, 1);
-    assert_eq!(info.key_capacity, 5);
-    assert_eq!(info.effective_capacity, 5);
-}
-
-#[tokio::test]
-async fn test_estimated_llm_capacity_unknown_model() {
-    let provider = Arc::new(MockProvider::new("anthropic", vec![]));
-    let router = make_router_with_mock(
-        provider,
-        ProviderType::Anthropic,
-        "claude-sonnet-4-5-20250929",
-    );
-
-    let info = router
-        .estimated_llm_capacity(Some("nonexistent-model"))
-        .await;
-    assert_eq!(info.effective_capacity, 0);
-    assert_eq!(info.available_api_keys, 0);
-}
-
-#[tokio::test]
-async fn test_estimated_llm_capacity_with_cli_fallback() {
-    // Single key + CLI backend: CLI is fallback-only, NOT added to parallel capacity
-    let provider = Arc::new(MockProvider::new(
-        "anthropic",
-        vec![Ok(MockProvider::ok_response("claude-sonnet-4-5-20250929"))],
-    ));
-    let cli_provider = Arc::new(MockProvider::new(
-        "claude_cli",
-        vec![Ok(MockProvider::ok_response("claude_cli"))],
-    ));
-
-    let router = make_router_with_mock(
-        provider,
-        ProviderType::Anthropic,
-        "claude-sonnet-4-5-20250929",
-    );
-    router.register_cli_backend(ProviderType::Anthropic, cli_provider);
-
-    // 1 key * 5 per-key = 5, CLI NOT counted as parallel bandwidth
-    let info = router.estimated_llm_capacity(None).await;
-    assert_eq!(info.available_api_keys, 1);
-    assert_eq!(info.key_capacity, 5);
-    assert!(info.has_cli_fallback);
-    assert_eq!(info.effective_capacity, 5);
-}
-
-#[tokio::test]
-async fn test_estimated_llm_capacity_all_keys_limited_with_cli() {
-    // All keys rate-limited but CLI available — CLI provides fallback capacity of 1
-    let provider = Arc::new(MockProvider::new(
-        "anthropic",
-        vec![Ok(MockProvider::ok_response("claude-sonnet-4-5-20250929"))],
-    ));
-    let cli_provider = Arc::new(MockProvider::new(
-        "claude_cli",
-        vec![Ok(MockProvider::ok_response("claude_cli"))],
-    ));
-
-    let key_pool = KeyPool::new(
-        vec![ApiKey::new(
-            "k1".to_string(),
-            ProviderType::Anthropic,
-            "sk-1".to_string(),
-        )],
-        SelectionStrategy::RoundRobin,
-    );
-    key_pool
-        .report_result(
-            "k1",
-            CallResult::RateLimited {
-                retry_after_ms: 60_000,
-            },
-        )
-        .await;
-
-    let mut providers = HashMap::new();
-    providers.insert(
-        ProviderType::Anthropic,
-        ProviderEntry {
-            provider,
-            key_pool: Arc::new(ArcSwap::from_pointee(key_pool)),
-        },
-    );
-
-    let router = LlmRouter::new(
-        providers,
-        ModelRegistry::with_defaults(),
-        HashMap::new(),
-        Arc::new(CostTracker::new(ModelRegistry::with_defaults())),
-        "claude-sonnet-4-5-20250929".to_string(),
-    );
-    router.register_cli_backend(ProviderType::Anthropic, cli_provider);
-
-    // 0 available keys, CLI fallback = effective capacity 1
-    let info = router.estimated_llm_capacity(None).await;
-    assert_eq!(info.available_api_keys, 0);
-    assert_eq!(info.key_capacity, 0);
-    assert!(info.has_cli_fallback);
-    assert_eq!(info.effective_capacity, 1);
-}
-
 #[tokio::test]
 async fn test_streaming_key_rotation_on_rate_limit() {
     // First call rate-limited, second call succeeds
@@ -1164,7 +927,7 @@ async fn test_streaming_key_rotation_on_rate_limit() {
             Err(LlmError::RateLimited {
                 retry_after_ms: 1000,
             }),
-            Ok(MockProvider::ok_response("gpt-5.2")),
+            Ok(MockProvider::ok_response("gpt-6-astra")),
         ],
     ));
 
@@ -1180,7 +943,7 @@ async fn test_streaming_key_rotation_on_rate_limit() {
     providers.insert(
         ProviderType::OpenAI,
         ProviderEntry {
-            provider,
+            provider: DynLlmProvider::from_arc(provider),
             key_pool: Arc::new(ArcSwap::from_pointee(key_pool)),
         },
     );
@@ -1190,10 +953,10 @@ async fn test_streaming_key_rotation_on_rate_limit() {
         ModelRegistry::with_defaults(),
         HashMap::new(),
         Arc::new(CostTracker::new(ModelRegistry::with_defaults())),
-        "gpt-5.2".to_string(),
+        "gpt-6-astra".to_string(),
     );
 
-    let request = make_request(Some("gpt-5.2"));
+    let request = make_request(Some("gpt-6-astra"));
     let result = router.complete_streaming(request).await;
     assert!(result.is_ok(), "Streaming should succeed after key rotation");
 }
@@ -1225,7 +988,7 @@ async fn test_streaming_all_keys_rate_limited() {
     providers.insert(
         ProviderType::OpenAI,
         ProviderEntry {
-            provider,
+            provider: DynLlmProvider::from_arc(provider),
             key_pool: Arc::new(ArcSwap::from_pointee(key_pool)),
         },
     );
@@ -1235,10 +998,10 @@ async fn test_streaming_all_keys_rate_limited() {
         ModelRegistry::with_defaults(),
         HashMap::new(),
         Arc::new(CostTracker::new(ModelRegistry::with_defaults())),
-        "gpt-5.2".to_string(),
+        "gpt-6-astra".to_string(),
     );
 
-    let request = make_request(Some("gpt-5.2"));
+    let request = make_request(Some("gpt-6-astra"));
     let result = router.complete_streaming(request).await;
     assert!(
         matches!(result, Err(LlmRouterError::AllKeysRateLimited)),
@@ -1256,7 +1019,7 @@ async fn test_streaming_non_retryable_error_fails_immediately() {
                 status: 400,
                 message: "Bad request".to_string(),
             }),
-            Ok(MockProvider::ok_response("gpt-5.2")), // should never reach this
+            Ok(MockProvider::ok_response("gpt-6-astra")), // should never reach this
         ],
     ));
 
@@ -1272,7 +1035,7 @@ async fn test_streaming_non_retryable_error_fails_immediately() {
     providers.insert(
         ProviderType::OpenAI,
         ProviderEntry {
-            provider,
+            provider: DynLlmProvider::from_arc(provider),
             key_pool: Arc::new(ArcSwap::from_pointee(key_pool)),
         },
     );
@@ -1282,10 +1045,10 @@ async fn test_streaming_non_retryable_error_fails_immediately() {
         ModelRegistry::with_defaults(),
         HashMap::new(),
         Arc::new(CostTracker::new(ModelRegistry::with_defaults())),
-        "gpt-5.2".to_string(),
+        "gpt-6-astra".to_string(),
     );
 
-    let request = make_request(Some("gpt-5.2"));
+    let request = make_request(Some("gpt-6-astra"));
     let result = router.complete_streaming(request).await;
     assert!(
         matches!(
@@ -1316,12 +1079,12 @@ async fn the_cli_backend_will_not_serve_a_provider_that_is_not_loaded() {
         ModelRegistry::with_defaults(),
         HashMap::new(),
         Arc::new(CostTracker::new(ModelRegistry::with_defaults())),
-        "claude-sonnet-4-5-20250929".to_string(),
+        "claude-sonnet-5-5".to_string(),
     );
     router.register_cli_backend(ProviderType::Anthropic, cli_provider.clone());
 
     let err = router
-        .try_fallback("claude-sonnet-4-5-20250929", &make_request(None))
+        .try_fallback("claude-sonnet-5-5", &make_request(None), None)
         .await
         .expect_err("a provider that is not loaded may not be served at all");
 
@@ -1343,7 +1106,6 @@ struct SlowProvider {
     delay: std::time::Duration,
 }
 
-#[async_trait]
 impl LlmProvider for SlowProvider {
     fn name(&self) -> &str {
         "slow"
@@ -1354,7 +1116,7 @@ impl LlmProvider for SlowProvider {
     async fn chat(&self, _request: ChatRequest) -> Result<ChatResponse, LlmError> {
         let _ = self.started.send(());
         tokio::time::sleep(self.delay).await;
-        Ok(MockProvider::ok_response("claude-sonnet-4-5-20250929"))
+        Ok(MockProvider::ok_response("claude-sonnet-5-5"))
     }
     async fn chat_with_key(
         &self,
@@ -1380,7 +1142,7 @@ async fn a_disable_during_an_in_flight_call_does_not_wait_for_it() {
     let router = Arc::new(LlmRouter::single_provider(
         provider,
         ProviderType::Anthropic,
-        "claude-sonnet-4-5-20250929".to_string(),
+        "claude-sonnet-5-5".to_string(),
     ));
 
     let call = tokio::spawn({
@@ -1407,7 +1169,7 @@ async fn a_disable_during_an_in_flight_call_does_not_wait_for_it() {
         .await
         .expect("join")
         .expect("the in-flight call finishes on its own Arc");
-    assert_eq!(response.model, "claude-sonnet-4-5-20250929");
+    assert_eq!(response.model, "claude-sonnet-5-5");
 }
 
 // ── rate_headroom (Learning v2, design 09 §1.7) ──────────────────────────
@@ -1420,7 +1182,7 @@ async fn a_disable_during_an_in_flight_call_does_not_wait_for_it() {
 async fn rate_headroom_reports_the_tightest_key_without_consuming() {
     let provider = Arc::new(MockProvider::new(
         "anthropic",
-        vec![Ok(MockProvider::ok_response("claude-sonnet-4-5-20250929"))],
+        vec![Ok(MockProvider::ok_response("claude-sonnet-5-5"))],
     ));
     let pool = KeyPool::new(
         vec![
@@ -1441,7 +1203,7 @@ async fn rate_headroom_reports_the_tightest_key_without_consuming() {
     providers.insert(
         ProviderType::Anthropic,
         ProviderEntry {
-            provider,
+            provider: DynLlmProvider::from_arc(provider),
             key_pool: Arc::new(ArcSwap::from_pointee(pool)),
         },
     );
@@ -1455,13 +1217,13 @@ async fn rate_headroom_reports_the_tightest_key_without_consuming() {
         ModelRegistry::with_defaults(),
         HashMap::new(),
         Arc::new(CostTracker::new(ModelRegistry::with_defaults())),
-        "claude-sonnet-4-5-20250929".to_string(),
+        "claude-sonnet-5-5".to_string(),
         LlmRuntimeConfig::default(),
         config,
     );
 
     let full = router
-        .rate_headroom("claude-sonnet-4-5-20250929")
+        .rate_headroom("claude-sonnet-5-5")
         .await
         .expect("a loaded model has a rate budget");
     assert_eq!(full.rpm_capacity, 60.0);
@@ -1471,10 +1233,7 @@ async fn rate_headroom_reports_the_tightest_key_without_consuming() {
     // One key spends 4,000 tokens: the tightest key is what is reported.
     let limiter = router.rate_limiter_registry.get_or_create("k2", None);
     limiter.tpm_bucket.acquire(4_000.0).await;
-    let first = router
-        .rate_headroom("claude-sonnet-4-5-20250929")
-        .await
-        .unwrap();
+    let first = router.rate_headroom("claude-sonnet-5-5").await.unwrap();
     assert!(
         (5_900.0..6_200.0).contains(&first.tpm_available),
         "the tightest key: {first:?}"
@@ -1484,10 +1243,7 @@ async fn rate_headroom_reports_the_tightest_key_without_consuming() {
         "no request was spent: {first:?}"
     );
 
-    let second = router
-        .rate_headroom("claude-sonnet-4-5-20250929")
-        .await
-        .unwrap();
+    let second = router.rate_headroom("claude-sonnet-5-5").await.unwrap();
     assert!(
         second.tpm_available >= first.tpm_available,
         "reading consumed tokens: {first:?} then {second:?}"
@@ -1515,7 +1271,7 @@ fn two_key_router(
     providers.insert(
         ProviderType::OpenAI,
         ProviderEntry {
-            provider: provider.clone(),
+            provider: DynLlmProvider::from_arc(provider.clone()),
             key_pool: Arc::new(ArcSwap::from_pointee(key_pool)),
         },
     );
@@ -1524,7 +1280,7 @@ fn two_key_router(
         ModelRegistry::with_defaults(),
         HashMap::new(),
         Arc::new(CostTracker::new(ModelRegistry::with_defaults())),
-        "gpt-5.2".to_string(),
+        "gpt-6-astra".to_string(),
     );
     (router, provider)
 }
@@ -1544,7 +1300,7 @@ async fn every_key_refused_is_named_on_both_paths() {
     };
 
     let (router, _) = two_key_router(vec![refused()]);
-    let result = router.complete(make_request(Some("gpt-5.2"))).await;
+    let result = router.complete(make_request(Some("gpt-6-astra"))).await;
     assert!(
         matches!(result, Err(LlmRouterError::AllKeysRefused)),
         "non-streaming: {:?}",
@@ -1555,7 +1311,7 @@ async fn every_key_refused_is_named_on_both_paths() {
         "bad key".to_string(),
     ))]);
     let result = router
-        .complete_streaming(make_request(Some("gpt-5.2")))
+        .complete_streaming(make_request(Some("gpt-6-astra")))
         .await;
     assert!(
         matches!(result, Err(LlmRouterError::AllKeysRefused)),
@@ -1574,9 +1330,9 @@ async fn a_refused_key_beside_an_answer_or_a_transient_failure_is_not_all_keys_r
             status: 403,
             message: "forbidden".to_string(),
         }),
-        Ok(MockProvider::ok_response("gpt-5.2")),
+        Ok(MockProvider::ok_response("gpt-6-astra")),
     ]);
-    let result = router.complete(make_request(Some("gpt-5.2"))).await;
+    let result = router.complete(make_request(Some("gpt-6-astra"))).await;
     assert!(result.is_ok(), "the second key answers: {:?}", result.err());
 
     let (router, _) = two_key_router(vec![
@@ -1589,7 +1345,7 @@ async fn a_refused_key_beside_an_answer_or_a_transient_failure_is_not_all_keys_r
             message: "internal".to_string(),
         }),
     ]);
-    let result = router.complete(make_request(Some("gpt-5.2"))).await;
+    let result = router.complete(make_request(Some("gpt-6-astra"))).await;
     assert!(
         !matches!(result, Err(LlmRouterError::AllKeysRefused)),
         "a 500 is not a refusal: {:?}",

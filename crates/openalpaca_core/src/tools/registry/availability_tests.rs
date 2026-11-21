@@ -10,11 +10,9 @@ use crate::middleware::skill::SkillFrontmatter;
 use crate::tools::extensions::{ExtensionId, ExtensionState, WithdrawalCause};
 use crate::tools::registry::{BuiltInTool, RegisteredTool, ToolBackend};
 use openalpaca_llm::ToolDefinition;
-use std::sync::Arc;
 
 struct NoopTool;
 
-#[async_trait::async_trait]
 impl BuiltInTool for NoopTool {
     async fn execute(&self, _arguments: &serde_json::Value) -> Result<String, String> {
         Ok(String::new())
@@ -31,7 +29,7 @@ fn register(registry: &ToolRegistry, name: &str, provides: &[&str]) {
                 strict: None,
                 input_examples: None,
             },
-            backend: ToolBackend::BuiltIn(Arc::new(NoopTool)),
+            backend: ToolBackend::built_in(NoopTool),
             provides_capabilities: provides.iter().map(|s| s.to_string()).collect(),
             exempt_from_timeout: false,
             annotations: None,

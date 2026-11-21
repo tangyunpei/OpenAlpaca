@@ -1,9 +1,9 @@
-#!/usr/bin/env python3
+#!/usr/bin/env python3.11
 """Regression tests for the `scripts/gen_api_docs.py` parsers.
 
 Run with either:
-  python3 scripts/tests/test_gen_api_docs.py
-  python3 -m pytest scripts/tests/test_gen_api_docs.py
+  python3.11 scripts/tests/test_gen_api_docs.py
+  python3.11 -m pytest scripts/tests/test_gen_api_docs.py
 
 Every case here is a shape that silently lost content before the parsers learned
 to mask comments and literals: the generator never raised, the docs simply came
@@ -11,9 +11,9 @@ out short. Each test therefore asserts the content is present, not that some
 exception is absent.
 """
 
-from __future__ import annotations
-
+import contextlib
 import importlib.util
+import io
 import pathlib
 import sys
 import tempfile
@@ -204,6 +204,75 @@ pub enum GuiAction {
     assert [v["command"] for v in enums[0]["variants"]] == ["start", "stop"]
 
 
+def test_an_attribute_between_the_derive_and_the_enum_is_fine() -> None:
+    # M61: every CLI Subcommand enum carries `#[command(defer = true)]`.
+    source = """
+#[derive(Subcommand)]
+#[command(defer = true)]
+pub enum GuiAction {
+    Start,
+    Stop,
+}
+"""
+    enums = gen.parse_subcommand_enums(source)
+    assert [e["name"] for e in enums] == ["GuiAction"]
+    assert [v["command"] for v in enums[0]["variants"]] == ["start", "stop"]
+
+
+def test_a_derive_list_holding_subcommand_is_a_subcommand_enum() -> None:
+    # `MemoryCommands` is `#[derive(Subcommand, Debug)]`: the exact
+    # `#[derive(Subcommand)]` match left `### memory` with no enum.
+    source = """
+#[derive(Subcommand, Debug)]
+#[command(defer = true)]
+pub enum MemoryCommands {
+    List,
+    Show { id: String },
+}
+
+#[derive(Debug, clap::Subcommand)]
+pub enum Other {
+    Run,
+}
+
+#[derive(Debug, SubcommandLike)]
+pub enum NotOne {
+    Nope,
+}
+"""
+    enums = gen.parse_subcommand_enums(source)
+    assert [e["name"] for e in enums] == ["MemoryCommands", "Other"], enums
+    assert [v["command"] for v in enums[0]["variants"]] == ["list", "show"]
+    assert enums[0]["variants"][1]["fields"] == ["id"]
+
+
+def test_a_variant_attribute_over_several_lines_is_no_variant() -> None:
+    # `MemoryCommands::Timeline` carries a `#[command(group(` attribute
+    # over four lines; its second line was read as a variant `clap`.
+    source = """
+#[derive(Subcommand, Debug)]
+pub enum MemoryCommands {
+    List,
+    #[command(group(
+        clap::ArgGroup::new("around")
+            .required(true)
+            .args(["id", "query", "date"])
+    ))]
+    Timeline {
+        id: Option<String>,
+        #[arg(
+            long
+        )]
+        query: Option<String>,
+    },
+}
+"""
+    enums = gen.parse_subcommand_enums(source)
+    variants = enums[0]["variants"]
+    assert [v["command"] for v in variants] == ["list", "timeline"], variants
+    assert variants[1]["fields"] == ["id", "query"], variants
+
+
 # ── case 5: the GUI endpoints table ─────────────────────────────────────
 
 
@@ -343,6 +412,84 @@ def test_parse_schema_state_applies_a_drop_table_without_if_exists() -> None:
     assert "gone" not in tables, sorted(tables)
     assert "idx_gone_note" not in indexes, sorted(indexes)
     assert "kept" in tables and "idx_kept" in indexes
+
+
+# ── the workspace's crates, read by tomllib ─────────────────────────────
+#
+# `parse_workspace_crates` reads `[workspace] members` by its key. The regex it
+# replaced took the first `members = [` it met, which would have been
+# `default-members` had that come first; and a Cargo.toml that is not TOML is one
+# line and exit 2, not a traceback.
+
+
+def _with_cargo_toml(manifest: str, call):
+    """Run `call(path)` with `CARGO_TOML` pointed at a temp Cargo.toml holding `manifest`."""
+    with tempfile.TemporaryDirectory() as tmp:
+        path = pathlib.Path(tmp) / "Cargo.toml"
+        path.write_text(manifest, encoding="utf-8")
+        original = gen.CARGO_TOML
+        gen.CARGO_TOML = path
+        try:
+            return call(path)
+        finally:
+            gen.CARGO_TOML = original
+
+
+def test_workspace_crates_are_the_members_not_the_default_members() -> None:
+    manifest = (
+        "[workspace]\n"
+        'default-members = ["crates/b"]\n'
+        'members = [\n    "crates/b",\n    "crates/a",  # a comment\n    "apps/x",\n]\n'
+    )
+    crates = _with_cargo_toml(manifest, lambda _path: gen.parse_workspace_crates())
+    assert [p.relative_to(gen.ROOT).as_posix() for p in crates] == ["crates/a", "crates/b"], crates
+
+
+def test_a_cargo_toml_with_no_workspace_members_has_no_crates() -> None:
+    crates = _with_cargo_toml('[package]\nname = "solo"\n', lambda _path: gen.parse_workspace_crates())
+    assert crates == [], crates
+
+
+def test_a_cargo_toml_that_is_not_toml_is_a_source_error_naming_it() -> None:
+    def call(path):
+        try:
+            gen.parse_workspace_crates()
+        except gen.SourceError as e:
+            return path, str(e)
+        raise AssertionError("a Cargo.toml that is not TOML was read")
+
+    path, message = _with_cargo_toml('[workspace\nmembers = ["crates/a"]\n', call)
+    assert message.startswith(f"{path} is not TOML: "), message
+
+
+def test_a_workspace_or_members_of_the_wrong_shape_is_a_source_error_naming_it() -> None:
+    def call(path):
+        try:
+            gen.parse_workspace_crates()
+        except gen.SourceError as e:
+            return path, str(e)
+        raise AssertionError("a Cargo.toml of the wrong shape was read")
+
+    for manifest, what in (
+        ("workspace = 1\n", "[workspace] is not a table"),
+        ('[workspace]\nmembers = "crates/a"\n', "[workspace] members is not an array of strings"),
+        ("[workspace]\nmembers = [1]\n", "[workspace] members is not an array of strings"),
+    ):
+        path, message = _with_cargo_toml(manifest, call)
+        assert message == f"{path} is not a workspace manifest: {what}", (manifest, message)
+
+
+def test_main_on_a_cargo_toml_that_is_not_toml_exits_2_with_one_line() -> None:
+    def call(path):
+        err = io.StringIO()
+        with contextlib.redirect_stderr(err):
+            rc = gen.main(["--check"])
+        return path, rc, err.getvalue()
+
+    path, rc, err = _with_cargo_toml("[workspace\n", call)
+    assert rc == 2, (rc, err)
+    lines = err.splitlines()
+    assert len(lines) == 1 and lines[0].startswith(f"gen_api_docs: {path} is not TOML: "), lines
 
 
 def main() -> int:

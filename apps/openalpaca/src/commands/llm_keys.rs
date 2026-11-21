@@ -16,6 +16,7 @@ pub struct KeysArgs {
 }
 
 #[derive(Subcommand)]
+#[command(defer = true)]
 pub enum KeysCommands {
     /// List all API keys
     List {
@@ -64,9 +65,11 @@ pub enum KeysCommands {
         /// Key ID to make primary
         key_id: String,
     },
-    /// Reorder keys
+    /// Reorder a provider's keys
     Reorder {
-        /// Key IDs in desired order
+        /// Provider name
+        provider: String,
+        /// Key IDs in desired order; keys not named keep their order after them
         key_ids: Vec<String>,
     },
 }
@@ -185,12 +188,12 @@ pub(super) async fn run_keys(args: KeysArgs) -> Result<()> {
             keys_validate(&provider, secret.as_deref()).await
         }
         KeysCommands::SetPrimary { provider, key_id } => keys_set_primary(&provider, &key_id).await,
-        KeysCommands::Reorder { key_ids } => keys_reorder(key_ids).await,
+        KeysCommands::Reorder { provider, key_ids } => keys_reorder(&provider, key_ids).await,
     }
 }
 
 async fn keys_list(format: OutputFormat) -> Result<()> {
-    let client = DaemonClient::connect()?;
+    let client = DaemonClient::connect().await?;
     let config: serde_json::Value = client.get("/v1/settings/llm").await?;
     print_list(&key_rows(&config), format);
     Ok(())
@@ -232,11 +235,8 @@ async fn keys_add(
 
     // Auto-validate the key
     print!("{}", "Validating key... ".dimmed());
-    let client = DaemonClient::connect()?;
-    let validate_body = serde_json::json!({
-        "provider": provider,
-        "secret": secret,
-    });
+    let client = DaemonClient::connect().await?;
+    let validate_body = validate_body(&provider, &secret);
     match client
         .post::<_, serde_json::Value>("/v1/settings/llm/validate", &validate_body)
         .await
@@ -309,16 +309,8 @@ async fn keys_add(
     // Submit. The id field is `id` — `key_id` was silently dropped by serde and
     // the daemon minted a `key_<uuid8>` instead, so the id printed back by
     // `keys list` was never the one asked for.
-    let body = serde_json::json!({
-        "provider": provider,
-        "key": {
-            "id": format!("{}_{}", provider, chrono::Utc::now().timestamp()),
-            "secret": secret,
-            "source": source,
-            "notes": notes,
-            "priority": priority,
-        }
-    });
+    let id = format!("{}_{}", provider, chrono::Utc::now().timestamp());
+    let body = add_key_body(&provider, &id, &secret, &source, &notes, &priority);
 
     let _: serde_json::Value = client.put("/v1/settings/llm", &body).await?;
     println!("{} Key added for {}", "✓".green(), provider);
@@ -336,7 +328,7 @@ async fn keys_remove(provider: &str, key_id: &str) -> Result<()> {
         return Ok(());
     }
 
-    let client = DaemonClient::connect()?;
+    let client = DaemonClient::connect().await?;
     let _: serde_json::Value = client
         .delete_req(&format!("/v1/settings/llm/keys/{}/{}", provider, key_id))
         .await?;
@@ -383,7 +375,7 @@ pub(super) fn no_key_needed_line(provider: &str) -> String {
 /// which is a verdict on a key that does not exist and should not be sent:
 /// the one provider designed to need nothing was the one reported broken.
 async fn keys_validate(provider: &str, secret: Option<&str>) -> Result<()> {
-    let client = DaemonClient::connect()?;
+    let client = DaemonClient::connect().await?;
     // A daemon that refuses the settings route tells us nothing about the
     // provider, and "keyed" is the safe reading of nothing.
     let settings: crate::commands::llm_status::LlmSettingsSnapshot = client
@@ -404,10 +396,7 @@ async fn keys_validate(provider: &str, secret: Option<&str>) -> Result<()> {
         ValidatePlan::Grade => secret.unwrap_or_default(),
     };
 
-    let body = serde_json::json!({
-        "provider": provider,
-        "secret": secret,
-    });
+    let body = validate_body(provider, secret);
 
     let result: serde_json::Value = client.post("/v1/settings/llm/validate", &body).await?;
 
@@ -437,25 +426,168 @@ async fn keys_validate(provider: &str, secret: Option<&str>) -> Result<()> {
     Ok(())
 }
 
-async fn keys_set_primary(provider: &str, key_id: &str) -> Result<()> {
-    let client = DaemonClient::connect()?;
-    let body = serde_json::json!({
+/// `POST /v1/settings/llm/validate`'s body, from `llm keys add` and
+/// `llm keys validate`.
+pub(crate) fn validate_body(provider: &str, secret: &str) -> serde_json::Value {
+    serde_json::json!({
         "provider": provider,
+        "secret": secret,
+    })
+}
+
+/// `PUT /v1/settings/llm`'s body, from `llm keys add`. The id field is
+/// `id` — `key_id` was silently dropped by serde and the daemon minted a
+/// `key_<uuid8>` instead, so the id printed back by `keys list` was never
+/// the one asked for.
+pub(crate) fn add_key_body(
+    provider: &str,
+    id: &str,
+    secret: &str,
+    source: &str,
+    notes: &str,
+    priority: &str,
+) -> serde_json::Value {
+    serde_json::json!({
+        "provider": provider,
+        "key": {
+            "id": id,
+            "secret": secret,
+            "source": source,
+            "notes": notes,
+            "priority": priority,
+        }
+    })
+}
+
+/// A provider's key ids in their order, as `GET /v1/settings/llm` lists
+/// them (`[]` for a provider it does not list).
+pub(crate) fn current_key_order(config: &serde_json::Value, provider: &str) -> Vec<String> {
+    config["providers"][provider]["keys"]
+        .as_array()
+        .map(|keys| {
+            keys.iter()
+                .filter_map(|k| k["id"].as_str().map(str::to_string))
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+/// `PUT /v1/settings/llm/keys/reorder`'s body from `llm keys set-primary`,
+/// as the route's `ReorderKeysRequest` reads it: the provider's keys in
+/// the order `config` (the `GET /v1/settings/llm` just read) lists them,
+/// unchanged, and the key to make primary (*Rev 142*'s item 7, (b)).
+pub(crate) fn set_primary_body(
+    provider: &str,
+    key_id: &str,
+    config: &serde_json::Value,
+) -> serde_json::Value {
+    serde_json::json!({
+        "provider": provider,
+        "key_order": current_key_order(config, provider),
         "primary_key_id": key_id,
-    });
+    })
+}
+
+/// `PUT /v1/settings/llm/keys/reorder`'s body from `llm keys reorder`, as
+/// the route's `ReorderKeysRequest` reads it: the order asked for, and no
+/// primary, so every key keeps its priority.
+pub(crate) fn reorder_body(provider: &str, key_ids: &[String]) -> serde_json::Value {
+    serde_json::json!({
+        "provider": provider,
+        "key_order": key_ids,
+        "primary_key_id": null,
+    })
+}
+
+/// What `llm keys set-primary` and `llm keys reorder` check before they
+/// send anything, against the provider's key order `config` (the
+/// `GET /v1/settings/llm` just read) lists (*Rev 147*'s item 2, (b)): a
+/// provider the daemon does not list, one that holds no key, an empty order
+/// asked for, and a key id the provider does not hold are refused, naming
+/// what the provider holds — the route would take each and change nothing,
+/// or, for `set-primary`, make every key a fallback. On success, the
+/// provider's keys the order leaves out, which the route keeps after the
+/// listed ones in their old order.
+pub(crate) fn check_key_ids(
+    config: &serde_json::Value,
+    provider: &str,
+    key_ids: &[String],
+) -> Result<Vec<String>, String> {
+    let Some(listed) = config["providers"].as_object() else {
+        return Err("the daemon listed no providers".to_string());
+    };
+    if !listed.contains_key(provider) {
+        let names: Vec<&str> = listed.keys().map(String::as_str).collect();
+        return Err(format!(
+            "unknown provider '{provider}': the daemon lists {}",
+            names.join(", ")
+        ));
+    }
+    let order = current_key_order(config, provider);
+    if order.is_empty() {
+        return Err(format!("{provider} holds no keys"));
+    }
+    let holds = || format!("{provider} holds {}", order.join(", "));
+    if key_ids.is_empty() {
+        return Err(format!("no key ids given: {}", holds()));
+    }
+    for id in key_ids {
+        if !order.contains(id) {
+            return Err(format!("{provider} holds no key '{id}': {}", holds()));
+        }
+    }
+    Ok(order
+        .into_iter()
+        .filter(|id| !key_ids.contains(id))
+        .collect())
+}
+
+async fn keys_set_primary(provider: &str, key_id: &str) -> Result<()> {
+    let client = DaemonClient::connect().await?;
+    keys_set_primary_with(&client, provider, key_id).await
+}
+
+async fn keys_set_primary_with(client: &DaemonClient, provider: &str, key_id: &str) -> Result<()> {
+    let config: serde_json::Value = client.get("/v1/settings/llm").await?;
+    check_key_ids(&config, provider, &[key_id.to_string()]).map_err(anyhow::Error::msg)?;
+    let body = set_primary_body(provider, key_id, &config);
     let _: serde_json::Value = client.put("/v1/settings/llm/keys/reorder", &body).await?;
     println!("{} Set {} as primary for {}", "✓".green(), key_id, provider);
     Ok(())
 }
 
-async fn keys_reorder(key_ids: Vec<String>) -> Result<()> {
-    let client = DaemonClient::connect()?;
-    let body = serde_json::json!({
-        "key_ids": key_ids,
-    });
-    let _: serde_json::Value = client.put("/v1/settings/llm/keys/reorder", &body).await?;
-    println!("{} Keys reordered", "✓".green());
+async fn keys_reorder(provider: &str, key_ids: Vec<String>) -> Result<()> {
+    let client = DaemonClient::connect().await?;
+    let line = keys_reorder_with(&client, provider, &key_ids).await?;
+    println!("{} {line}", "✓".green());
     Ok(())
+}
+
+/// `llm keys reorder` past the connection: the order read and checked
+/// ([`check_key_ids`]), then sent; the line it ends on.
+async fn keys_reorder_with(
+    client: &DaemonClient,
+    provider: &str,
+    key_ids: &[String],
+) -> Result<String> {
+    let config: serde_json::Value = client.get("/v1/settings/llm").await?;
+    let unlisted = check_key_ids(&config, provider, key_ids).map_err(anyhow::Error::msg)?;
+    let body = reorder_body(provider, key_ids);
+    let _: serde_json::Value = client.put("/v1/settings/llm/keys/reorder", &body).await?;
+    Ok(reordered_line(&unlisted))
+}
+
+/// What `llm keys reorder` says once the order is sent: the keys it left
+/// out, if any, keep their order after the ones it named.
+pub(crate) fn reordered_line(unlisted: &[String]) -> String {
+    if unlisted.is_empty() {
+        "Keys reordered".to_string()
+    } else {
+        format!(
+            "Keys reordered; not named, so kept after them in their old order: {}",
+            unlisted.join(", ")
+        )
+    }
 }
 
 #[cfg(test)]
@@ -589,5 +721,217 @@ mod tests {
         });
 
         assert!(key_rows(&config).is_empty());
+    }
+
+    /// The `llm keys` verbs' bodies, pinned whole for the daemon's
+    /// `routes::settings::keys_cli_tests`, which drives them through
+    /// `PUT /v1/settings/llm/keys/reorder`'s own handler.
+    const KEYS_BODIES: &str = concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/src/commands/llm_keys/keys-bodies.json"
+    );
+
+    /// `GET /v1/settings/llm` with two `openai` keys, `key-1` first.
+    fn two_keys() -> serde_json::Value {
+        serde_json::json!({
+            "providers": {
+                "openai": {
+                    "enabled": true,
+                    "requires_key": true,
+                    "keys": [
+                        { "id": "key-1", "priority": "primary" },
+                        { "id": "key-2", "priority": "fallback" },
+                    ],
+                },
+            },
+        })
+    }
+
+    /// *Rev 142*'s item 7, (b): `set-primary` sends the provider's keys in
+    /// the order it just read, and the key to make primary; `reorder` the
+    /// order asked for and no primary — `{provider, key_order,
+    /// primary_key_id}`, the keys `ReorderKeysRequest` reads.
+    #[test]
+    fn the_keys_verbs_send_what_the_reorder_route_reads() {
+        let config = two_keys();
+        assert_eq!(current_key_order(&config, "openai"), ["key-1", "key-2"]);
+        assert!(current_key_order(&config, "anthropic").is_empty());
+        let set_primary = set_primary_body("openai", "key-2", &config);
+        assert_eq!(
+            set_primary,
+            serde_json::json!({
+                "provider": "openai",
+                "key_order": ["key-1", "key-2"],
+                "primary_key_id": "key-2",
+            })
+        );
+        let order = ["key-2".to_string(), "key-1".to_string()];
+        let reorder = reorder_body("openai", &order);
+        assert_eq!(
+            reorder,
+            serde_json::json!({
+                "provider": "openai",
+                "key_order": ["key-2", "key-1"],
+                "primary_key_id": null,
+            })
+        );
+        for body in [&set_primary, &reorder] {
+            serde_json::from_value::<openalpaca_llm::config::settings_types::ReorderKeysRequest>(
+                body.clone(),
+            )
+            .unwrap_or_else(|e| panic!("the route's type refuses {body}: {e}"));
+        }
+
+        let built = serde_json::json!({ "set_primary": set_primary, "reorder": reorder });
+        let pinned: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(KEYS_BODIES).expect("the pinned bodies"))
+                .expect("JSON");
+        assert_eq!(
+            built, pinned,
+            "the keys verbs' bodies moved: rewrite {KEYS_BODIES} with them, and run the \
+             daemon's routes::settings::keys_cli_tests"
+        );
+    }
+
+    /// The order is read where `GET /v1/settings/llm`'s sample holds a key's
+    /// id: `providers.<provider>.keys[].id`.
+    #[test]
+    fn the_key_order_is_read_where_the_settings_sample_holds_it() {
+        let sample: serde_json::Value = serde_json::from_slice(
+            &std::fs::read(concat!(
+                env!("CARGO_MANIFEST_DIR"),
+                "/../openalpaca-gui/src/lib/api/contract/responses/get-settings-llm.json"
+            ))
+            .expect("the sample"),
+        )
+        .expect("JSON");
+        assert_eq!(current_key_order(&sample, "*"), [""]);
+    }
+
+    fn ids(v: &[&str]) -> Vec<String> {
+        v.iter().map(|s| s.to_string()).collect()
+    }
+
+    /// *Rev 147*'s item 2, (b): what the route would take silently — an
+    /// unknown provider, one with no keys, an empty order, a key id the
+    /// provider does not hold — is refused, naming what it holds; a
+    /// partial order is taken, the keys it leaves out named.
+    #[test]
+    fn the_keys_verbs_refuse_what_the_route_would_take_silently() {
+        let mut config = two_keys();
+        config["providers"]["anthropic"] = serde_json::json!({ "keys": [] });
+        let refused = |provider: &str, asked: &[&str]| {
+            check_key_ids(&config, provider, &ids(asked)).unwrap_err()
+        };
+        assert_eq!(
+            refused("opneai", &["key-1"]),
+            "unknown provider 'opneai': the daemon lists anthropic, openai"
+        );
+        assert_eq!(refused("anthropic", &["key-1"]), "anthropic holds no keys");
+        assert_eq!(
+            refused("openai", &[]),
+            "no key ids given: openai holds key-1, key-2"
+        );
+        assert_eq!(
+            refused("openai", &["key-1", "key-3"]),
+            "openai holds no key 'key-3': openai holds key-1, key-2"
+        );
+        assert_eq!(
+            check_key_ids(&config, "openai", &ids(&["key-2", "key-1"])),
+            Ok(vec![])
+        );
+        assert_eq!(
+            check_key_ids(&config, "openai", &ids(&["key-2"])),
+            Ok(ids(&["key-1"]))
+        );
+        assert_eq!(reordered_line(&[]), "Keys reordered");
+        assert_eq!(
+            reordered_line(&ids(&["key-1"])),
+            "Keys reordered; not named, so kept after them in their old order: key-1"
+        );
+    }
+
+    /// The settings read and a PUT answer the verb must not reach when it
+    /// refuses, from a server the test stops once the verb has returned.
+    /// No `EnvSandbox`: the `_with` verbs reach the daemon only through the
+    /// `DaemonClient::for_tests` they are given — `get`, `put`, the pure
+    /// body and check functions, `println!` — and never resolve the home
+    /// store or the config directory, so these tests leave `ENV_LOCK` to
+    /// the tests that need it.
+    fn settings_then_put() -> (std::net::SocketAddr, crate::test_util::StoppableServer) {
+        use crate::test_util::{json_answer, serve_until_stopped};
+        serve_until_stopped(vec![
+            json_answer("200 OK", "settings", &two_keys().to_string()),
+            json_answer("200 OK", "put", "{}"),
+        ])
+    }
+
+    /// The one request a refused verb sent: the settings read, and no PUT,
+    /// though one was on offer.
+    fn only_the_read(requests: &[String]) {
+        assert_eq!(requests.len(), 1, "{requests:?}");
+        assert!(requests[0].starts_with("GET /v1/settings/llm HTTP/1.1"));
+        assert!(
+            !requests.iter().any(|r| r.starts_with("PUT ")),
+            "{requests:?}"
+        );
+    }
+
+    /// `set-primary` with a key id the provider does not hold reads the
+    /// order and stops there: no PUT, so no key is made a fallback.
+    #[tokio::test]
+    async fn set_primary_with_an_unknown_key_sends_no_put() {
+        let (addr, server) = settings_then_put();
+        let client = DaemonClient::for_tests(&format!("http://{addr}"), "token");
+        let err = keys_set_primary_with(&client, "openai", "key-9")
+            .await
+            .unwrap_err()
+            .to_string();
+        let requests = server.stop();
+        assert_eq!(
+            err,
+            "openai holds no key 'key-9': openai holds key-1, key-2"
+        );
+        only_the_read(&requests);
+    }
+
+    /// `reorder` reads the order first too: a mistyped provider never
+    /// reaches the route.
+    #[tokio::test]
+    async fn reorder_with_an_unknown_provider_sends_no_put() {
+        let (addr, server) = settings_then_put();
+        let client = DaemonClient::for_tests(&format!("http://{addr}"), "token");
+        let err = keys_reorder_with(&client, "opneai", &ids(&["key-1"]))
+            .await
+            .unwrap_err()
+            .to_string();
+        let requests = server.stop();
+        assert_eq!(err, "unknown provider 'opneai': the daemon lists openai");
+        only_the_read(&requests);
+    }
+
+    /// A partial order is sent as asked, after the read, and the line says
+    /// which keys keep their place after it.
+    #[tokio::test]
+    async fn reorder_reads_then_sends_a_partial_order_and_says_so() {
+        let (addr, server) = settings_then_put();
+        let client = DaemonClient::for_tests(&format!("http://{addr}"), "token");
+        let line = keys_reorder_with(&client, "openai", &ids(&["key-2"]))
+            .await
+            .unwrap();
+        let requests = server.stop();
+        assert_eq!(requests.len(), 2, "{requests:?}");
+        assert!(requests[0].starts_with("GET /v1/settings/llm HTTP/1.1"));
+        assert!(requests[1].starts_with("PUT /v1/settings/llm/keys/reorder HTTP/1.1"));
+        assert!(
+            requests[1]
+                .ends_with(r#"{"key_order":["key-2"],"primary_key_id":null,"provider":"openai"}"#),
+            "{}",
+            requests[1]
+        );
+        assert_eq!(
+            line,
+            "Keys reordered; not named, so kept after them in their old order: key-1"
+        );
     }
 }

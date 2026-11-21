@@ -11,6 +11,9 @@
 //! interface's `provider: string | null` into `origin.id` (C7 deletes both on
 //! the frontend side). No config key is the source of anything here: the
 //! per-tool deny list was purged in C8 (design §11).
+//!
+//! M14 adds a tenth field, `output_schema`: an MCP tool's declared
+//! `outputSchema`, `null` otherwise.
 
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -80,12 +83,15 @@ pub(crate) fn tools_json(
     let mut rows: Vec<(String, serde_json::Value)> = registry
         .iter_registered_tools()
         .map(|(name, tool)| {
-            let source = match &tool.backend {
-                ToolBackend::BuiltIn(_) => "builtin",
-                ToolBackend::Mcp { .. } => "mcp",
-                ToolBackend::Plugin(_) => "plugin",
+            // `output_schema` (M14): an MCP tool's declared `outputSchema`
+            // as its server listed it; `null` when it declared none and for
+            // every other source. Shown, never sent to a provider.
+            let (source, output_schema) = match &tool.backend {
+                ToolBackend::BuiltIn(_) => ("builtin", None),
+                ToolBackend::Mcp { output_schema, .. } => ("mcp", output_schema.as_deref()),
+                ToolBackend::Plugin(_) => ("plugin", None),
                 // `config/tools/*.toml` declares exactly these two backends.
-                ToolBackend::Http { .. } | ToolBackend::Command { .. } => "config",
+                ToolBackend::Http { .. } | ToolBackend::Command { .. } => ("config", None),
             };
             // `null` for builtins and config tools — they are never on the
             // ENABLE axis, so they carry no enable field at all.
@@ -96,7 +102,7 @@ pub(crate) fn tools_json(
                     "id": ext.name,
                     // An extension with no ledger entry reads as enabled — the
                     // §6.2a fail-open default, stated the same way here.
-                    "enabled": record.as_ref().map(|r| r.disposition.0).unwrap_or(true),
+                    "enabled": record.as_ref().is_none_or(|r| r.disposition.0),
                     "state": record
                         .as_ref()
                         .map(|r| r.state.word())
@@ -117,6 +123,7 @@ pub(crate) fn tools_json(
                 "invocations_today": counts.get(&name).copied().unwrap_or(0),
                 "version": tool.version,
                 "author": tool.author,
+                "output_schema": output_schema,
             });
             (name, row)
         })
@@ -127,4 +134,4 @@ pub(crate) fn tools_json(
 }
 
 #[cfg(test)]
-mod tests;
+pub(crate) mod tests;

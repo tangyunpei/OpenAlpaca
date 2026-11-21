@@ -82,7 +82,7 @@ pub fn delete_ai_value(key: &str) -> Result<()> {
     match key {
         "ai.default_model" => {
             if let Some(ref mut orch) = config.orchestrator {
-                orch.model = "claude-sonnet-4-5-20250929".to_string();
+                orch.model = openalpaca_llm::config::DEFAULT_ORCHESTRATOR_MODEL.to_string();
             }
         }
         "ai.fallback_models" => {
@@ -390,14 +390,13 @@ pub fn list_provider_keys(provider: &str) -> Result<Vec<ProviderKeyInfo>> {
     let encryptor = encryptor()?;
     let store = secret_store();
 
-    let keys = match config
+    let Some(keys) = config
         .providers
         .as_ref()
         .and_then(|p| p.get(provider))
         .and_then(|pc| pc.keys.as_ref())
-    {
-        Some(keys) => keys,
-        None => return Ok(Vec::new()),
+    else {
+        return Ok(Vec::new());
     };
 
     let mut result = Vec::new();

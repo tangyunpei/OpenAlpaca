@@ -2,8 +2,9 @@ pub mod persistence;
 mod router;
 
 pub use router::{
-    ContinuedFrom, DelegationInfo, Gateway, GatewayRequest, GatewayResponse, HandleRequest,
-    HandleResult, MessageHandler, ResolvedAttachment, SkippedAttachment, TurnContinuity,
+    ContinuedFrom, DelegationInfo, DynMessageHandler, Gateway, GatewayRequest, GatewayResponse,
+    HandleRequest, HandleResult, MessageHandler, ResolvedAttachment, SkippedAttachment,
+    TurnContinuity,
 };
 
 /// One `memory_used` entry (design §7a): a memory note the turn delivered —

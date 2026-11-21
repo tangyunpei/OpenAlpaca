@@ -10,7 +10,6 @@ use crate::bus::EventBus;
 use crate::context::SharedContext;
 use crate::runner::steering::{SteeringMsg, SteeringOrigin, SteeringPushError, push_steering};
 use crate::tools::registry::{BuiltInTool, ToolContext};
-use async_trait::async_trait;
 use chrono::Utc;
 use openalpaca_llm::ToolDefinition;
 use std::sync::Arc;
@@ -43,7 +42,6 @@ impl SteerWorkflowTool {
     }
 }
 
-#[async_trait]
 impl BuiltInTool for SteerWorkflowTool {
     async fn execute(&self, _arguments: &serde_json::Value) -> Result<String, String> {
         Err("steer_workflow requires execution context — use execute_with_context".to_string())

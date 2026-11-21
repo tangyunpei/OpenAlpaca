@@ -33,9 +33,10 @@ use super::{
 };
 use crate::hash::sha256_hex;
 use crate::store::projects::{self, ProjectId};
-use crate::store::{ContentKind, StoreScope, home_root, state_dir};
+use crate::store::{ContentKind, StoreScope};
 use anyhow::{Context, Result};
 use chrono::{DateTime, Utc};
+use openalpaca_app_support::paths::{home_root, state_dir};
 use std::collections::{BTreeMap, HashSet};
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -2680,11 +2681,7 @@ pub fn list_owner_keys(scope: &StoreScope) -> Result<Vec<String>> {
     };
     let mut keys: Vec<String> = entries
         .flatten()
-        .filter(|e| {
-            fs::symlink_metadata(e.path())
-                .map(|m| m.file_type().is_dir())
-                .unwrap_or(false)
-        })
+        .filter(|e| fs::symlink_metadata(e.path()).is_ok_and(|m| m.file_type().is_dir()))
         .map(|e| e.file_name().to_string_lossy().into_owned())
         .filter(|name| is_owner_key(name))
         .collect();

@@ -17,7 +17,9 @@ use crate::memory::scope_context::MemoryScopeContext;
 use crate::middleware::bootstrap::bootstrap_to_prompt_block;
 use crate::middleware::guard::{OutputGuard, detect_hallucinated_send};
 use crate::middleware::prompt::AgentPersona;
-use crate::orchestrator::{ConversationContext, MAIN_LOOP_AGENT_ID, Orchestrator};
+use crate::orchestrator::{
+    ConnectorSendProvider, ConversationContext, MAIN_LOOP_AGENT_ID, Orchestrator,
+};
 use crate::prompt_ctx::{SectionPriority, sources::{ContextRequest, ExecutionPath}};
 use crate::runner::{LoopConfig, LoopFinishReason, run_agentic_loop_routed};
 use crate::security::capabilities::Allowlist;
@@ -314,19 +316,20 @@ impl Orchestrator {
         // authoritative content, so a dropped delta costs a flicker.
         let stream_callback = turn_sink.map(delta_forwarder);
 
-        // N-TOOL-1 (Z1-05): the cut a tool call of this turn runs under —
-        // `[execution.agent_defaults] max_tool_runtime_secs` (60 s, the figure
-        // `LoopConfig::default()` hard-coded before), read per turn like the
-        // confirmation timeout beside it so a reload reaches the next turn.
-        // One number for the sandbox's cut and the loop's config; the loop
-        // states it on `shell_execute`'s definition.
-        let max_tool_runtime = std::time::Duration::from_secs(
-            self.daemon_config
-                .load()
-                .execution
-                .agent_defaults
-                .max_tool_runtime_secs,
-        );
+        // N-TOOL-1 (Z1-05), N-TOOL-1b: the cut a tool call of this turn runs
+        // under — `[execution.agent_defaults] max_tool_runtime_secs`, and the
+        // ceiling a command's or a plugin tool's own `timeout_secs` is
+        // clamped to — read per turn like the confirmation timeout beside
+        // them, so a reload reaches the next turn. The policy is their one
+        // carrier; the loop states both on `shell_execute`'s definition.
+        let (max_tool_runtime_secs, max_tool_runtime_ceiling_secs) = {
+            let config = self.daemon_config.load();
+            let tools = &config.execution.agent_defaults;
+            (
+                tools.max_tool_runtime_secs,
+                tools.max_tool_runtime_ceiling_secs,
+            )
+        };
 
         let (tools_for_loop, policy_opt, config_for_loop);
         if !tool_defs.is_empty() {
@@ -350,7 +353,8 @@ impl Orchestrator {
                 denied_capabilities: vec![],
                 require_confirmation_for: vec![],
                 max_tool_calls: None,
-                max_tool_runtime_secs: max_tool_runtime.as_secs(),
+                max_tool_runtime_secs,
+                max_tool_runtime_ceiling_secs,
                 stream_id: stream_id.map(|s| s.to_string()),
                 lane_key: Some(lane_key.to_string()),
                 confirmation_timeout_secs: Some(
@@ -396,7 +400,6 @@ impl Orchestrator {
                 tool_result_inline_bytes: inline_bytes,
                 model: turn_model,
                 stream_callback: stream_callback.clone(),
-                max_tool_runtime,
                 ..self.loop_config.clone()
             };
             tools_for_loop = tool_defs;
@@ -408,7 +411,6 @@ impl Orchestrator {
                 tool_result_inline_bytes: inline_bytes,
                 model: turn_model,
                 stream_callback,
-                max_tool_runtime,
                 ..self.loop_config.clone()
             };
         }
@@ -1014,11 +1016,10 @@ impl Orchestrator {
                 .resolve_provider(actual_model)
                 .map(|p| p.to_string())
                 .unwrap_or_else(|| "unknown".to_string());
-            let call_cost = router.cost_tracker.calculate_cost(
-                actual_model,
-                result.total_input_tokens,
-                result.total_output_tokens,
-            );
+            // The turn's requests as each was counted, never its summed
+            // tokens: a sum can pass a long-prompt threshold no request
+            // passed (USAGE-PER-REQUEST).
+            let call_cost = result.requests_cost;
 
             let call_status = match &result.finish_reason {
                 LoopFinishReason::Complete | LoopFinishReason::MaxRounds | LoopFinishReason::Truncated => "success",
@@ -1319,11 +1320,8 @@ impl Orchestrator {
             .resolve_provider(actual_model)
             .map(|p| p.to_string())
             .unwrap_or_else(|| "unknown".to_string());
-        let call_cost = router.cost_tracker.calculate_cost(
-            actual_model,
-            result.total_input_tokens,
-            result.total_output_tokens,
-        );
+        // As on the main loop: the request as it was counted.
+        let call_cost = result.requests_cost;
 
         let call_status = match &result.finish_reason {
             LoopFinishReason::Complete | LoopFinishReason::MaxRounds | LoopFinishReason::Truncated => "success",

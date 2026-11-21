@@ -10,7 +10,6 @@ use crate::common::{
 };
 use crate::{Connector, ConnectorError};
 use arc_swap::ArcSwap;
-use async_trait::async_trait;
 use dashmap::DashMap;
 use openalpaca_api::events::EventSource;
 use openalpaca_core::{
@@ -229,10 +228,68 @@ fn approval_reply(
         .map(|reply| discord_plain_text(&reply))
 }
 
+/// The `discord.guild_id` restriction: the one guild the bot answers in,
+/// `None` when the key is unset, empty or unreadable (no restriction).
+fn allowed_guild(db: &Database) -> Option<String> {
+    openalpaca_storage::ConfigRepository::new(db)
+        .get("discord.guild_id")
+        .ok()
+        .flatten()
+        .filter(|guild| !guild.is_empty())
+}
+
+/// The guild mention gate: a message in a server channel reaches the bot
+/// only when its mentions include the bot's own user id, and its text comes
+/// back with those mentions (`<@id>`, `<@!id>`) removed; `None` drops it.
+/// Before the gateway's Ready names the bot's user id (`bot_user_id` is
+/// `None`) every guild message is dropped, with no line.
+///
+/// A dropped message that mentions a role is the one drop a sender may not
+/// expect (Discord's autocomplete offers the bot's role beside its user), so
+/// it logs one INFO line naming why, with the guild and channel ids the
+/// neighbouring lines write and never the text, the author or the role. The
+/// connector cannot tell whose role it is (the bot's roles are not in the
+/// message), so the line says "a role", not "the bot's role". The line is
+/// written only for a guild the `discord.guild_id` restriction lets in (read
+/// from `db` on this drop alone): in a guild it excludes, a mention of the
+/// bot's user is dropped too, so the line's reason would be false there, and
+/// that guild's messages stay as unlogged as before. INFO, not WARN: nothing
+/// is at fault and nothing is the operator's to fix, and the line fires for
+/// every role mention the bot reads in an allowed guild; not DEBUG, which
+/// the daemon's default `info` filter hides, leaving the sender's silence
+/// unexplained.
+fn guild_message_text(
+    msg: &twilight_model::channel::Message,
+    bot_user_id: Option<twilight_model::id::Id<twilight_model::id::marker::UserMarker>>,
+    db: &Database,
+) -> Option<String> {
+    let bid = bot_user_id?;
+    if !msg.mentions.iter().any(|m| m.id == bid) {
+        if !msg.mention_roles.is_empty() {
+            let guild = msg.guild_id.map(|g| g.to_string()).unwrap_or_default();
+            if allowed_guild(db).is_none_or(|allowed| allowed == guild) {
+                info!(
+                    "Discord message in guild {guild} channel {} mentions a role, not the \
+                     bot's user; ignored: only a mention of the bot's user is answered",
+                    msg.channel_id
+                );
+            }
+        }
+        return None;
+    }
+    let mut text = msg.content.clone();
+    for mention in msg.mentions.iter().filter(|m| m.id == bid) {
+        text = text.replace(&format!("<@{}>", mention.id), "");
+        text = text.replace(&format!("<@!{}>", mention.id), "");
+    }
+    Some(text.trim().to_string())
+}
+
 /// DiscordConnector manages the Discord bot lifecycle and message handling.
 ///
-/// Uses twilight's `Shard::next_event()` event loop with `tokio::select!`
-/// for cancellation (same pattern as iMessage connector's `run_loop()`).
+/// Uses twilight's `Shard::next_event()` event loop, each wait raced against
+/// the cancel token with `run_until_cancelled` (same pattern as iMessage
+/// connector's `run_loop()`).
 pub struct DiscordConnector {
     token: String,
     db: Arc<Database>,
@@ -297,43 +354,48 @@ impl DiscordConnector {
         }
 
         loop {
-            tokio::select! {
-                _ = self.cancel_token.cancelled() => {
-                    info!("Discord connector shutting down");
-                    return Ok(());
-                }
-                event = shard.next_event(EventTypeFlags::all()) => {
-                    match event {
-                        Some(Ok(Event::MessageCreate(msg))) => {
-                            if let Err(e) = self.handle_message(&msg.0, &http, bot_user_id).await {
-                                error!("Failed to handle Discord message: {e}");
-                            }
-                        }
-                        Some(Ok(Event::Ready(ready))) => {
-                            info!("Discord bot ready: {} (id: {})", ready.user.name, ready.user.id);
-                            bot_user_id = Some(ready.user.id);
-                        }
-                        Some(Err(e)) => {
-                            use twilight_gateway::error::ReceiveMessageErrorType;
-                            match e.kind() {
-                                ReceiveMessageErrorType::Reconnect => {
-                                    error!("Fatal Discord gateway error: {e}");
-                                    return Err(ConnectorError::ConnectionError(format!(
-                                        "Fatal gateway error: {e}"
-                                    )));
-                                }
-                                _ => {
-                                    warn!("Discord gateway error: {e}");
-                                }
-                            }
-                        }
-                        None => {
-                            info!("Discord gateway stream ended");
-                            return Ok(());
-                        }
-                        _ => {}
+            // The gateway's next event is polled before the token: one that
+            // arrived in the tick the cancel landed is handled first.
+            let Some(event) = self
+                .cancel_token
+                .run_until_cancelled(shard.next_event(EventTypeFlags::all()))
+                .await
+            else {
+                info!("Discord connector shutting down");
+                return Ok(());
+            };
+            match event {
+                Some(Ok(Event::MessageCreate(msg))) => {
+                    if let Err(e) = self.handle_message(&msg.0, &http, bot_user_id).await {
+                        error!("Failed to handle Discord message: {e}");
                     }
                 }
+                Some(Ok(Event::Ready(ready))) => {
+                    info!(
+                        "Discord bot ready: {} (id: {})",
+                        ready.user.name, ready.user.id
+                    );
+                    bot_user_id = Some(ready.user.id);
+                }
+                Some(Err(e)) => {
+                    use twilight_gateway::error::ReceiveMessageErrorType;
+                    match e.kind() {
+                        ReceiveMessageErrorType::Reconnect => {
+                            error!("Fatal Discord gateway error: {e}");
+                            return Err(ConnectorError::ConnectionError(format!(
+                                "Fatal gateway error: {e}"
+                            )));
+                        }
+                        _ => {
+                            warn!("Discord gateway error: {e}");
+                        }
+                    }
+                }
+                None => {
+                    info!("Discord gateway stream ended");
+                    return Ok(());
+                }
+                _ => {}
             }
         }
     }
@@ -347,12 +409,9 @@ impl DiscordConnector {
         let cancel = self.cancel_token.clone();
         tokio::spawn(async move {
             loop {
-                let event = tokio::select! {
-                    _ = cancel.cancelled() => {
-                        info!("Discord confirmation listener shutting down");
-                        break;
-                    }
-                    event = rx.recv() => event,
+                let Some(event) = cancel.run_until_cancelled(rx.recv()).await else {
+                    info!("Discord confirmation listener shutting down");
+                    break;
                 };
                 match event {
                     Ok(SystemEvent::ToolConfirmationRequested {
@@ -460,33 +519,14 @@ impl DiscordConnector {
         let content = if is_dm {
             msg.content.clone()
         } else {
-            // Check if this bot is mentioned (by its own user ID)
-            let bot_mentioned = bot_user_id
-                .map(|bid| msg.mentions.iter().any(|m| m.id == bid))
-                .unwrap_or(false);
-            if !bot_mentioned {
-                return Ok(());
+            match guild_message_text(msg, bot_user_id, &self.db) {
+                Some(text) => text,
+                None => return Ok(()),
             }
-            // Strip this bot's mention prefix from content
-            let mut text = msg.content.clone();
-            if let Some(bid) = bot_user_id {
-                for mention in &msg.mentions {
-                    if mention.id == bid {
-                        let mention_str = format!("<@{}>", mention.id);
-                        text = text.replace(&mention_str, "");
-                        let mention_str_nick = format!("<@!{}>", mention.id);
-                        text = text.replace(&mention_str_nick, "");
-                    }
-                }
-            }
-            text.trim().to_string()
         };
 
         // Check guild_id restriction
-        let config_repo = openalpaca_storage::ConfigRepository::new(&self.db);
-        if let Ok(Some(allowed_guild)) = config_repo.get("discord.guild_id")
-            && !allowed_guild.is_empty()
-        {
+        if let Some(allowed_guild) = allowed_guild(&self.db) {
             if let Some(gid) = guild_id {
                 if gid.to_string() != allowed_guild {
                     debug!("Discord message from non-allowed guild {gid}, skipping");
@@ -718,7 +758,6 @@ impl DiscordConnector {
     }
 }
 
-#[async_trait]
 impl Connector for DiscordConnector {
     fn name(&self) -> &str {
         "discord"
@@ -938,6 +977,204 @@ mod tests {
             "Approved: a__b__c||x||. Tool execution will proceed."
         );
         assert!(approval_reply("hello", 7, &broker, &pending).is_none());
+    }
+
+    /// What a test's subscriber wrote, as text.
+    #[derive(Clone, Default)]
+    struct LogBuf(Arc<std::sync::Mutex<Vec<u8>>>);
+
+    impl LogBuf {
+        fn text(&self) -> String {
+            String::from_utf8_lossy(&self.0.lock().expect("log buffer")).into_owned()
+        }
+    }
+
+    impl std::io::Write for LogBuf {
+        fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+            self.0.lock().expect("log buffer").extend_from_slice(buf);
+            Ok(buf.len())
+        }
+
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+
+    impl<'a> tracing_subscriber::fmt::MakeWriter<'a> for LogBuf {
+        type Writer = LogBuf;
+
+        fn make_writer(&'a self) -> Self::Writer {
+            self.clone()
+        }
+    }
+
+    /// The bot's user id in the gate tests; the author, role and other ids
+    /// are planted so a log line that wrote one is caught.
+    const BOT: u64 = 3;
+    const AUTHOR: u64 = 7_100_200_300;
+    const ROLE: u64 = 8_400_500_600;
+    const PLANTED_TEXT: &str = "planted-text-for-the-gate";
+
+    fn mention(id: u64) -> serde_json::Value {
+        serde_json::json!({
+            "id": id.to_string(), "username": "someone", "discriminator": "0",
+            "avatar": null, "bot": id == BOT, "public_flags": 0
+        })
+    }
+
+    /// A guild message as the gateway delivers it, with the given user
+    /// mentions and role mentions.
+    fn guild_message(
+        content: &str,
+        mentions: &[u64],
+        roles: &[u64],
+    ) -> twilight_model::channel::Message {
+        serde_json::from_value(serde_json::json!({
+            "id": "11", "channel_id": "22", "guild_id": "33", "type": 0,
+            "author": {
+                "id": AUTHOR.to_string(), "username": "author", "discriminator": "0",
+                "avatar": null, "bot": false
+            },
+            "content": content, "timestamp": "2026-11-18T00:00:00.000000+00:00",
+            "edited_timestamp": null, "tts": false, "mention_everyone": false,
+            "mentions": mentions.iter().map(|id| mention(*id)).collect::<Vec<_>>(),
+            "mention_roles": roles.iter().map(u64::to_string).collect::<Vec<_>>(),
+            "attachments": [], "embeds": [], "pinned": false
+        }))
+        .expect("a gateway message")
+    }
+
+    /// Runs the guild mention gate under a capturing subscriber, the bot's
+    /// user id known and no `discord.guild_id` restriction set.
+    fn gate(msg: &twilight_model::channel::Message) -> (Option<String>, String) {
+        gate_with(msg, Some(twilight_model::id::Id::new(BOT)), &test_db())
+    }
+
+    /// Runs the guild mention gate under a capturing subscriber with the
+    /// given bot user id and store (whose `discord.guild_id` it reads).
+    fn gate_with(
+        msg: &twilight_model::channel::Message,
+        bot_user_id: Option<twilight_model::id::Id<twilight_model::id::marker::UserMarker>>,
+        db: &Database,
+    ) -> (Option<String>, String) {
+        let logs = LogBuf::default();
+        let subscriber = tracing_subscriber::fmt()
+            .with_writer(logs.clone())
+            .with_ansi(false)
+            .with_max_level(tracing::Level::TRACE)
+            .finish();
+        let text = tracing::subscriber::with_default(subscriber, || {
+            guild_message_text(msg, bot_user_id, db)
+        });
+        (text, logs.text())
+    }
+
+    /// A store whose `discord.guild_id` restriction is `guild`.
+    fn db_restricted_to(guild: &str) -> Database {
+        let db = test_db();
+        openalpaca_storage::ConfigRepository::new(&db)
+            .set("discord.guild_id", guild, "string")
+            .expect("set discord.guild_id");
+        db
+    }
+
+    /// DISCORD-ROLE: a guild message that mentions a role and not the bot's
+    /// user is still dropped, now with one INFO line naming why, which
+    /// writes neither the text nor the author's or the role's id.
+    #[test]
+    fn a_guild_message_mentioning_only_a_role_is_dropped_with_one_line() {
+        let msg = guild_message(&format!("<@&{ROLE}> {PLANTED_TEXT}"), &[], &[ROLE]);
+        let (text, logs) = gate(&msg);
+        assert_eq!(text, None, "dropped as before");
+        let lines = logs.lines().collect::<Vec<_>>();
+        assert_eq!(lines.len(), 1, "one line: {logs}");
+        assert!(lines[0].contains(" INFO "), "{logs}");
+        assert!(lines[0].contains("mentions a role"), "{logs}");
+        assert!(
+            lines[0].contains("only a mention of the bot's user"),
+            "{logs}"
+        );
+        assert!(lines[0].contains("channel 22"), "{logs}");
+        for planted in [PLANTED_TEXT, &AUTHOR.to_string(), &ROLE.to_string()] {
+            assert!(!logs.contains(planted), "{planted} in {logs}");
+        }
+    }
+
+    /// The line is for a role mention only: a guild message mentioning no
+    /// one, or another user, is dropped as silently as before.
+    #[test]
+    fn a_guild_message_mentioning_no_role_is_dropped_without_a_line() {
+        for msg in [
+            guild_message(PLANTED_TEXT, &[], &[]),
+            guild_message(&format!("<@{AUTHOR}> {PLANTED_TEXT}"), &[AUTHOR], &[]),
+        ] {
+            let (text, logs) = gate(&msg);
+            assert_eq!(text, None);
+            assert_eq!(logs, "", "no line");
+        }
+    }
+
+    /// A message that mentions the bot's user passes whatever roles it also
+    /// mentions, its text with the bot's mention removed, and logs nothing.
+    #[test]
+    fn a_guild_message_mentioning_the_bot_and_a_role_passes_without_a_line() {
+        for content in [
+            format!("<@{BOT}> <@&{ROLE}> hello"),
+            format!("<@!{BOT}> <@&{ROLE}> hello"),
+        ] {
+            let msg = guild_message(&content, &[BOT], &[ROLE]);
+            let (text, logs) = gate(&msg);
+            assert_eq!(text.as_deref(), Some(format!("<@&{ROLE}> hello").as_str()));
+            assert_eq!(logs, "", "no line");
+        }
+    }
+
+    /// The line is for a guild the `discord.guild_id` restriction lets in:
+    /// a role mention in a guild it excludes is dropped as silently as the
+    /// restriction drops every other message there, whatever it mentions.
+    #[test]
+    fn a_role_mention_in_a_guild_the_restriction_excludes_writes_no_line() {
+        let msg = guild_message(&format!("<@&{ROLE}> {PLANTED_TEXT}"), &[], &[ROLE]);
+        let (text, logs) = gate_with(
+            &msg,
+            Some(twilight_model::id::Id::new(BOT)),
+            &db_restricted_to("44"),
+        );
+        assert_eq!(text, None, "dropped as before");
+        assert_eq!(logs, "", "no line for an excluded guild");
+    }
+
+    /// In the guild the restriction names, and with the restriction set
+    /// empty (no restriction), the role mention still writes its one line.
+    #[test]
+    fn a_role_mention_in_an_allowed_guild_writes_its_line() {
+        for db in [db_restricted_to("33"), db_restricted_to("")] {
+            let msg = guild_message(&format!("<@&{ROLE}> {PLANTED_TEXT}"), &[], &[ROLE]);
+            let (text, logs) = gate_with(&msg, Some(twilight_model::id::Id::new(BOT)), &db);
+            assert_eq!(text, None, "dropped as before");
+            assert_eq!(logs.lines().count(), 1, "one line: {logs}");
+            assert!(logs.contains(" INFO "), "{logs}");
+            assert!(logs.contains("mentions a role"), "{logs}");
+            for planted in [PLANTED_TEXT, &AUTHOR.to_string(), &ROLE.to_string()] {
+                assert!(!logs.contains(planted), "{planted} in {logs}");
+            }
+        }
+    }
+
+    /// Before the gateway's Ready names the bot's user id, the gate cannot
+    /// tell a mention of the bot from any other, so it drops every guild
+    /// message as before and writes no line, not "not the bot's user" about
+    /// a message that may mention it.
+    #[test]
+    fn before_ready_a_guild_message_is_dropped_without_a_line() {
+        for msg in [
+            guild_message(&format!("<@{BOT}> <@&{ROLE}> hello"), &[BOT], &[ROLE]),
+            guild_message(&format!("<@&{ROLE}> {PLANTED_TEXT}"), &[], &[ROLE]),
+        ] {
+            let (text, logs) = gate_with(&msg, None, &test_db());
+            assert_eq!(text, None, "dropped as before");
+            assert_eq!(logs, "", "no line before Ready");
+        }
     }
 
     fn test_db() -> Database {

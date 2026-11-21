@@ -72,7 +72,11 @@ pub struct Capability {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AgentPreset {
     pub persona: String,
-    pub temperature: f32,
+    /// The template's `temperature`, when it sets one; stored without the
+    /// key when it sets none. Accepted and not sent: no agent turn sends a
+    /// temperature to the model.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub temperature: Option<f32>,
     pub verbosity: String,
 }
 
@@ -80,7 +84,7 @@ impl Default for AgentPreset {
     fn default() -> Self {
         Self {
             persona: "You are a helpful assistant.".to_string(),
-            temperature: 0.5,
+            temperature: None,
             verbosity: "normal".to_string(),
         }
     }
@@ -89,7 +93,13 @@ impl Default for AgentPreset {
 /// Per-agent LLM configuration.
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct AgentLlmConfig {
-    /// Override model for this agent (None = inherit from orchestrator).
+    /// The agent's model as its template writes it: `inherit` (also `None`),
+    /// an alias (`fast`, `balanced`, `strong`) or a model id (C8, M-1, M-2).
+    /// `inherit` is, for a subagent, the model that answered its lead; for
+    /// the lead, the model a request naming none reaches (a borrowed lead's
+    /// follows the shipped lead's choice, M-1a). The word is resolved to an
+    /// id before a loop is built from the agent
+    /// (`runner::model_choice`), never sent as one.
     #[serde(default)]
     pub model: Option<String>,
     /// Fallback models if the primary is unavailable.

@@ -1,0 +1,10 @@
+[
+  {
+    "context_window": 0,
+    "id": "",
+    "input_price_per_million": 0,
+    "output_price_per_million": 0,
+    "provider": "",
+    "supports_tools": false
+  }
+]

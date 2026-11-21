@@ -325,3 +325,51 @@ fn test_model_access_case_insensitive() {
             .is_ok()
     );
 }
+
+/// Step 9's golden (M30): each variant's text byte for byte, under `{}` and
+/// `{:#}`, with no `source()` — written against the hand-written `Display`
+/// and kept on the derive. A model reads it as the tool's refusal, a person
+/// in the event. The `match` has no `_` arm, so a new variant does not
+/// compile without its row.
+#[test]
+fn every_security_violation_prints_its_text_whole_and_has_no_source() {
+    let rows = [
+        SecurityViolation::AccessDenied {
+            reason: "untrusted \u{202e}x".to_string(),
+        },
+        SecurityViolation::CapabilityDenied {
+            agent_id: "lead-1".to_string(),
+            capability: "shell_execute".to_string(),
+        },
+        SecurityViolation::CapabilityNotAllowed {
+            agent_id: "lead-1".to_string(),
+            capability: "web_fetch\u{200b}".to_string(),
+        },
+        SecurityViolation::InputBlocked {
+            reason: "too long".to_string(),
+        },
+        SecurityViolation::UnauthorizedModelAccess {
+            agent_id: "a1".to_string(),
+            model_id: "m1".to_string(),
+            reason: "not allowed".to_string(),
+        },
+    ];
+    for violation in rows {
+        let want = match &violation {
+            SecurityViolation::AccessDenied { .. } => "Access denied: untrusted \u{202e}x",
+            SecurityViolation::CapabilityDenied { .. } => {
+                "Capability 'shell_execute' denied for agent 'lead-1'"
+            }
+            SecurityViolation::CapabilityNotAllowed { .. } => {
+                "Capability 'web_fetch\u{200b}' not in allow list for agent 'lead-1'"
+            }
+            SecurityViolation::InputBlocked { .. } => "Input blocked: too long",
+            SecurityViolation::UnauthorizedModelAccess { .. } => {
+                "Model access denied: agent='a1', model='m1', reason='not allowed'"
+            }
+        };
+        assert_eq!(violation.to_string(), want);
+        assert_eq!(format!("{violation:#}"), want);
+        assert!(std::error::Error::source(&violation).is_none(), "{want}");
+    }
+}

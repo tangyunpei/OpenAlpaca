@@ -711,3 +711,26 @@ fn a_project_scoped_upload_stores_its_kind_too() {
     );
     assert_eq!(fx.kind(&stored.asset.id).as_deref(), Some("code"));
 }
+
+/// Step 9's golden (M27): each variant's message as it is, under `{}` and
+/// `{:#}`, with no `source()` — written against the hand-written `Display`
+/// and kept on the derive. The `match` has no `_` arm, so a new variant does
+/// not compile without its row.
+#[test]
+fn every_upload_error_prints_its_message_whole_and_has_no_source() {
+    let rows = [
+        UploadError::Path("Failed to compute storage path: \u{202e}x".to_string()),
+        UploadError::Io("Failed to write the upload\u{200b}".to_string()),
+        UploadError::Db("Failed to record the upload".to_string()),
+    ];
+    for error in rows {
+        let want = match &error {
+            UploadError::Path(_) => "Failed to compute storage path: \u{202e}x",
+            UploadError::Io(_) => "Failed to write the upload\u{200b}",
+            UploadError::Db(_) => "Failed to record the upload",
+        };
+        assert_eq!(error.to_string(), want);
+        assert_eq!(format!("{error:#}"), want);
+        assert!(std::error::Error::source(&error).is_none(), "{want}");
+    }
+}

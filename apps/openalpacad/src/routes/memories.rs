@@ -1235,4 +1235,4 @@ fn refusal(e: MemoryError) -> Response {
 }
 
 #[cfg(test)]
-mod tests;
+pub(crate) mod tests;

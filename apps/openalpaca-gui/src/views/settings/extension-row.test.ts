@@ -199,8 +199,8 @@ describe("extensionRowView (ADR-030 §9.2)", () => {
   });
 
   /**
-   * The consent row is an approval: what Approve grants is exactly the
-   * plugin's own strings — its directory name and the capabilities its
+   * The consent row is an approval: what Approve records consent for is
+   * exactly the plugin's own strings — its directory name and the capabilities its
    * manifest declares — so every hidden character in them is shown as
    * `<U+XXXX>` (`lib/hidden-chars`, one-line fields) and the row counts them
    * in the words every approval surface uses. Only what is shown changes.

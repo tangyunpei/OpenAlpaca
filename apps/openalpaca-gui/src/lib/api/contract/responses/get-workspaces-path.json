@@ -1,0 +1,16 @@
+{
+  "active_tasks": 0,
+  "id": "",
+  "missing": false,
+  "name": "",
+  "path": "",
+  "queued_tasks": 0,
+  "root": "",
+  "rows": {
+    "artifacts": 0,
+    "followups": 0,
+    "messages": 0,
+    "sessions": 0,
+    "tasks": 0
+  }
+}

@@ -9,7 +9,6 @@
 //! - Level 2: full document with body sections (on demand)
 
 use std::collections::HashMap;
-use std::fmt;
 use std::sync::Arc;
 
 // ---------------------------------------------------------------------------
@@ -25,7 +24,7 @@ pub enum AgentSource {
     /// Plugin-backed agent running an external reasoning loop.
     Plugin {
         plugin_id: String,
-        executor: Arc<dyn openalpaca_api::plugin_traits::PluginAgentExecutor>,
+        executor: Arc<openalpaca_api::plugin_traits::DynPluginAgentExecutor<'static>>,
     },
 }
 
@@ -55,8 +54,10 @@ pub struct AgentTemplateFrontmatter {
     pub capabilities: Vec<String>,
     /// Tool/capability names explicitly denied.
     pub denied_capabilities: Vec<String>,
-    /// LLM temperature (default 0.5).
-    pub temperature: f32,
+    /// The template's `temperature`, when it sets one (none otherwise; no
+    /// default is filled in). Accepted and not sent: no agent turn sends a
+    /// temperature to the model.
+    pub temperature: Option<f32>,
     /// Verbosity level: "concise", "normal", "detailed" (default "normal").
     pub verbosity: String,
     /// Primary LLM model override.
@@ -65,7 +66,9 @@ pub struct AgentTemplateFrontmatter {
     pub fallback_models: Vec<String>,
     /// Maximum tool calls per task.
     pub max_tool_calls: Option<u32>,
-    /// Task timeout in seconds.
+    /// Task timeout in seconds — a budget nothing enforces yet: no tool
+    /// call's limit is it (that is `[execution.agent_defaults]
+    /// max_tool_runtime_secs`, N-TOOL-1b).
     pub timeout_seconds: Option<u64>,
     /// Maximum cost per task in USD.
     pub max_cost_per_task: Option<f64>,
@@ -88,33 +91,20 @@ pub struct AgentTemplate {
 }
 
 /// Errors that can occur while parsing an agent template.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
 pub enum AgentParseError {
+    #[error("Missing YAML frontmatter")]
     MissingFrontmatter,
+    #[error("Unterminated YAML frontmatter")]
     UnterminatedFrontmatter,
+    #[error("Missing required frontmatter field '{0}'")]
     MissingField(&'static str),
+    #[error("Invalid value for '{field}': {message}")]
     InvalidValue {
         field: &'static str,
         message: String,
     },
 }
-
-impl fmt::Display for AgentParseError {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            Self::MissingFrontmatter => write!(f, "Missing YAML frontmatter"),
-            Self::UnterminatedFrontmatter => write!(f, "Unterminated YAML frontmatter"),
-            Self::MissingField(field) => {
-                write!(f, "Missing required frontmatter field '{}'", field)
-            }
-            Self::InvalidValue { field, message } => {
-                write!(f, "Invalid value for '{}': {}", field, message)
-            }
-        }
-    }
-}
-
-impl std::error::Error for AgentParseError {}
 
 // ---------------------------------------------------------------------------
 // Frontmatter helpers (same patterns as middleware/skill.rs)
@@ -218,7 +208,7 @@ fn parse_agent_frontmatter_lines(
     let mut singleton: bool = false;
     let mut capabilities: Vec<String> = Vec::new();
     let mut denied_capabilities: Vec<String> = Vec::new();
-    let mut temperature: f32 = 0.5;
+    let mut temperature: Option<f32> = None;
     let mut verbosity: String = "normal".to_string();
     let mut model: Option<String> = None;
     let mut fallback_models: Vec<String> = Vec::new();
@@ -285,7 +275,7 @@ fn parse_agent_frontmatter_lines(
         }
         if let Some(rest) = trimmed.strip_prefix("temperature:") {
             if let Some(v) = parse_yaml_f32(rest) {
-                temperature = v;
+                temperature = Some(v);
             }
             idx += 1;
             continue;
@@ -389,6 +379,37 @@ pub fn parse_agent_markdown(input: &str) -> Result<AgentTemplate, AgentParseErro
     })
 }
 
+/// The id a template file names, read leniently from its raw text for a
+/// file that does not parse (subagent design §2.4 L-4): the frontmatter's
+/// `id:` line by the parser's own quoting rule, whatever else is wrong with
+/// the file. None when the text opens no frontmatter or names no id.
+pub fn lenient_template_id(input: &str) -> Option<String> {
+    let mut lines = input.lines();
+    if lines.next()?.trim() != "---" {
+        return None;
+    }
+    lines
+        .take_while(|line| line.trim() != "---")
+        .find_map(|line| line.trim().strip_prefix("id:").map(strip_outer_quotes))
+        .filter(|id| !id.is_empty())
+}
+
+/// Whether a template file's frontmatter says `disabled: true` (subagent
+/// design §2.4 L-4a, §7 O-1 (b)), read leniently from its raw text by the
+/// parser's boolean rule (`true`, `yes` or `1`), whether or not the rest of
+/// the file parses: a file that says it switches off the id it names, and
+/// its other keys are not read. False when the text opens no frontmatter.
+pub fn lenient_disabled(input: &str) -> bool {
+    let mut lines = input.lines();
+    if lines.next().is_none_or(|first| first.trim() != "---") {
+        return false;
+    }
+    lines
+        .take_while(|line| line.trim() != "---")
+        .find_map(|line| line.trim().strip_prefix("disabled:"))
+        .is_some_and(parse_yaml_bool)
+}
+
 /// Render an `AgentTemplate` back to valid Markdown with YAML frontmatter.
 ///
 /// Designed to round-trip: `parse_agent_markdown(render_agent_markdown(t))`
@@ -420,7 +441,9 @@ pub fn render_agent_markdown(template: &AgentTemplate) -> String {
             out.push_str(&format!("  - \"{}\"\n", cap));
         }
     }
-    out.push_str(&format!("temperature: {}\n", fm.temperature));
+    if let Some(v) = fm.temperature {
+        out.push_str(&format!("temperature: {}\n", v));
+    }
     out.push_str(&format!("verbosity: \"{}\"\n", fm.verbosity));
     if let Some(ref model) = fm.model {
         out.push_str(&format!("model: \"{}\"\n", model));

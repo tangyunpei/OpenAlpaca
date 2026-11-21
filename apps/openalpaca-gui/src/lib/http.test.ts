@@ -1,11 +1,16 @@
-import { describe, expect, it } from "vitest";
+import { invoke } from "@tauri-apps/api/core";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
+import { getCachedConnection, resetConnection } from "./connection";
 import {
   ApiError,
+  apiFetch,
   buildQuery,
   errorFromResponse,
   parseErrorPayload,
 } from "./http";
+
+vi.mock("@tauri-apps/api/core", () => ({ invoke: vi.fn() }));
 
 describe("parseErrorPayload", () => {
   it("reads the structured envelope used by chat and settings", () => {
@@ -108,5 +113,129 @@ describe("buildQuery", () => {
   it("returns an empty string when nothing survives", () => {
     expect(buildQuery({ a: undefined })).toBe("");
     expect(buildQuery(undefined)).toBe("");
+  });
+});
+
+/**
+ * T21: the daemon rotates `discovery.json`'s token while it runs and honours
+ * the one before it only until that one's own expiry, so a window open longer
+ * than that holds a token the daemon refuses. A request refused `401` reads
+ * the connection again — once, shared by every request refused at the same
+ * time — and is sent again only when the token changed.
+ */
+describe("apiRequest across a token rotation", () => {
+  const base = { baseUrl: "http://127.0.0.1:51823", instanceId: "i-1" };
+  const fetchMock = vi.fn<typeof fetch>();
+
+  function refused(): Response {
+    return new Response("Invalid token", { status: 401 });
+  }
+
+  function bearer(call: number): string | null {
+    const init = fetchMock.mock.calls[call]?.[1];
+    return new Headers(init?.headers).get("Authorization");
+  }
+
+  function answers(commands: Record<string, string>): void {
+    vi.mocked(invoke).mockImplementation((command: string) => {
+      const token = commands[command];
+      if (token === undefined) {
+        return Promise.reject(new Error(`unexpected ${command}`));
+      }
+      return Promise.resolve({ ...base, token, daemonPath: null });
+    });
+  }
+
+  beforeEach(() => {
+    resetConnection();
+    vi.stubGlobal("fetch", fetchMock);
+  });
+
+  afterEach(() => {
+    vi.unstubAllGlobals();
+    fetchMock.mockReset();
+    vi.mocked(invoke).mockReset();
+  });
+
+  it("re-reads the connection on a 401 and sends the request again with the new token", async () => {
+    answers({ ensure_daemon_running: "old", get_connection_info: "new" });
+    fetchMock
+      .mockResolvedValueOnce(refused())
+      .mockResolvedValueOnce(Response.json({ ok: true }));
+
+    await expect(
+      apiFetch("/v1/memories", { method: "POST", body: { a: 1 } }),
+    ).resolves.toEqual({ ok: true });
+
+    expect(fetchMock).toHaveBeenCalledTimes(2);
+    expect(bearer(0)).toBe("Bearer old");
+    expect(bearer(1)).toBe("Bearer new");
+    expect(fetchMock.mock.calls[1]?.[1]?.body).toBe('{"a":1}');
+    expect(invoke).toHaveBeenCalledWith("get_connection_info");
+    expect(getCachedConnection()?.token).toBe("new");
+  });
+
+  it("throws the 401 when the re-read token is the same", async () => {
+    answers({ ensure_daemon_running: "same", get_connection_info: "same" });
+    fetchMock.mockResolvedValue(refused());
+
+    const error = await apiFetch("/v1/status").catch((e: unknown) => e);
+
+    expect(error).toBeInstanceOf(ApiError);
+    expect((error as ApiError).status).toBe(401);
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+  });
+
+  it("does not send a request again to another daemon", async () => {
+    // The first boot finds i-1; the daemon then restarts as i-2, which the
+    // re-read and the re-bootstrap it leads to both find.
+    let boots = 0;
+    vi.mocked(invoke).mockImplementation((command: string) => {
+      const first = command === "ensure_daemon_running" && boots++ === 0;
+      return Promise.resolve({
+        ...base,
+        token: first ? "old" : "new",
+        instanceId: first ? "i-1" : "i-2",
+        daemonPath: null,
+      });
+    });
+    fetchMock.mockResolvedValue(refused());
+
+    const error = await apiFetch("/v1/status").catch((e: unknown) => e);
+
+    expect((error as ApiError).status).toBe(401);
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+  });
+
+  it("sends a request again once at most", async () => {
+    answers({ ensure_daemon_running: "old", get_connection_info: "new" });
+    fetchMock.mockResolvedValue(refused());
+
+    const error = await apiFetch("/v1/status").catch((e: unknown) => e);
+
+    expect((error as ApiError).status).toBe(401);
+    expect(fetchMock).toHaveBeenCalledTimes(2);
+  });
+
+  it("reads the connection once for every request refused together", async () => {
+    answers({ ensure_daemon_running: "old", get_connection_info: "new" });
+    fetchMock.mockImplementation((_url, init) =>
+      Promise.resolve(
+        new Headers(init?.headers).get("Authorization") === "Bearer new"
+          ? Response.json({ ok: true })
+          : refused(),
+      ),
+    );
+
+    await Promise.all([
+      apiFetch("/v1/a"),
+      apiFetch("/v1/b"),
+      apiFetch("/v1/c"),
+    ]);
+
+    const reads = vi
+      .mocked(invoke)
+      .mock.calls.filter(([command]) => command === "get_connection_info");
+    expect(reads).toHaveLength(1);
   });
 });

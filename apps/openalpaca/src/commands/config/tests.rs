@@ -3,6 +3,7 @@
 use super::*;
 use crate::test_util::EnvSandbox;
 use clap::Parser;
+use openalpaca_app_support::paths;
 use std::cell::{Cell, RefCell};
 use std::path::Path;
 use tempfile::tempdir;
@@ -48,8 +49,8 @@ impl ConfigEnv for FakeEnv {
 /// real `config/daemon.toml`, and the owner's `~/.openalpaca` is a real store.
 pub(in crate::commands) fn assert_sandboxed(root: &Path) {
     let paths = [
-        store::home_root().unwrap(),
-        store::database_path().unwrap(),
+        paths::home_root().unwrap(),
+        paths::database_path().unwrap(),
         crate::commands::ai_config_helpers::llm_config_path().unwrap(),
         crate::commands::daemon_config_cli::daemon_config_path().unwrap(),
     ];
@@ -105,7 +106,7 @@ fn a_file_backed_key_never_opens_the_database() {
     // `llm.toml` handling may create `state/.master_key` — that is the
     // encryptor, not the database. The database file itself must not appear.
     assert!(
-        !store::database_path().unwrap().exists(),
+        !paths::database_path().unwrap().exists(),
         "a file-backed key must not create the store database"
     );
 }

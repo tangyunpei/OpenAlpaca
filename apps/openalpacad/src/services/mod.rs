@@ -190,30 +190,41 @@ pub async fn initialize_services(
     // Build SkillCatalog — **before** the tool registry, because the MCP
     // supervisor's first `reconcile_all` happens inside `build_tool_registry`
     // and T1 step 3's dependent scan needs the catalog handle from
-    // construction (extension design §7.3). The catalog reads only
-    // `config/skills`, so nothing here depends on the registry.
+    // construction (extension design §7.3). The catalog reads only the
+    // binary's skills and `config/skills`, so nothing here depends on the
+    // registry.
     let skill_catalog = {
         let catalog = openalpaca_core::orchestrator::skill_catalog::SkillCatalog::new();
+        // The bundled skills first (subagent design §2.6 K-2): written whole
+        // into state/cache/bundled-skills/, where they run from, then the
+        // config directory's folders over them. A pack that cannot be
+        // written leaves no bundled skill, and says so (K-4).
+        match openalpaca_app_support::paths::bundled_skills_dir() {
+            Ok(pack) => {
+                catalog.load_bundled_layer(&pack);
+            }
+            Err(e) => tracing::warn!(
+                "Skill catalog: no place for the built-in skills ({e}); no built-in skill is loaded"
+            ),
+        }
+        // Read even when absent (seeding creates it, L-6): the catalog then
+        // still names it to the skill scripts (K-5), so a script that
+        // writes skills writes there, never into the pack; a directory
+        // that cannot be read is one diagnostic.
         let skills_dir = config_base_dir.join("skills");
-        if skills_dir.exists() {
-            let count = catalog.scan_directory(
-                &skills_dir,
-                openalpaca_core::middleware::skill::SkillScope::Project,
-            );
-            info!(
-                "Skill catalog: loaded {} skill(s) from {}",
-                count,
+        catalog.scan_config_layer(&skills_dir);
+        info!("{}", catalog.start_summary());
+        for line in catalog.override_lines() {
+            info!("{line}");
+        }
+        // Each problem was logged where the scan met it; the count says
+        // where to read them all (N-SKILL-2).
+        let problems = catalog.diagnostics().len();
+        if problems > 0 {
+            tracing::warn!(
+                "Skill catalog: {problems} problem(s) in {} — `openalpaca skills list` or GET /v1/skills/diagnostics shows them",
                 skills_dir.display()
             );
-            // Each problem was logged where the scan met it; the count says
-            // where to read them all (N-SKILL-2).
-            let problems = catalog.diagnostics().len();
-            if problems > 0 {
-                tracing::warn!(
-                    "Skill catalog: {problems} problem(s) in {} — `openalpaca skills list` or GET /v1/skills/diagnostics shows them",
-                    skills_dir.display()
-                );
-            }
         }
         Arc::new(catalog)
     };
@@ -261,6 +272,21 @@ pub async fn initialize_services(
     // in agent frontmatter can be validated against the known set.)
     agents::load_agent_templates(config_base_dir, db, &shared_context, &tool_registry)?;
 
+    // C8 (M-6f): a `[fallback_chains]` key of the parsed `llm.toml` that one
+    // of the earlier bundle's Claude pins names was written to steer the
+    // shipped templates; since they name `inherit` or an alias it reaches
+    // nothing, so the start names it, once each — unless a template's run
+    // (its stored set over it) still names the key.
+    let template_models =
+        openalpaca_core::runner::model_choice::template_models(&shared_context.agent_registry);
+    for line in openalpaca_core::runner::model_choice::stale_fallback_chain_lines(
+        llm_config.as_ref().and_then(|c| c.fallback_chains.as_ref()),
+        llm_router.as_deref(),
+        &template_models,
+    ) {
+        info!("{line}");
+    }
+
     // The MCP crash reaper starts **after** the templates are loaded: its T1
     // step 3 intersects the withdrawn capabilities with the agent registry, and
     // a crash inside the boot window would otherwise report a dependent scan
@@ -281,10 +307,9 @@ pub async fn initialize_services(
     let skill_router = {
         let sd = &daemon_config.load().execution.skill_defaults;
         Arc::new(
-            openalpaca_core::orchestrator::skill_router::SkillRouter::new_with_bus(
+            openalpaca_core::orchestrator::skill_router::SkillRouter::new(
                 sd.router_auto_select_threshold,
                 sd.router_suggest_threshold,
-                bus.clone(),
             ),
         )
     };

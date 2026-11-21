@@ -1235,4 +1235,4 @@ pub async fn purge_workspace_handler(
 mod tests;
 
 #[cfg(test)]
-mod life_tests;
+pub(crate) mod life_tests;

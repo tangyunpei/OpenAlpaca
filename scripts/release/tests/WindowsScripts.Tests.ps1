@@ -2,10 +2,10 @@
 <#
     Pester tests for the Windows release scripts.
 
-    The installer and uninstaller are the only shipped code nothing else in CI
-    can exercise — the Rust and bun gates run on ubuntu — so
-    `.github/workflows/ci.yml` has one small `windows-latest` job that runs this
-    file and nothing else. Run it locally on a Windows box with:
+    The installer and uninstaller are the only shipped code no other gate can
+    exercise — the Rust and bun gates run on macOS — and there is no remote CI
+    (the owner, 2026-11-06), so this file runs only by hand, on a Windows box,
+    on Pester 6.2.0:
 
         Invoke-Pester -Path scripts/release/tests
 
@@ -13,9 +13,10 @@
     defines its own copy of the store-root helpers; the first two Describe
     blocks below dot-source one script apiece and assert the copies agree. The
     third dot-sources package-windows.ps1 for the two digest helpers that hold
-    the packaged daemon to the staged sidecar's sha256 and the two that hold
-    the bun on PATH to the root package.json's pin; the packaging itself
-    (cargo, bun, tauri, msiexec) runs nowhere in CI.
+    the packaged daemon to the staged sidecar's sha256, the two that hold
+    the bun on PATH to the root package.json's pin and the one that stops it
+    before building when the root LICENSE is missing or empty; the packaging itself
+    (cargo, bun, tauri, msiexec) runs in no test.
 #>
 
 BeforeAll {
@@ -251,6 +252,36 @@ Describe 'package-windows.ps1' {
             { Assert-BunVersion '1.4.2' '1.4.3' } | Should -Throw -ExpectedMessage '*bun 1.4.2*bun@1.4.3*'
         }
     }
+
+    Context 'the LICENSE it requires at the repository root before building' {
+
+        BeforeEach {
+            $script:LicenseRoot = Join-Path $script:TempRoot ('license-' + [guid]::NewGuid().ToString('N').Substring(0, 8))
+            New-Item -ItemType Directory -Force -Path $script:LicenseRoot | Out-Null
+        }
+
+        It 'accepts a LICENSE with text' {
+            Set-Content -Path (Join-Path $script:LicenseRoot 'LICENSE') -Value 'MIT License'
+            { Assert-License $script:LicenseRoot } | Should -Not -Throw
+        }
+
+        It 'refuses a missing LICENSE, naming it' {
+            $ErrorActionPreference = 'Stop'
+            { Assert-License $script:LicenseRoot } | Should -Throw -ExpectedMessage '*No LICENSE at*LICENSE*'
+        }
+
+        It 'refuses an empty LICENSE, naming it' {
+            $ErrorActionPreference = 'Stop'
+            New-Item -ItemType File -Path (Join-Path $script:LicenseRoot 'LICENSE') | Out-Null
+            { Assert-License $script:LicenseRoot } | Should -Throw -ExpectedMessage '*LICENSE is empty*'
+        }
+
+        It 'refuses a directory named LICENSE' {
+            $ErrorActionPreference = 'Stop'
+            New-Item -ItemType Directory -Path (Join-Path $script:LicenseRoot 'LICENSE') | Out-Null
+            { Assert-License $script:LicenseRoot } | Should -Throw -ExpectedMessage '*No LICENSE at*'
+        }
+    }
 }
 
 Describe 'the scripts, as text' {
@@ -267,6 +298,14 @@ Describe 'the scripts, as text' {
         $text = Get-Content $script:PackageScript -Raw
         $text | Should -Match 'Assert-BunVersion \(\(bun --version \| Out-String\)\.Trim\(\)\)'
         $text | Should -Match 'Read-PinnedBunVersion \(Join-Path \$RepoRoot ''package\.json''\)'
+    }
+
+    It 'package-windows.ps1 checks the root LICENSE before it checks a tool or builds' {
+        $text = Get-Content $script:PackageScript -Raw
+        $check = $text.IndexOf('Assert-License $RepoRoot')
+        $check | Should -BeGreaterThan 0
+        $check | Should -BeLessThan $text.IndexOf("Require-Cmd 'cargo'")
+        $check | Should -BeLessThan $text.IndexOf('bun install --frozen-lockfile')
     }
 
     It 'install-windows.ps1 names the real store root and no legacy data root' {

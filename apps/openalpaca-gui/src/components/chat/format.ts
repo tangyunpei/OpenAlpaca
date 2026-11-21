@@ -13,10 +13,10 @@
 
 import { parseTimestamp } from "@/lib/time";
 
-/** Vendor prefixes the design strips: `claude-sonnet-4-6` reads as `sonnet-4-6`. */
+/** Vendor prefixes the design strips: `claude-sonnet-5-5` reads as `sonnet-5-5`. */
 const VENDOR_PREFIXES = ["claude-", "anthropic-", "openai-", "gpt-oss-"];
 
-/** `claude-sonnet-4-6` → `sonnet-4-6`; anything unrecognised is left alone. */
+/** `claude-sonnet-5-5` → `sonnet-5-5`; anything unrecognised is left alone. */
 export function shortModelId(model: string): string {
   const id = model.includes("/")
     ? (model.slice(model.lastIndexOf("/") + 1) ?? model)

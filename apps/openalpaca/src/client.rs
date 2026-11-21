@@ -1,13 +1,15 @@
 //! Shared DaemonClient for CLI commands
 //!
-//! Wraps discovery.json reading + authenticated reqwest client.
+//! Wraps the daemon check (`crate::reuse`: discovery.json, `/v1/health`'s
+//! protocol, `protocol::decide_reuse`) + authenticated reqwest client.
 //! All CLI commands that talk to the daemon should use this.
 
 use anyhow::{Context, Result};
 use reqwest::Response;
 use serde::{Serialize, de::DeserializeOwned};
 
-use openalpaca_storage::discovery;
+use crate::reuse;
+use openalpaca_app_support::protocol;
 
 /// Authenticated HTTP client for the daemon.
 pub struct DaemonClient {
@@ -17,12 +19,24 @@ pub struct DaemonClient {
 }
 
 impl DaemonClient {
-    /// Connect to the running daemon by reading discovery.json.
-    pub fn connect() -> Result<Self> {
-        let disc =
-            discovery::read_discovery()?.context("Daemon is not running (no discovery file)")?;
-        discovery::ensure_not_expired(&disc)?;
-        let info = discovery::ConnectionInfo::from(&disc);
+    /// Connect to the daemon `discovery.json` names, once it is one this
+    /// CLI uses (CLI-PROTOCOL): [`reuse::ensure_with`] over the machine —
+    /// its protocol read off `GET /v1/health` and judged by
+    /// `protocol::decide_reuse`, the function the app shell calls; a note
+    /// on stderr beside a daemon of an older protocol or another version; a
+    /// mismatch refused with the sentence naming both protocols; a daemon
+    /// starting waited for within `protocol::STARTING_BUDGET`; never a
+    /// spawn. The file's token is then judged as before.
+    pub async fn connect() -> Result<Self> {
+        Self::connect_with(&mut reuse::RealWorld, &reuse::THIS_CLI).await
+    }
+
+    /// [`Self::connect`] over `world`, judged as `cli`: what a test drives.
+    pub(crate) async fn connect_with<W: reuse::World>(
+        world: &mut W,
+        cli: &protocol::ClientBuild,
+    ) -> Result<Self> {
+        let info = reuse::connection_with(world, cli).await?;
 
         let mut headers = reqwest::header::HeaderMap::new();
         let auth_value = format!("Bearer {}", info.token);
@@ -250,6 +264,14 @@ async fn check_response(resp: Response) -> Result<Response> {
     Err(error_from_response(resp).await)
 }
 
+/// The body of a `POST` whose route reads none: `ext` `enable|disable|
+/// reload|approve|deny`, `llm models --refresh`, a resumed conversation's
+/// `activate`. `contract_reads` holds that each such route still has no
+/// request sample (CONTRACT-SAMPLES-3, *Rev 142*'s item 12).
+pub(crate) fn empty_body() -> serde_json::Value {
+    serde_json::json!({})
+}
+
 /// The error a refusal reads as, for a caller that took the raw response.
 pub(crate) async fn error_from_response(resp: Response) -> anyhow::Error {
     let status = resp.status();
@@ -296,6 +318,38 @@ fn render_error(status: u16, body: &serde_json::Value) -> String {
 mod tests {
     use super::render_error;
     use serde_json::json;
+
+    /// T21: a command run against a daemon up for more than a day reads the
+    /// rotated `discovery.json` and sends the token it names now.
+    #[tokio::test]
+    async fn a_client_sends_the_token_the_rotated_file_names() {
+        use crate::test_util::{
+            EnvSandbox, bearer_of, discovery_of_a_daemon_up_for, ok_json, serve,
+        };
+        let tmp = tempfile::tempdir().unwrap();
+        let _env = EnvSandbox::enter(tmp.path());
+        // The daemon check asks health first (CLI-PROTOCOL), then the call.
+        let health = serde_json::json!({
+            "status": "ok",
+            "version": crate::reuse::THIS_CLI.version,
+            "instance_id": "instance-t21",
+            "protocol": openalpaca_app_support::protocol::PROTOCOL,
+        })
+        .to_string();
+        let (addr, server) = serve(vec![ok_json(&health), ok_json("{}")]);
+        let d = discovery_of_a_daemon_up_for(addr.port(), 30);
+
+        let client = super::DaemonClient::connect()
+            .await
+            .expect("the rotated file is not expired");
+        let _: serde_json::Value = client.get("/v1/status").await.expect("answered");
+        let requests = server.join().expect("the server finishes");
+        assert!(requests[0].starts_with("GET /v1/health "), "{requests:?}");
+        assert_eq!(
+            bearer_of(&requests[1]).as_deref(),
+            Some(d.auth.token.as_str())
+        );
+    }
 
     /// The canonical envelope every new route answers with. The code is what
     /// `docs/CLI_Manual.md` and the route comments call the refusal by, so it

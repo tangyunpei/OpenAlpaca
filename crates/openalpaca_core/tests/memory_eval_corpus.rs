@@ -1,5 +1,5 @@
 //! The learning evaluation's conversation corpus (design 09 §7.1),
-//! validated in default CI: no model, no feature, no network.
+//! validated by a plain `cargo test`: no model, no feature, no network.
 //!
 //! `scripts/eval/memory/conversations-learning.json` is written from the
 //! gold notes, never from the held-out questions; these tests hold it to

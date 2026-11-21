@@ -4,6 +4,7 @@ import {
   BACKOFF_BASE_MS,
   BACKOFF_MAX_MS,
   DaemonEventsClient,
+  STARTING_RETRY_MS,
   jitteredDelay,
   nextBackoff,
   type ResyncSignal,
@@ -12,10 +13,12 @@ import {
   type SocketLike,
 } from "./events";
 import {
+  ConnectionError,
   getStopIntent,
   setStopIntent,
   type ConnectionInfo,
 } from "./connection";
+import type { ShellErrorKind } from "./shell-error";
 
 const INFO: ConnectionInfo = {
   baseUrl: "http://127.0.0.1:51823",
@@ -700,6 +703,189 @@ describe("DaemonEventsClient", () => {
     latest().onerror?.({});
     expect(client.getLastError()).toBe("WebSocket connection error");
 
+    client.disconnect();
+  });
+
+  /** A shell refusal of `kind`, as `lib/connection.ts` hands it over. */
+  function refused(kind: ShellErrorKind, message = `the shell says ${kind}`) {
+    return new ConnectionError(message, { kind, message }, kind);
+  }
+
+  /**
+   * Q04: a daemon this app cannot use is parked like `stopped_elsewhere` —
+   * no ladder, no re-bootstrap — so nothing asks the shell to spawn beside
+   * it; the shell's sentence is the reason shown, and Reconnect asks again.
+   */
+  it("parks on a mismatch at boot, asking nothing again", async () => {
+    const bootstrap = vi.fn(() =>
+      Promise.reject(refused("mismatch", "speaks protocol 2")),
+    );
+    const refresh = vi.fn(() => Promise.resolve(INFO));
+    const client = makeClient({ bootstrap, refresh });
+
+    await client.connect();
+    expect(client.getStatus()).toBe("mismatch");
+    expect(client.getLastError()).toBe("speaks protocol 2");
+
+    await vi.advanceTimersByTimeAsync(10 * BACKOFF_MAX_MS);
+    expect(bootstrap).toHaveBeenCalledTimes(1);
+    expect(refresh).not.toHaveBeenCalled();
+    expect(sockets).toHaveLength(0);
+    client.disconnect();
+  });
+
+  /**
+   * The ladder re-bootstraps through `refreshConnection` when the instance
+   * changed, so a mismatch can reach it there too: it parks the same way.
+   */
+  it("parks on a mismatch the ladder meets, and climbs no further", async () => {
+    const refresh = vi.fn(() =>
+      Promise.reject(refused("mismatch", "speaks protocol 2")),
+    );
+    const client = makeClient({ refresh, random: () => 0 });
+    await client.connect();
+    latest().onopen?.({});
+    latest().onclose?.({});
+
+    await vi.advanceTimersByTimeAsync(800);
+    expect(refresh).toHaveBeenCalledTimes(1);
+    expect(client.getStatus()).toBe("mismatch");
+    expect(client.getLastError()).toBe("speaks protocol 2");
+
+    await vi.advanceTimersByTimeAsync(10 * BACKOFF_MAX_MS);
+    expect(refresh).toHaveBeenCalledTimes(1);
+    client.disconnect();
+  });
+
+  /**
+   * A daemon still starting (its pid live, its health silent): the window
+   * waits in `starting` and asks the shell again on its own short timer —
+   * the shell judges each ask, and spawns nothing over the daemon — never
+   * through the ladder, whose `get_connection_info` judges nothing.
+   */
+  it("waits in starting and asks the shell again on its own timer", async () => {
+    const bootstrap = vi
+      .fn<() => Promise<ConnectionInfo>>()
+      .mockRejectedValueOnce(refused("starting"))
+      .mockRejectedValueOnce(refused("starting"))
+      .mockResolvedValueOnce(INFO);
+    const refresh = vi.fn(() => Promise.resolve(INFO));
+    const client = makeClient({ bootstrap, refresh });
+
+    await client.connect();
+    expect(client.getStatus()).toBe("starting");
+    expect(client.getLastError()).toBe("the shell says starting");
+    await vi.advanceTimersByTimeAsync(STARTING_RETRY_MS - 1);
+    expect(bootstrap).toHaveBeenCalledTimes(1);
+    await vi.advanceTimersByTimeAsync(1);
+    expect(bootstrap).toHaveBeenCalledTimes(2);
+    expect(client.getStatus()).toBe("starting");
+    await vi.advanceTimersByTimeAsync(STARTING_RETRY_MS);
+    expect(bootstrap).toHaveBeenCalledTimes(3);
+    expect(sockets).toHaveLength(1);
+    latest().onopen?.({});
+    expect(client.getStatus()).toBe("connected");
+    expect(client.getLastError()).toBeNull();
+    expect(refresh).not.toHaveBeenCalled();
+    client.disconnect();
+  });
+
+  /**
+   * Each ask while the daemon starts is the same wait, not a new attempt:
+   * the status stays `starting` between asks, never flickering through
+   * `connecting`, until the daemon answers.
+   */
+  it("stays starting between asks, never flickering to connecting", async () => {
+    const bootstrap = vi
+      .fn<() => Promise<ConnectionInfo>>()
+      .mockRejectedValueOnce(refused("starting"))
+      .mockRejectedValueOnce(refused("starting"))
+      .mockRejectedValueOnce(refused("starting"))
+      .mockResolvedValueOnce(INFO);
+    const client = makeClient({ bootstrap });
+    const statuses: string[] = [];
+    client.onStatus((status) => statuses.push(status));
+
+    await client.connect();
+    await vi.advanceTimersByTimeAsync(3 * STARTING_RETRY_MS);
+    expect(bootstrap).toHaveBeenCalledTimes(4);
+    latest().onopen?.({});
+    expect(statuses).toEqual(["connecting", "starting", "connected"]);
+    client.disconnect();
+  });
+
+  /**
+   * DU-29 (a): the reconnect ladder parks on a mismatch too. A boot that
+   * failed (the sidecar absent) climbs the ladder; meanwhile another daemon,
+   * of a protocol this app does not speak, starts from a terminal, and the
+   * rung's `get_connection_info` refuses it (the shell judges the file): the
+   * window parks rather than connecting to it.
+   */
+  it("parks on a mismatch a rung meets after a failed boot", async () => {
+    const bootstrap = vi.fn(() =>
+      Promise.reject(refused("spawn_failed", "no daemon beside the app")),
+    );
+    const refresh = vi.fn(() =>
+      Promise.reject(refused("mismatch", "speaks protocol 2")),
+    );
+    const client = makeClient({ bootstrap, refresh, random: () => 0 });
+
+    await client.connect();
+    expect(client.getStatus()).toBe("error");
+    await vi.advanceTimersByTimeAsync(800);
+    expect(refresh).toHaveBeenCalledTimes(1);
+    expect(client.getStatus()).toBe("mismatch");
+    expect(client.getLastError()).toBe("speaks protocol 2");
+    expect(sockets).toHaveLength(0);
+
+    await vi.advanceTimersByTimeAsync(10 * BACKOFF_MAX_MS);
+    expect(refresh).toHaveBeenCalledTimes(1);
+    expect(bootstrap).toHaveBeenCalledTimes(1);
+    client.disconnect();
+  });
+
+  it("stops asking while starting once disconnected", async () => {
+    const bootstrap = vi.fn(() => Promise.reject(refused("starting")));
+    const client = makeClient({ bootstrap });
+    await client.connect();
+    client.disconnect();
+    await vi.advanceTimersByTimeAsync(10 * STARTING_RETRY_MS);
+    expect(bootstrap).toHaveBeenCalledTimes(1);
+  });
+
+  it("stops asking while starting once the window has a stop intent", async () => {
+    const bootstrap = vi.fn(() => Promise.reject(refused("starting")));
+    const client = makeClient({ bootstrap });
+    await client.connect();
+    setStopIntent("stopped_here");
+    try {
+      await vi.advanceTimersByTimeAsync(10 * STARTING_RETRY_MS);
+      expect(bootstrap).toHaveBeenCalledTimes(1);
+    } finally {
+      setStopIntent(null);
+      client.disconnect();
+    }
+  });
+
+  /**
+   * Past the budget the shell reports the daemon still starting; the window
+   * climbs the ladder as after any failed start (it re-reads discovery and
+   * spawns nothing), with the shell's sentence as the reason.
+   */
+  it("climbs the ladder once the shell reports a daemon still starting", async () => {
+    const bootstrap = vi.fn(() =>
+      Promise.reject(
+        refused("still_starting", "still starting after 45 seconds"),
+      ),
+    );
+    const refresh = vi.fn(() => Promise.reject(new Error("not yet")));
+    const client = makeClient({ bootstrap, refresh, random: () => 0 });
+    await client.connect();
+    expect(client.getStatus()).toBe("error");
+    expect(client.getLastError()).toBe("still starting after 45 seconds");
+    await vi.advanceTimersByTimeAsync(800);
+    expect(refresh).toHaveBeenCalledTimes(1);
+    expect(bootstrap).toHaveBeenCalledTimes(1);
     client.disconnect();
   });
 });

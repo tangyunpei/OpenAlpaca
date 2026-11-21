@@ -12,6 +12,15 @@ use std::time::Duration;
 /// Default context compression threshold (fraction of max_context_tokens).
 pub(super) const DEFAULT_CONTEXT_THRESHOLD: f64 = 0.6;
 
+/// The longest one streamed round may run when the routed provider needs a
+/// key: ten minutes ([`LoopConfig::max_stream_duration`]'s default).
+pub(super) const KEYED_STREAM_ROUND: Duration = Duration::from_mins(10);
+
+/// The longest one streamed round may run when the routed provider needs no
+/// key — a local model, which may run up to an hour (LOCAL-CALL-HOUR):
+/// [`LoopConfig::max_keyless_stream_duration`]'s default.
+pub(super) const KEYLESS_STREAM_ROUND: Duration = Duration::from_hours(1);
+
 /// Optional callback for streaming events (UI progress, logging).
 pub type StreamCallback = Arc<dyn Fn(&StreamEvent) + Send + Sync>;
 
@@ -19,13 +28,20 @@ pub type StreamCallback = Arc<dyn Fn(&StreamEvent) + Send + Sync>;
 ///
 /// `Clone` is implemented manually because `StreamCallback` (`Arc<dyn Fn>`)
 /// implements `Clone` but not `Debug`.
+///
+/// It carries no per-tool time bound: that is the sandbox policy's alone
+/// (`SandboxPolicy::max_tool_runtime_secs`, N-TOOL-1b), the one number a loop
+/// cuts at and states.
 pub struct LoopConfig {
     pub max_rounds: usize,
     pub max_tools_per_round: usize,
-    pub max_tool_runtime: Duration,
     pub max_cost: f64,
     /// Override model for this loop (used by LlmRouter).
     pub model: Option<String>,
+    /// The slot this loop writes the model that answered each round into
+    /// (C8, M-1): a lead's, which its spawn tool reads when a subagent on
+    /// `inherit` starts. `None` on every other loop.
+    pub answering_model: Option<crate::runner::model_choice::AnsweringModel>,
     /// Fallback models (informational — fallback is handled by router's fallback chain).
     pub fallback_models: Vec<String>,
     /// Agent model constraints for access control enforcement.
@@ -38,6 +54,14 @@ pub struct LoopConfig {
     /// context compression. Each "round" is roughly 3 messages (assistant +
     /// tool results). Default: `4`.
     pub context_tail_keep: usize,
+    /// How many of the messages the loop was handed every compaction tier
+    /// keeps at the head of the list, untouched: the system prompt and the
+    /// initial query by default
+    /// (`context_budget::compaction::DEFAULT_KEPT_HEAD`, 2). A spawned
+    /// subagent sets it to its whole handed list, its objective last behind
+    /// any memory block or working-folder line (SA-2b); a lead, through its
+    /// objective, which an opening memory block puts third (SA-2b-LEAD).
+    pub kept_head: usize,
     /// Fraction of model context window to use as compression trigger (0.0–1.0).
     /// Only used by `with_context_window()`. Default: `0.6`.
     pub context_threshold: f64,
@@ -53,10 +77,30 @@ pub struct LoopConfig {
     /// streaming first, forwarding each event to this callback, then falls
     /// back to non-streaming on failure.
     pub stream_callback: Option<StreamCallback>,
-    /// Maximum wall-clock duration for streaming collection.
-    /// If `collect_stream()` exceeds this, it is cancelled and the loop
-    /// falls back to non-streaming. Default: 10 minutes.
+    /// Ask every round streamed on the Router backend even with no
+    /// `stream_callback`, the events collected and forwarded nowhere: a
+    /// streamed round runs under `max_stream_duration` (the keyless bound
+    /// for a local model), never under the non-streaming request timeout
+    /// (`[timeouts] llm_request_timeout_secs`, 120 s seeded), which a full
+    /// answer at the default output budget can outlast. Such a round has no
+    /// 90 s idle clock (the HTTP read gap, `request_timeout_secs`, bounds a
+    /// silent stream) and keeps the router's empty-completion rule for an
+    /// answer with nothing in it that was not cut. On for a lead and the
+    /// subagents of a built-in template ([`Self::from_defaults`]; a plugin
+    /// agent runs its plugin's own loop; OUTPUT-BUDGET, item 8, the owner's
+    /// "A"); off by default, where a turn streams only to its chat. A failed
+    /// stream falls back to non-streaming, as with a callback.
+    pub stream_rounds: bool,
+    /// Maximum wall-clock duration for streaming collection when the routed
+    /// provider needs a key. If `collect_stream()` exceeds this, it is
+    /// cancelled and the loop falls back to non-streaming. Default: 10
+    /// minutes.
     pub max_stream_duration: Duration,
+    /// The same bound when the routed provider needs no key
+    /// (`LlmProvider::requires_key` false: Ollama), read from the stream the
+    /// router hands back (`RoutedStream::requires_key`). Default: an hour —
+    /// a call to a local model may run that long (LOCAL-CALL-HOUR).
+    pub max_keyless_stream_duration: Duration,
     /// What compaction's working-state writer is called with (design 11
     /// §3.1, CQ-3): `[orchestrator.costs] summary_model` (`None` the
     /// router's default), its daily ceiling, the line cut and the block's
@@ -74,8 +118,9 @@ pub struct LoopConfig {
     /// Optional event bus for emitting compaction telemetry.
     /// When set, the agentic loop publishes `CompactionTriggered` events.
     pub event_bus: Option<EventBus>,
-    /// When true, the loop injects an ephemeral system notice into each
-    /// request once cost or round ratios cross 0.8 (spec P0).
+    /// When true, the loop sends a budget notice as each request's last
+    /// message once cost or round ratios cross 0.8 (spec P0), and keeps it
+    /// in its list where it was sent (BUDGET-NOTICE-KEPT).
     pub experimental_ephemeral_pressure: bool,
     /// Steering inbox for mid-workflow user interjections (Routing V2).
     /// When `Some`, the loop drains queued messages at its round boundary
@@ -113,19 +158,22 @@ impl Clone for LoopConfig {
         Self {
             max_rounds: self.max_rounds,
             max_tools_per_round: self.max_tools_per_round,
-            max_tool_runtime: self.max_tool_runtime,
             max_cost: self.max_cost,
             model: self.model.clone(),
+            answering_model: self.answering_model.clone(),
             fallback_models: self.fallback_models.clone(),
             agent_constraints: self.agent_constraints.clone(),
             max_context_tokens: self.max_context_tokens,
             context_tail_keep: self.context_tail_keep,
+            kept_head: self.kept_head,
             context_threshold: self.context_threshold,
             initial_tool_choice: self.initial_tool_choice.clone(),
             enable_caching: self.enable_caching,
             thinking: self.thinking.clone(),
             stream_callback: self.stream_callback.clone(),
+            stream_rounds: self.stream_rounds,
             max_stream_duration: self.max_stream_duration,
+            max_keyless_stream_duration: self.max_keyless_stream_duration,
             writer: self.writer.clone(),
             working_state: self.working_state.clone(),
             working_state_cursor: self.working_state_cursor.clone(),
@@ -147,13 +195,20 @@ impl std::fmt::Debug for LoopConfig {
             .field("max_tools_per_round", &self.max_tools_per_round)
             .field("max_cost", &self.max_cost)
             .field("model", &self.model)
+            .field("answering_model", &self.answering_model.is_some())
             .field("max_context_tokens", &self.max_context_tokens)
             .field("context_threshold", &self.context_threshold)
             .field("context_tail_keep", &self.context_tail_keep)
+            .field("kept_head", &self.kept_head)
             .field("enable_caching", &self.enable_caching)
             .field("thinking", &self.thinking)
             .field("stream_callback", &self.stream_callback.is_some())
+            .field("stream_rounds", &self.stream_rounds)
             .field("max_stream_duration", &self.max_stream_duration)
+            .field(
+                "max_keyless_stream_duration",
+                &self.max_keyless_stream_duration,
+            )
             .field("writer", &self.writer)
             .field("working_state", &self.working_state.is_some())
             .field("working_state_cursor", &self.working_state_cursor)
@@ -176,19 +231,22 @@ impl Default for LoopConfig {
         Self {
             max_rounds: 15,
             max_tools_per_round: 5,
-            max_tool_runtime: Duration::from_secs(60),
             max_cost: 1.00,
             model: None,
+            answering_model: None,
             fallback_models: Vec::new(),
             agent_constraints: None,
             max_context_tokens: 0,
             context_tail_keep: 4,
+            kept_head: crate::context_budget::compaction::DEFAULT_KEPT_HEAD,
             context_threshold: DEFAULT_CONTEXT_THRESHOLD,
             initial_tool_choice: None,
             enable_caching: true,
             thinking: None,
             stream_callback: None,
-            max_stream_duration: Duration::from_secs(600),
+            stream_rounds: false,
+            max_stream_duration: KEYED_STREAM_ROUND,
+            max_keyless_stream_duration: KEYLESS_STREAM_ROUND,
             writer: WriterConfig::default(),
             working_state: None,
             working_state_cursor: None,
@@ -210,10 +268,12 @@ impl LoopConfig {
     ///
     /// Validates the agent's configured model against its model access constraints.
     /// If the model is denied, falls back to `None` (router default) with a warning.
+    ///
+    /// Every round of a loop built here — a lead's, a built-in template's
+    /// subagent's — is asked streamed ([`Self::stream_rounds`]; OUTPUT-BUDGET).
     pub fn from_defaults(
         max_rounds: usize,
         max_tools_per_round: usize,
-        max_tool_runtime_secs: u64,
         max_cost: f64,
         agent: &crate::agent::subagent::SubAgent,
     ) -> Self {
@@ -243,24 +303,22 @@ impl LoopConfig {
         Self {
             max_rounds: agent.constraints.max_rounds.unwrap_or(max_rounds),
             max_tools_per_round,
-            max_tool_runtime: Duration::from_secs(
-                agent
-                    .constraints
-                    .timeout_seconds
-                    .unwrap_or(max_tool_runtime_secs),
-            ),
             max_cost: agent.constraints.max_cost_per_task.unwrap_or(max_cost),
             model,
+            answering_model: None,
             fallback_models: agent.llm_config.fallback_models.clone(),
             agent_constraints: Some(agent.constraints.clone()),
             max_context_tokens: 0,
             context_tail_keep: 4,
+            kept_head: crate::context_budget::compaction::DEFAULT_KEPT_HEAD,
             context_threshold: DEFAULT_CONTEXT_THRESHOLD,
             initial_tool_choice: None,
             enable_caching: true,
             thinking: None,
             stream_callback: None,
-            max_stream_duration: Duration::from_secs(600),
+            stream_rounds: true,
+            max_stream_duration: KEYED_STREAM_ROUND,
+            max_keyless_stream_duration: KEYLESS_STREAM_ROUND,
             writer: WriterConfig::default(),
             working_state: None,
             working_state_cursor: None,
@@ -300,7 +358,6 @@ impl LoopConfig {
         Self::from_defaults(
             defaults.max_rounds,
             defaults.max_tools_per_round,
-            defaults.max_tool_runtime_secs,
             defaults.max_cost,
             agent,
         )
@@ -314,7 +371,6 @@ impl LoopConfig {
         Self::from_defaults(
             defaults.max_rounds,
             defaults.max_tools_per_round,
-            defaults.max_tool_runtime_secs,
             defaults.max_cost,
             agent,
         )
@@ -342,6 +398,18 @@ pub struct LoopResult {
     /// tracker, which for a singleton template's reused instance id includes
     /// its earlier runs (N-LEAD-5).
     pub cap_spend: f64,
+    /// What this loop's own requests cost, each priced as it was counted
+    /// when it was answered (`CostTracker::record_usage`'s pricing, on that
+    /// response's model and usage; the local estimate on the Direct
+    /// backend): its own prompt's length against a long-prompt threshold,
+    /// its cache reads and writes at its row's multiples. The usage row of
+    /// a chat turn and of a skill's invocation is written from it
+    /// (USAGE-PER-REQUEST), never from `total_input_tokens`, a sum that can
+    /// pass a threshold no request passed; so are a workflow's lead and
+    /// subagent rows and a nested skill's execution record (UPR-1). Only the requests this loop
+    /// received an answer to: a call the router counted and then refused
+    /// (an empty completion) is no more in it than in the token totals.
+    pub requests_cost: f64,
     /// The last tool result that came back an error, verbatim (V3).
     ///
     /// A turn that ends with no answer usually ends that way because a tool
@@ -350,12 +418,23 @@ pub struct LoopResult {
     /// last one, not a list: the reader wants the one it stopped on.
     pub last_tool_error: Option<String>,
     /// The working state this loop's last `LlmSummary` compaction wrote, and
-    /// its boundary: `messages[2..boundary]` of the list the loop was handed
-    /// lie behind it (design 11 §3.3). Counted in the list as the compaction
+    /// its boundary: `messages[head..boundary]` of the list the loop was
+    /// handed lie behind it (design 11 §3.3), `head` being `kept_head`
+    /// (`DEFAULT_KEPT_HEAD` but in a spawned subagent's loop and a lead's
+    /// given a memory block). Counted in the list as the compaction
     /// found it, so once an earlier tier or compaction had shortened the list
     /// it falls short of the truth, never past it. `None` when the loop never
     /// wrote one.
     pub working_state: Option<(WorkingState, usize)>,
+    /// Whether an `Error` exit's `LocalCallTimedOut` was a rung of the
+    /// router's fallback ladder — reached after the model the call asked
+    /// for failed in a way that may pass — rather than that model itself
+    /// (`LlmRouterError::LocalCallTimedOut::asked`, LTM-1). The error's text
+    /// is the same either way; [`Self::subagent_failure`] reads this to
+    /// tell the lead a retry will not help only when the asked model spent
+    /// its timeout, since a second attempt asks it first. False for every
+    /// other exit.
+    pub spent_fallback_rung: bool,
 }
 
 impl LoopResult {
@@ -399,8 +478,9 @@ impl LoopResult {
     /// error as written — never its `Debug` form — and the cost cap with its
     /// amount. Where a retry cannot change the outcome — the cost cap,
     /// credentials the provider refused, no model the agent can use, a model
-    /// it may not use — it says so, because the lead's prompt tells it to
-    /// retry a failed subagent. The last tool error follows, as there.
+    /// it may not use, a local model that used up its whole timeout — it says
+    /// so, because the lead's prompt tells it to retry a failed subagent. The
+    /// last tool error follows, as there.
     ///
     /// `max_cost` is the subagent's own cap (its template's
     /// `max_cost_per_task`, else `[execution.agent_defaults] max_cost`); the
@@ -413,8 +493,8 @@ impl LoopResult {
                 rounds_spent(self.rounds_used)
             ),
             LoopFinishReason::CostExceeded => format!(
-                "Agent '{agent}' {STOPPED_SHORT}: it {HIT_COST_LIMIT} of {} (it spent {}). A \
-                 retry will not help: every attempt has the same limit — give the work a \
+                "Agent '{agent}' {STOPPED_SHORT}: it {HIT_COST_LIMIT} of {} (it spent {}). \
+                 {RETRY_WILL_NOT_HELP} every attempt has the same limit — give the work a \
                  narrower objective, or do this part yourself.",
                 usd(max_cost),
                 usd(self.cap_spend)
@@ -427,7 +507,7 @@ impl LoopResult {
             }
             LoopFinishReason::Error(e) => {
                 let e = e.trim_end();
-                match retry_cannot_help(e) {
+                match retry_cannot_help(e, self.spent_fallback_rung) {
                     Some(why) => {
                         let stop = if e.ends_with(['.', '!', '?']) {
                             ""
@@ -435,8 +515,8 @@ impl LoopResult {
                             "."
                         };
                         format!(
-                            "Agent '{agent}' could not finish: {e}{stop} A retry will not \
-                             help: {why}."
+                            "Agent '{agent}' could not finish: {e}{stop} \
+                             {RETRY_WILL_NOT_HELP} {why}."
                         )
                     }
                     None => format!("Agent '{agent}' could not finish: {e}"),
@@ -452,7 +532,7 @@ impl LoopResult {
     /// `reason`, then the last tool error when there was one (V3, W2).
     fn with_last_tool_error(&self, reason: String) -> String {
         match self.last_tool_error {
-            Some(ref err) => format!("{reason} The last tool error was: {}", user_facing(err)),
+            Some(ref err) => format!("{reason} {LAST_TOOL_ERROR} {}", user_facing(err)),
             None => reason,
         }
     }
@@ -464,6 +544,17 @@ impl LoopResult {
 const STOPPED_SHORT: &str = "stopped before reaching an answer";
 const HIT_COST_LIMIT: &str = "hit its cost limit";
 const HIT_OUTPUT_LIMIT: &str = "the reply hit the model's output limit";
+
+/// How [`LoopResult::subagent_failure`]'s sentence saying a retry cannot
+/// change the outcome opens; the sentence runs to its first full stop.
+/// `wait_for_subagents`' summary keeps that sentence whole when it cuts a
+/// failed line (LTM-2), finding it by these words.
+pub(crate) const RETRY_WILL_NOT_HELP: &str = "A retry will not help:";
+
+/// How the last tool error a failed line quotes is introduced
+/// (`with_last_tool_error`): the summary's cut looks for the retry
+/// sentence only before it (LTM-2).
+pub(crate) const LAST_TOOL_ERROR: &str = "The last tool error was:";
 
 fn rounds_spent(rounds: usize) -> String {
     format!(
@@ -495,7 +586,19 @@ fn usd(amount: f64) -> String {
 /// refused) or `NoApiCompatibleKeys`, each kept past the fallback ladder; the
 /// provider's own `AuthenticationFailed` and an HTTP 401 or 403 arrive
 /// unflattened only on the direct, unrouted backend.
-fn retry_cannot_help(error: &str) -> Option<&'static str> {
+///
+/// A local model that used up its whole timeout ends a routed loop as
+/// `LocalCallTimedOut` (LOCAL-HOUR-NO-RETRY), which neither the router nor
+/// the loop asks again; a second subagent would wait out the same timeout on
+/// the same model, so it is named here too (LOCAL-TIMEOUT-MARK, item 18 of
+/// the owner's answer of 2026-11-14). Its text opens with the model's id, so
+/// it is matched by its shape (`fits_shape`), not a prefix. Only when the
+/// spent model is the one the call asked for, though (LTM-1, the advisor's
+/// (b), which the owner took on 2026-11-17): a rung of the fallback ladder
+/// that spent its timeout after a cloud model failed in a way that may pass
+/// (`spent_fallback_rung`) is not named, since a second subagent would ask
+/// the cloud model first, which may answer then.
+fn retry_cannot_help(error: &str, spent_fallback_rung: bool) -> Option<&'static str> {
     use openalpaca_llm::{LlmError, LlmRouterError};
     let is = |e: LlmRouterError| error == e.to_string();
     let starts = |e: LlmRouterError| error.starts_with(&e.to_string());
@@ -527,7 +630,50 @@ fn retry_cannot_help(error: &str) -> Option<&'static str> {
     if error.starts_with("Model access denied:") {
         return Some("this agent may not use the model that answered");
     }
+    if !spent_fallback_rung
+        && fits_shape(
+            error,
+            &LlmRouterError::LocalCallTimedOut {
+                model: FIELD.to_string(),
+                provider: FIELD.to_string(),
+                timeout_secs: u64::MAX,
+                asked: true,
+            }
+            .to_string()
+            .replace(&u64::MAX.to_string(), FIELD),
+        )
+    {
+        return Some(
+            "the local model used up its whole timeout, and every attempt waits as long — give \
+             the work a narrower objective, or do this part yourself",
+        );
+    }
     None
+}
+
+/// Where a field stands in a shape [`fits_shape`] reads: a character no
+/// router message holds.
+const FIELD: &str = "\u{0}";
+
+/// Whether `error` is `shape` with each [`FIELD`] filled by any text — the
+/// shape's fixed words in order, from its first character to its last.
+fn fits_shape(error: &str, shape: &str) -> bool {
+    let mut words = shape.split(FIELD);
+    let first = words.next().unwrap_or_default();
+    let Some(mut rest) = error.strip_prefix(first) else {
+        return false;
+    };
+    let mut words: Vec<&str> = words.collect();
+    let Some(last) = words.pop() else {
+        return rest.is_empty();
+    };
+    for word in words {
+        match rest.find(word) {
+            Some(at) => rest = &rest[at + word.len()..],
+            None => return false,
+        }
+    }
+    rest.ends_with(last)
 }
 
 /// A tool error as the person reading the turn should see it (W2).

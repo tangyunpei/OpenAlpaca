@@ -42,24 +42,18 @@ impl Orchestrator {
         let identity_populated = self
             .identity_document
             .read()
-            .map(|g| g.as_ref().is_some_and(identity_document_has_content))
-            .unwrap_or(false)
+            .is_ok_and(|g| g.as_ref().is_some_and(identity_document_has_content))
             || file_has_content(&self.identity_path, |text| {
-                parse_identity_markdown(text)
-                    .map(|doc| identity_document_has_content(&doc))
-                    .unwrap_or(false)
+                parse_identity_markdown(text).is_ok_and(|doc| identity_document_has_content(&doc))
             });
 
         // Check user: the live document, else the file.
         let user_populated = self
             .user_document
             .read()
-            .map(|g| g.as_ref().is_some_and(user_document_has_content))
-            .unwrap_or(false)
+            .is_ok_and(|g| g.as_ref().is_some_and(user_document_has_content))
             || file_has_content(&self.user_path, |text| {
-                parse_user_markdown(text)
-                    .map(|doc| user_document_has_content(&doc))
-                    .unwrap_or(false)
+                parse_user_markdown(text).is_ok_and(|doc| user_document_has_content(&doc))
             });
 
         if !identity_populated || !user_populated {

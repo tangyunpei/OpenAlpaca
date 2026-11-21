@@ -77,8 +77,7 @@ impl NotificationDispatcher {
                     .get("imessage.notify_task_completion")
                     .ok()
                     .flatten()
-                    .map(|v| v == "true")
-                    .unwrap_or(false)
+                    .is_some_and(|v| v == "true")
             });
         if !should_notify {
             return;

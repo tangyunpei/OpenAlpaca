@@ -369,3 +369,131 @@ pub(super) fn open_file_error_response(err: OpenFileApiError) -> axum::response:
         }
     }
 }
+
+// ============================================================================
+// Reveal (Q06): `POST /v1/files/{id}/reveal`
+// ============================================================================
+
+/// `POST /v1/files/{id}/reveal`'s answer: the id and `revealed`, never a
+/// path (the owner's decision of 2026-10-30, *Reveal in the daemon*).
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+pub struct FileRevealResponse {
+    pub id: String,
+    pub status: String,
+}
+
+/// Shows an already admitted file in its folder. The route's seam: the
+/// daemon passes [`reveal_with_system`], the tests a stand-in that reveals
+/// nothing. `Err` is the sentence the route answers.
+pub(super) type RevealFileFn = fn(&FsPath) -> Result<(), String>;
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(super) enum RevealFileApiError {
+    /// No row of this owner's has the id.
+    NotFound,
+    /// `store::revealable_path` refused the row's path: not there, not a
+    /// file, or under neither the home store nor a present project. Carries
+    /// `RevealRefusal`'s sentence as it is.
+    Refused(String),
+    /// The path lies under a missing project's recorded root (ST-23, the
+    /// lead's ruling R-T26). Carries the project's sentence.
+    ProjectMissing(String),
+    Db(String),
+    /// The platform could not show an admitted file, or the reveal could not
+    /// be run. Carries Round G G4's sentence.
+    RevealFailed(String),
+}
+
+/// Round G G4's sentences for a reveal the platform could not do, byte for
+/// byte as the shell's `reveal_in_folder` said them before Q06: a program
+/// that exited unsuccessfully names itself and its status; one that could
+/// not be run, or any other failure `opener` reports, gives the reason.
+pub(super) fn reveal_failed_sentence(path: &FsPath, err: opener::OpenError) -> String {
+    match err {
+        opener::OpenError::ExitStatus { cmd, status, .. } => format!(
+            "{cmd} could not show {} in its folder ({status}).",
+            path.display()
+        ),
+        opener::OpenError::Io(e) | opener::OpenError::Spawn { source: e, .. } => {
+            format!("Could not show {} in its folder: {e}.", path.display())
+        }
+        other => format!("Could not show {} in its folder: {other}.", path.display()),
+    }
+}
+
+/// Shows `path` in its folder with the platform's own reveal: Finder with
+/// the file selected on macOS (`open -R -- <path>`), Explorer with it
+/// selected on Windows, the file manager elsewhere (`opener::reveal`). The
+/// path is an argument of its own, never passed through a shell.
+pub(super) fn reveal_with_system(path: &FsPath) -> Result<(), String> {
+    opener::reveal(path).map_err(|e| reveal_failed_sentence(path, e))
+}
+
+/// Reveal by file id (Q06). The owner's row for `file_id` gives its stored
+/// path — the `path` the daemon serves on the artifact, which the webview
+/// handed the shell's `reveal_path` before — and `store::revealable_path`
+/// decides, symlinks resolved: a regular file in the home store or under
+/// the root of a present project is shown (ST-18: whatever its kind), and
+/// the reveal gets the canonical path. Nothing is staged, opened, read or
+/// changed. The check (it reads `projects/`) and the reveal run on the
+/// blocking pool.
+pub(super) async fn reveal_asset_for_user(
+    db: &openalpaca_storage::Database,
+    file_id: &str,
+    local_user_id: &str,
+    reveal_file_fn: RevealFileFn,
+) -> Result<FileRevealResponse, RevealFileApiError> {
+    let asset = match openalpaca_storage::ArtifactStore::new(db).get(file_id, local_user_id) {
+        Ok(Some(asset)) => asset,
+        Ok(None) => return Err(RevealFileApiError::NotFound),
+        Err(e) => return Err(RevealFileApiError::Db(e.to_string())),
+    };
+    let stored = PathBuf::from(asset.storage_path);
+    match tokio::task::spawn_blocking(move || {
+        use openalpaca_storage::store::RevealRefusal;
+        let path =
+            openalpaca_storage::store::revealable_path(&stored).map_err(
+                |refusal| match refusal {
+                    RevealRefusal::ProjectMissing(_) => {
+                        RevealFileApiError::ProjectMissing(refusal.to_string())
+                    }
+                    _ => RevealFileApiError::Refused(refusal.to_string()),
+                },
+            )?;
+        reveal_file_fn(&path).map_err(RevealFileApiError::RevealFailed)
+    })
+    .await
+    {
+        Ok(Ok(())) => Ok(FileRevealResponse {
+            id: file_id.to_string(),
+            status: "revealed".to_string(),
+        }),
+        Ok(Err(e)) => Err(e),
+        Err(e) => Err(RevealFileApiError::RevealFailed(format!(
+            "Could not show the file in its folder: {e}."
+        ))),
+    }
+}
+
+pub(super) fn reveal_file_error_response(err: RevealFileApiError) -> axum::response::Response {
+    match err {
+        RevealFileApiError::NotFound => {
+            error_response(StatusCode::NOT_FOUND, "NOT_FOUND", "File not found").into_response()
+        }
+        RevealFileApiError::Refused(sentence) => {
+            error_response(StatusCode::CONFLICT, "REVEAL_REFUSED", &sentence).into_response()
+        }
+        RevealFileApiError::ProjectMissing(sentence) => {
+            error_response(StatusCode::GONE, "ARTIFACT_PROJECT_MISSING", &sentence).into_response()
+        }
+        RevealFileApiError::Db(e) => {
+            error_response(StatusCode::INTERNAL_SERVER_ERROR, "DB_ERROR", &e).into_response()
+        }
+        RevealFileApiError::RevealFailed(sentence) => error_response(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "REVEAL_FAILED",
+            &sentence,
+        )
+        .into_response(),
+    }
+}

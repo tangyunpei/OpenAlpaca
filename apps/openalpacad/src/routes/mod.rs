@@ -7,9 +7,13 @@ use axum::{
 };
 use openalpaca_core::memory::scope_context::MemoryScopeContext;
 use openalpaca_storage::store::projects::ProjectError;
+
+use crate::discovery_rotation::AcceptsToken;
 use serde::Serialize;
 
 pub mod agents;
+#[cfg(test)]
+mod agents_cli_create;
 mod agents_types;
 pub mod artifacts;
 pub mod auth;
@@ -27,6 +31,8 @@ pub mod followups;
 pub mod memories;
 pub mod orchestrator_latency;
 pub mod persona;
+#[cfg(test)]
+pub(crate) mod request_samples;
 pub mod sessions;
 pub mod settings;
 mod settings_types;
@@ -80,7 +86,8 @@ pub use extensions::{
     update_extension_handler, validate_plugin_handler,
 };
 pub use files::{
-    get_file_content_handler, get_file_metadata_handler, open_file_handler, upload_file_handler,
+    get_file_content_handler, get_file_metadata_handler, open_file_handler, reveal_file_handler,
+    upload_file_handler,
 };
 pub use followups::{cancel_followup_handler, list_followups_handler, queue_followup_handler};
 pub use orchestrator_latency::{
@@ -176,25 +183,43 @@ pub struct TokenParams {
 /// Whether a content request carries the daemon token, as `?token=<t>` (the way
 /// `/v1/chat/stream` does) or as `Authorization: Bearer <t>` (the way every
 /// other route does, so the GUI's existing `apiFetchBlob` keeps working).
+///
+/// `expected` is the daemon's token set (T21 (2)), or one fixed token in a
+/// test.
 pub(crate) fn content_token_ok(
     headers: &HeaderMap,
     query_token: Option<&str>,
-    expected: &str,
+    expected: &(impl AcceptsToken + ?Sized),
 ) -> bool {
-    if query_token == Some(expected) {
+    if query_token.is_some_and(|token| expected.accepts_token(token)) {
         return true;
     }
     headers
         .get(axum::http::header::AUTHORIZATION)
         .and_then(|value| value.to_str().ok())
         .and_then(|value| value.strip_prefix("Bearer "))
-        .is_some_and(|token| token == expected)
+        .is_some_and(|token| expected.accepts_token(token))
 }
 
-/// The plain-text `401` the other inline-auth route answers with
-/// (`chat_stream_handler`), so the two speak with one voice.
+/// The plain-text `401` the query-token routes answer with
+/// ([`query_token_refusal`]), so the content routes speak with their voice.
 pub(crate) fn invalid_token() -> Response {
     (StatusCode::UNAUTHORIZED, "Invalid token").into_response()
+}
+
+/// The token check of the two routes a browser opens by URL alone and which
+/// carry the token as `?token=<t>` only: `/v1/events` (a WebSocket) and
+/// `/v1/chat/stream/{id}` (an `EventSource`). `None` lets the request in;
+/// otherwise the [`invalid_token`] refusal to answer with.
+///
+/// `expected` is the daemon's token set (T21 (2)), or one fixed token in a
+/// test.
+pub(crate) fn query_token_refusal(
+    params: &std::collections::HashMap<String, String>,
+    expected: &(impl AcceptsToken + ?Sized),
+) -> Option<Response> {
+    let token = params.get("token").map(String::as_str).unwrap_or("");
+    (!expected.accepts_token(token)).then(invalid_token)
 }
 
 /// The MIME types a browser will execute script from when it *navigates* to a
@@ -453,6 +478,33 @@ pub(crate) fn page_limit(requested: Option<i64>, default: i64) -> i64 {
 /// serve, and SQLite silently reads it as none.
 pub(crate) fn page_offset(requested: Option<i64>) -> i64 {
     requested.unwrap_or(0).max(0)
+}
+
+/// Every route module's samples for the API contract's folder
+/// (API-CONTRACT), in one place: `crate::contract` checks the set against the
+/// folder, so a producer dropped here is a removal.
+#[cfg(test)]
+pub(crate) async fn contract_samples(out: &mut crate::contract::Samples) {
+    artifacts::tests::contract_samples(out).await;
+    command::contract_samples(out);
+    status::tests::contract_samples(out).await;
+    sessions::tests::contract_samples(out).await;
+    memories::tests::contract_samples(out).await;
+    workspaces::life_tests::contract_samples(out).await;
+    extensions::tests::contract_samples(out).await;
+    skills::tests::contract_samples(out).await;
+    tools::tests::contract_samples(out);
+    persona::tests::contract_samples(out).await;
+    settings::contract_tests::contract_samples(out).await;
+    tasks::tests::contract_samples(out).await;
+    agents::tests::contract_samples(out).await;
+    chat::tests::contract_samples(out).await;
+    connectors::tests::contract_samples(out);
+    files::tests::contract_samples(out).await;
+    followups::tests::contract_samples(out).await;
+    orchestrator_latency::contract_samples(out).await;
+    dispatch_decisions::contract_samples(out).await;
+    events_history::tests::contract_samples(out);
 }
 
 #[cfg(test)]

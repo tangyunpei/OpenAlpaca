@@ -1,5 +1,4 @@
 use std::collections::HashSet;
-use std::fmt;
 
 /// Maximum skill invocation depth before we suspect a cycle.
 pub const MAX_SKILL_STACK_DEPTH: usize = 16;
@@ -26,7 +25,11 @@ pub enum ConflictReason {
 
 /// A constraint conflict produced when a child skill requires a tool that its
 /// ancestors have forbidden or omitted from their allow lists.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, thiserror::Error)]
+#[error(
+    "skill '{skill_id}' requires tool '{tool}' but {} '{denied_by}'",
+    .reason.phrase()
+)]
 pub struct ConstraintConflict {
     pub skill_id: String,
     pub tool: String,
@@ -34,28 +37,15 @@ pub struct ConstraintConflict {
     pub denied_by: String,
 }
 
-impl fmt::Display for ConstraintConflict {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match &self.reason {
-            ConflictReason::DeniedByAncestor => {
-                write!(
-                    f,
-                    "skill '{}' requires tool '{}' but denied by '{}'",
-                    self.skill_id, self.tool, self.denied_by
-                )
-            }
-            ConflictReason::NotInAncestorAllowList => {
-                write!(
-                    f,
-                    "skill '{}' requires tool '{}' but not in allow list of '{}'",
-                    self.skill_id, self.tool, self.denied_by
-                )
-            }
+impl ConflictReason {
+    /// The words [`ConstraintConflict`]'s sentence puts before the ancestor.
+    fn phrase(&self) -> &'static str {
+        match self {
+            Self::DeniedByAncestor => "denied by",
+            Self::NotInAncestorAllowList => "not in allow list of",
         }
     }
 }
-
-impl std::error::Error for ConstraintConflict {}
 
 /// Compose parent + child constraints. Returns an error if the child requires a
 /// tool that is denied or not in the effective allow list.
@@ -447,5 +437,36 @@ mod tests {
             msg2,
             "skill 'analyzer' requires tool 'network' but not in allow list of 'restricted_parent'"
         );
+    }
+
+    /// Step 9's golden (M32): the sentence for each reason byte for byte,
+    /// under `{}` and `{:#}`, with no `source()` — written against the
+    /// hand-written `Display` and kept on the derive. The `match` has no `_`
+    /// arm, so a new reason does not compile without its row.
+    #[test]
+    fn a_constraint_conflict_prints_its_sentence_whole_and_has_no_source() {
+        let rows = [
+            ConflictReason::DeniedByAncestor,
+            ConflictReason::NotInAncestorAllowList,
+        ];
+        for reason in rows {
+            let want = match reason {
+                ConflictReason::DeniedByAncestor => {
+                    "skill 'analyzer\u{202e}' requires tool 'network' but denied by 'parent\u{200b}'"
+                }
+                ConflictReason::NotInAncestorAllowList => {
+                    "skill 'analyzer\u{202e}' requires tool 'network' but not in allow list of 'parent\u{200b}'"
+                }
+            };
+            let conflict = ConstraintConflict {
+                skill_id: "analyzer\u{202e}".to_string(),
+                tool: "network".to_string(),
+                reason,
+                denied_by: "parent\u{200b}".to_string(),
+            };
+            assert_eq!(conflict.to_string(), want);
+            assert_eq!(format!("{conflict:#}"), want);
+            assert!(std::error::Error::source(&conflict).is_none(), "{want}");
+        }
     }
 }

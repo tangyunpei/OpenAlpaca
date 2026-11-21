@@ -4,11 +4,26 @@ use crate::types::*;
 use std::sync::Arc;
 
 impl LlmRouter {
+    /// Walk the ladder after `original_model` failed. `spent` is
+    /// `Some(LocalCallTimedOut)` when it failed by using up a local
+    /// provider's whole timeout (LOCAL-HOUR-NO-RETRY).
     pub(super) async fn try_fallback(
         &self,
         original_model: &str,
         request: &RouterRequest,
+        spent: Option<LlmRouterError>,
     ) -> Result<ChatResponse, LlmRouterError> {
+        // LOCAL-HOUR-NO-RETRY: the providers a local call used its whole
+        // timeout on. No rung they serve is asked again; a rung on another
+        // provider is not that call repeated, and may answer.
+        let mut spent = spent;
+        let mut spent_on: Vec<ProviderType> = Vec::new();
+        if spent.is_some()
+            && let Some(provider) = self.model_registry.resolve_provider(original_model)
+        {
+            spent_on.push(provider);
+        }
+
         // 1. Walk the ladder (L3): the request's own chain, then the model's
         //    configured chain, then `[orchestrator] fallback_models`, then the
         //    effective default model. A rung nothing can serve is skipped
@@ -18,10 +33,30 @@ impl LlmRouter {
             if !self.is_routable(&fallback_model) {
                 continue;
             }
+            let provider = self.model_registry.resolve_provider(&fallback_model);
+            if provider.as_ref().is_some_and(|p| spent_on.contains(p)) {
+                continue;
+            }
             match self.try_model(&fallback_model, request).await {
                 Ok(response) => {
                     self.note_substitution(original_model, &fallback_model);
                     return Ok(response);
+                }
+                Err(LlmRouterError::LocalCallTimedOut {
+                    model,
+                    provider: name,
+                    timeout_secs,
+                    ..
+                }) => {
+                    spent_on.extend(provider);
+                    // A rung's spent timeout, not the asked model's (LTM-1):
+                    // kept only when the asked model's own is not.
+                    spent.get_or_insert(LlmRouterError::LocalCallTimedOut {
+                        model,
+                        provider: name,
+                        timeout_secs,
+                        asked: false,
+                    });
                 }
                 Err(_) => continue,
             }
@@ -43,11 +78,6 @@ impl LlmRouter {
             && let Some(cli_backend) = self.cli_backends.get(&pt)
         {
             tracing::info!("Falling back to CLI backend for {:?}", pt);
-            if request.ephemeral_system_notice.is_some() {
-                tracing::debug!(
-                    "CLI fallback is dropping ephemeral_system_notice — the CLI prompt is flattened to a single string"
-                );
-            }
             let truncated = truncate_messages_for_cli(&request.messages);
             let flattened = flatten_messages(&truncated);
             let cli_request = ChatRequest {
@@ -60,7 +90,6 @@ impl LlmRouter {
                 enable_caching: false,
                 thinking: None,
                 context_management: None,
-                ephemeral_system_notice: None,
             };
             match cli_backend.chat(cli_request).await {
                 Ok(response) => {
@@ -86,6 +115,13 @@ impl LlmRouter {
                     tracing::warn!("CLI backend fallback failed for {:?}: {}", pt, e);
                 }
             }
+        }
+
+        // A local call used its whole timeout and nothing else answered: the
+        // call ends naming that, not as "All fallback models failed", which
+        // the agentic loop would ask again (LOCAL-HOUR-NO-RETRY).
+        if let Some(spent) = spent {
+            return Err(spent);
         }
 
         // Nothing on the ladder was even routable: this is not "the fallbacks

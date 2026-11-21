@@ -1,0 +1,54 @@
+{
+  "body": "",
+  "conflict": false,
+  "effective_status": "",
+  "freshness": "",
+  "frontmatter": {
+    "aliases": [
+      ""
+    ],
+    "created_at": "",
+    "fact_key": "",
+    "id": "",
+    "kind": "",
+    "observed_at": null,
+    "pinned": false,
+    "review_after": null,
+    "schema": 0,
+    "sources": [
+      {
+        "id": "",
+        "observed_at": null,
+        "type": ""
+      }
+    ],
+    "status": "",
+    "supersedes": [],
+    "tags": [
+      ""
+    ],
+    "title": "",
+    "updated_at": "",
+    "valid_from": null,
+    "valid_to": null
+  },
+  "id": "",
+  "kind": "",
+  "origin": "",
+  "path": "",
+  "revision": "",
+  "scope": "",
+  "sources": [
+    {
+      "id": "",
+      "observed_at": null,
+      "type": ""
+    }
+  ],
+  "sources_status": "",
+  "status": "",
+  "superseded_by": [],
+  "supersedes": [],
+  "title": "",
+  "truncated": false
+}

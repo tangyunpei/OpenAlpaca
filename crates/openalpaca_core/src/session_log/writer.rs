@@ -58,7 +58,7 @@ impl Default for SessionLogLimits {
             max_session_bytes: 256 * 1024 * 1024,
             channel_capacity: 1024,
             sync_interval: Duration::from_secs(5),
-            idle_close: Duration::from_secs(300),
+            idle_close: Duration::from_mins(5),
         }
     }
 }

@@ -32,6 +32,7 @@ pub struct PersonaArgs {
 }
 
 #[derive(Subcommand)]
+#[command(defer = true)]
 pub enum PersonaCommands {
     /// Print a persona document as the daemon holds it
     Show {
@@ -55,7 +56,7 @@ pub enum PersonaTarget {
 }
 
 pub async fn run(args: PersonaArgs) -> Result<()> {
-    let client = DaemonClient::connect()?;
+    let client = DaemonClient::connect().await?;
     match args.command {
         PersonaCommands::Show {
             target: PersonaTarget::User,
@@ -103,19 +104,19 @@ pub async fn run(args: PersonaArgs) -> Result<()> {
 
 /// `GET /v1/persona/user`'s body.
 #[derive(Debug, Deserialize)]
-struct PersonaUserResponse {
+pub(crate) struct PersonaUserResponse {
     content: String,
 }
 
 /// `PUT /v1/persona/user`'s body.
 #[derive(Debug, Serialize)]
-struct PersonaUserBody<'a> {
-    content: &'a str,
+pub(crate) struct PersonaUserBody<'a> {
+    pub(crate) content: &'a str,
 }
 
 /// `PUT /v1/persona/user`'s answer.
 #[derive(Debug, Deserialize)]
-struct PersonaUserWritten {
+pub(crate) struct PersonaUserWritten {
     etag: String,
 }
 
@@ -233,13 +234,13 @@ fn short(etag: &str) -> String {
 }
 
 /// A new file for the editor, `<prefix>….md`, in the store's `state/editor/`
-/// (0700, `openalpaca_storage::store::editor_dir`) — never in `$TMPDIR`,
+/// (0700, `openalpaca_app_support::paths::editor_dir`) — never in `$TMPDIR`,
 /// where a kept text was out of reach of every cleanup the store has
 /// (N-STORE-1). It is removed when the handle drops, or kept with
 /// `into_temp_path().keep()` when an edit is refused or conflicts. Shared with
 /// `openalpaca memory add|edit`.
 pub(crate) fn editor_buffer(prefix: &str) -> Result<tempfile::NamedTempFile> {
-    let dir = openalpaca_storage::store::editor_dir()
+    let dir = openalpaca_app_support::paths::editor_dir()
         .context("could not make the folder for the editor's file")?;
     tempfile::Builder::new()
         .prefix(prefix)
@@ -495,7 +496,7 @@ mod tests {
             .unwrap()
             .clone()
             .expect("the editor was opened");
-        let folder = openalpaca_storage::store::home_root()
+        let folder = openalpaca_app_support::paths::home_root()
             .unwrap()
             .join("state")
             .join("editor");

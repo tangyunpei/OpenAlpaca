@@ -1,6 +1,5 @@
 use crate::prompt_ctx::section::ContextSection;
 use crate::prompt_ctx::sources::{ContextRequest, ContextSource, ExecutionPath};
-use async_trait::async_trait;
 
 pub struct WorkspaceSource;
 
@@ -16,7 +15,6 @@ impl Default for WorkspaceSource {
     }
 }
 
-#[async_trait]
 impl ContextSource for WorkspaceSource {
     fn name(&self) -> &'static str {
         "workspace"

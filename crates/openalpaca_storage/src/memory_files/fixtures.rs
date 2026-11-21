@@ -578,8 +578,7 @@ impl Harness {
             .map(|e| e.path())
             .find(|p| {
                 p.file_name()
-                    .map(|n| n.to_string_lossy().starts_with(&prefix))
-                    .unwrap_or(false)
+                    .is_some_and(|n| n.to_string_lossy().starts_with(&prefix))
             })
     }
 
@@ -1007,14 +1006,11 @@ impl Harness {
     }
 
     fn run_store(&mut self, ctx: &Context, input: &Value, label: Option<&str>) -> Outcome {
-        let kind = match input["kind"].as_str().and_then(NoteKind::parse) {
-            Some(k) => k,
-            None => {
-                return Outcome {
-                    error: Some(MemoryFilesError::InvalidInput("kind".into())),
-                    ..Default::default()
-                };
-            }
+        let Some(kind) = input["kind"].as_str().and_then(NoteKind::parse) else {
+            return Outcome {
+                error: Some(MemoryFilesError::InvalidInput("kind".into())),
+                ..Default::default()
+            };
         };
         let partition = self.write_partition_of(ctx, kind, input["scope"].as_str());
         let new_note = self.new_note_from(input);
@@ -1475,7 +1471,7 @@ impl Harness {
                 }
                 "revision_changed" => {
                     let want = value.as_bool().unwrap();
-                    let changed = outcome.updated.as_ref().map(|u| u.written).unwrap_or(false);
+                    let changed = outcome.updated.as_ref().is_some_and(|u| u.written);
                     assert_eq!(changed, want, "{at}: revision_changed");
                 }
                 "current_revision" => {

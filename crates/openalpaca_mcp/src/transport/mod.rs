@@ -3,32 +3,61 @@
 use std::collections::HashMap;
 use std::path::PathBuf;
 
-use async_trait::async_trait;
 use url::Url;
 
 use crate::error::McpError;
 
 mod stdio;
 mod http;
+mod stderr_tail;
 
 pub use http::StreamableHttpTransport;
+pub use stderr_tail::{STDERR_SETTLE, SpawnTail, StderrTail, TAIL_BYTES, TailSnapshot};
 pub use stdio::{ExitObserver, StdioTransport};
 
-/// Abstraction over how bytes reach an MCP server.
+/// How bytes reach an MCP server: one variant per transport, a closed set.
 ///
-/// Implementations produce a connected [`TransportConnection`] containing
+/// Each variant produces a connected [`TransportConnection`] containing
 /// an `rmcp`-level transport handle. Connection lifetime is managed by the
 /// [`crate::McpClient`] lifecycle layer, not by the transport itself.
-#[async_trait]
-pub trait Transport: Send + Sync + 'static {
+pub enum Transport {
+    Stdio(StdioTransport),
+    Http(StreamableHttpTransport),
+    /// The scripted test transport (the `test-utils` feature only).
+    #[cfg(feature = "test-utils")]
+    Mock(test_utils::MockTransport),
+}
+
+impl Transport {
     /// Establish a new connection, consuming no state on success.
-    async fn connect(&self) -> Result<TransportConnection, McpError>;
+    pub async fn connect(&self) -> Result<TransportConnection, McpError> {
+        match self {
+            Self::Stdio(t) => t.connect().await,
+            Self::Http(t) => t.connect().await,
+            #[cfg(feature = "test-utils")]
+            Self::Mock(t) => t.connect().await,
+        }
+    }
 
     /// Short identifier for logs, e.g. "stdio" or "streamable-http".
-    fn kind(&self) -> &'static str;
+    pub fn kind(&self) -> &'static str {
+        match self {
+            Self::Stdio(t) => t.kind(),
+            Self::Http(t) => t.kind(),
+            #[cfg(feature = "test-utils")]
+            Self::Mock(t) => t.kind(),
+        }
+    }
 
     /// Human-readable server identifier used in logs and errors.
-    fn server_name(&self) -> &str;
+    pub fn server_name(&self) -> &str {
+        match self {
+            Self::Stdio(t) => t.server_name(),
+            Self::Http(t) => t.server_name(),
+            #[cfg(feature = "test-utils")]
+            Self::Mock(t) => t.server_name(),
+        }
+    }
 }
 
 /// Opaque handle wrapping an rmcp transport, ready to feed `ServiceExt::serve`.
@@ -44,7 +73,7 @@ pub(crate) enum TransportInner {
 }
 
 /// Config shape used by `McpClientConfig`. Lets callers specify the transport
-/// declaratively; the client constructs the corresponding `Transport` impl.
+/// declaratively; the client constructs the corresponding `Transport` variant.
 #[derive(Clone, Debug)]
 pub enum TransportKind {
     Stdio {
@@ -76,9 +105,7 @@ pub mod test_utils {
 
     use std::sync::{Arc, Mutex};
 
-    use async_trait::async_trait;
-
-    use super::{Transport, TransportConnection};
+    use super::TransportConnection;
     use crate::error::McpError;
 
     /// Scripted transport that records every `connect()` call.
@@ -101,20 +128,17 @@ pub mod test_utils {
         pub fn connect_count(&self) -> u32 {
             *self.connect_calls.lock().unwrap()
         }
-    }
 
-    #[async_trait]
-    impl Transport for MockTransport {
-        async fn connect(&self) -> Result<TransportConnection, McpError> {
+        pub async fn connect(&self) -> Result<TransportConnection, McpError> {
             *self.connect_calls.lock().unwrap() += 1;
             Err(McpError::TransportClosed)
         }
 
-        fn kind(&self) -> &'static str {
+        pub fn kind(&self) -> &'static str {
             "mock"
         }
 
-        fn server_name(&self) -> &str {
+        pub fn server_name(&self) -> &str {
             &self.server_name
         }
     }
@@ -130,6 +154,19 @@ pub mod test_utils {
             let _ = m.connect().await;
             let _ = m.connect().await;
             assert_eq!(m.connect_count(), 2);
+        }
+
+        /// The mock is a variant of the enum, and `connect` through the enum
+        /// reaches it (M55a).
+        #[tokio::test]
+        async fn the_mock_variant_dispatches_connect() {
+            let t = crate::Transport::Mock(MockTransport::new("mock"));
+            assert!(matches!(t.connect().await, Err(McpError::TransportClosed)));
+            assert_eq!((t.kind(), t.server_name()), ("mock", "mock"));
+            let crate::Transport::Mock(m) = &t else {
+                unreachable!("built as the mock variant")
+            };
+            assert_eq!(m.connect_count(), 1);
         }
     }
 }

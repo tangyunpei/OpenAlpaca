@@ -15,7 +15,7 @@ mod tests;
 use artifacts::deliver_artifacts;
 use formatting::{format_completion_message, format_failure_message};
 use openalpaca_core::events::SystemEvent;
-use openalpaca_core::orchestrator::ConnectorSendProvider;
+use openalpaca_core::orchestrator::DynConnectorSendProvider;
 use openalpaca_storage::{
     Database, IdentityRepository, PreferenceRepository, TaskRepository,
 };
@@ -33,7 +33,7 @@ pub struct NotificationDispatcher {
     bus_rx: broadcast::Receiver<SystemEvent>,
     db: Database,
     cancel_token: CancellationToken,
-    connector_send: Option<Arc<dyn ConnectorSendProvider>>,
+    connector_send: Option<Arc<DynConnectorSendProvider<'static>>>,
 }
 
 impl NotificationDispatcher {
@@ -41,7 +41,7 @@ impl NotificationDispatcher {
         bus_rx: broadcast::Receiver<SystemEvent>,
         db: Database,
         cancel_token: CancellationToken,
-        connector_send: Option<Arc<dyn ConnectorSendProvider>>,
+        connector_send: Option<Arc<DynConnectorSendProvider<'static>>>,
     ) -> Self {
         Self {
             bus_rx,
@@ -66,19 +66,21 @@ impl NotificationDispatcher {
     pub async fn run(mut self) {
         info!("NotificationDispatcher started");
         loop {
-            let event = tokio::select! {
-                result = self.bus_rx.recv() => match result {
-                    Ok(ev) => ev,
-                    Err(broadcast::error::RecvError::Lagged(n)) => {
-                        warn!("NotificationDispatcher lagged by {n} events");
-                        continue;
-                    }
-                    Err(broadcast::error::RecvError::Closed) => {
-                        info!("NotificationDispatcher: bus closed, shutting down");
-                        break;
-                    }
-                },
-                _ = self.cancel_token.cancelled() => {
+            let event = match self
+                .cancel_token
+                .run_until_cancelled(self.bus_rx.recv())
+                .await
+            {
+                Some(Ok(ev)) => ev,
+                Some(Err(broadcast::error::RecvError::Lagged(n))) => {
+                    warn!("NotificationDispatcher lagged by {n} events");
+                    continue;
+                }
+                Some(Err(broadcast::error::RecvError::Closed)) => {
+                    info!("NotificationDispatcher: bus closed, shutting down");
+                    break;
+                }
+                None => {
                     info!("NotificationDispatcher: cancelled, shutting down");
                     break;
                 }
@@ -146,9 +148,8 @@ impl NotificationDispatcher {
         outcome_summary: Option<&str>,
     ) {
         let repo = TaskRepository::new(&self.db);
-        let task = match repo.get(task_id) {
-            Ok(Some(t)) => t,
-            _ => return,
+        let Ok(Some(task)) = repo.get(task_id) else {
+            return;
         };
 
         let content = format_completion_message(
@@ -195,9 +196,8 @@ impl NotificationDispatcher {
 
     async fn handle_failure(&self, task_id: &str, error: &str, outcome_kind: Option<&str>) {
         let repo = TaskRepository::new(&self.db);
-        let task = match repo.get(task_id) {
-            Ok(Some(t)) => t,
-            _ => return,
+        let Ok(Some(task)) = repo.get(task_id) else {
+            return;
         };
 
         // Parse artifact_count from outcome_json (partially-failed pipelines may have artifacts)
@@ -346,9 +346,18 @@ impl NotificationDispatcher {
             let owner = owner.to_string();
             tokio::spawn(async move {
                 let _ = tokio::time::timeout(
-                    std::time::Duration::from_secs(60),
-                    deliver_artifacts(&db, &*send, &task_id, "telegram", &chat_id_str, outcome_json.as_deref(), &owner),
-                ).await;
+                    std::time::Duration::from_mins(1),
+                    deliver_artifacts(
+                        &db,
+                        &send,
+                        &task_id,
+                        "telegram",
+                        &chat_id_str,
+                        outcome_json.as_deref(),
+                        &owner,
+                    ),
+                )
+                .await;
             });
         }
     }

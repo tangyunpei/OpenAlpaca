@@ -8,13 +8,12 @@ use tempfile::TempDir;
 
 struct StubExecutor;
 
-#[async_trait::async_trait]
 impl openalpaca_api::plugin_traits::PluginSkillExecutor for StubExecutor {
     async fn invoke(
         &self,
         _query: &str,
         _context: &serde_json::Value,
-        _tool_executor: &dyn openalpaca_api::plugin_traits::ToolCallbackExecutor,
+        _tool_executor: &openalpaca_api::plugin_traits::DynToolCallbackExecutor<'_>,
     ) -> Result<String, String> {
         Ok(String::new())
     }

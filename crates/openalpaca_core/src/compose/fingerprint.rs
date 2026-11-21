@@ -123,7 +123,15 @@ pub fn hash_agent_config(agent: &crate::agent::subagent::SubAgent) -> [u8; 32] {
     h.update(desc.as_bytes());
     h.update(&(agent.preset.persona.len() as u64).to_le_bytes());
     h.update(agent.preset.persona.as_bytes());
-    h.update(&agent.preset.temperature.to_le_bytes());
+    match agent.preset.temperature {
+        Some(t) => {
+            h.update(&[1]);
+            h.update(&t.to_le_bytes());
+        }
+        None => {
+            h.update(&[0]);
+        }
+    }
     h.update(&(agent.preset.verbosity.len() as u64).to_le_bytes());
     h.update(agent.preset.verbosity.as_bytes());
     h.update(&(agent.capabilities.len() as u64).to_le_bytes());

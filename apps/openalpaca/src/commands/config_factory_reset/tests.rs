@@ -77,8 +77,7 @@ fn a_factory_reset_never_opens_the_store_database() {
 
 /// A daemon — running, or still booting before it has written
 /// `discovery.json` — holds the singleton lock. Here another process holds
-/// it for real, which is the only way to hold an `fcntl` lock against this
-/// one.
+/// it for real, as a daemon would.
 #[test]
 fn a_held_daemon_lock_refuses_the_factory_reset() {
     let tmp = tempdir().unwrap();

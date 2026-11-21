@@ -10,9 +10,6 @@
 //! owner's (`origin = upload`) reads like a by-product: it is the owner's own
 //! file, and refusing it would guard nothing.
 
-use std::sync::Arc;
-
-use async_trait::async_trait;
 use openalpaca_llm::ToolDefinition;
 use openalpaca_storage::store::project_root_of;
 use openalpaca_storage::{ArtifactError, ArtifactKind, ArtifactStore, Database};
@@ -27,7 +24,6 @@ struct ArtifactReadTool {
     db: Option<Database>,
 }
 
-#[async_trait]
 impl BuiltInTool for ArtifactReadTool {
     async fn execute(&self, _arguments: &serde_json::Value) -> Result<String, String> {
         Err("artifact_read requires execution context — use execute_with_context".to_string())
@@ -185,7 +181,7 @@ pub(super) fn artifact_read_tool(db: Option<Database>) -> RegisteredTool {
                 "limit": 8192
             })]),
         },
-        backend: ToolBackend::BuiltIn(Arc::new(ArtifactReadTool { db })),
+        backend: ToolBackend::built_in(ArtifactReadTool { db }),
         // R42: comes with `read_result`, which every shipped template names,
         // so a seeded install's agents read by-products with no template edit.
         provides_capabilities: vec!["read_result".into(), "artifact_read".into()],
@@ -506,6 +502,64 @@ mod tests {
         );
         let file = std::path::Path::new(&path).file_name().unwrap().to_string_lossy().into_owned();
         assert!(err.ends_with(&format!("{file}).")), "{err}");
+    }
+
+    /// Keep one MCP block the way the bridge does (M85), and return the id
+    /// its line names.
+    fn keep_mcp_block(fx: &Fixture, title: &str, data: &[u8], mime: &str) -> String {
+        use base64::Engine as _;
+        let sink = super::super::ByProductSink::new(fx.db.clone(), None);
+        let encoded = base64::engine::general_purpose::STANDARD.encode(data);
+        let line = super::super::save_tool_by_product(
+            Some(&sink),
+            Some(&fx.project_ctx()),
+            super::super::ToolBlob {
+                tool: "srv__fetch",
+                what: "embedded resource",
+                title,
+                base64: &encoded,
+                mime_type: Some(mime),
+            },
+        );
+        line.split_once("artifact \"")
+            .and_then(|(_, rest)| rest.split_once('"'))
+            .unwrap_or_else(|| panic!("not kept: {line}"))
+            .0
+            .to_string()
+    }
+
+    /// M85 under D3 (a): artifact_read stays text only. A text-MIME blob an
+    /// MCP tool returned reads back by its id; an image it returned is
+    /// refused with the existing line.
+    #[tokio::test]
+    async fn an_mcp_text_blob_reads_back_and_an_mcp_image_is_refused() {
+        let fx = Fixture::new();
+        let text = keep_mcp_block(
+            &fx,
+            "srv fetch resource a 1",
+            b"{\"rows\": 3}\n",
+            "application/json",
+        );
+        let out = fx
+            .read(&fx.project_ctx(), json!({"artifact_id": text}))
+            .await
+            .unwrap();
+        assert!(out.starts_with("{\"rows\": 3}\n"), "{out}");
+
+        let image = keep_mcp_block(
+            &fx,
+            "srv fetch image a 2",
+            &[0x89, b'P', b'N', b'G'],
+            "image/png",
+        );
+        assert_eq!(
+            fx.read(&fx.project_ctx(), json!({"artifact_id": image}))
+                .await
+                .unwrap_err(),
+            format!(
+                "artifact_read: '{image}' is an image artifact; artifact_read returns text only."
+            )
+        );
     }
 
     /// No owner, no read: every artifact belongs to one.

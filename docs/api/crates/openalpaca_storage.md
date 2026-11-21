@@ -1,6 +1,6 @@
 # `openalpaca_storage`
 
-> Generated from source by `python3 scripts/gen_api_docs.py`.
+> Generated from source by `python3.11 scripts/gen_api_docs.py`.
 
 ## Overview
 
@@ -8,18 +8,17 @@
 - Entry: `crates/openalpaca_storage/src/lib.rs`
 
 - OpenAlpaca Storage Module
-- Provides the single path module (`store`), the discovery mechanism,
-- the singleton lock, the daemon-liveness primitive (`daemon_lifecycle`),
-- a project's re-point and its recovery (`project_life`),
-- and the SQLite database for daemon/GUI/CLI coordination.
+- Provides the content stores and the projects (`store`), a project's
+- re-point and its recovery (`project_life`), and the SQLite database for
+- daemon/GUI/CLI coordination. The home store's own paths, discovery, the
+- daemon-liveness primitive and the wire protocol's numbers are
+- `openalpaca_app_support`'s (Q05), which this crate imports.
 
 ## Modules
 
 - `artifacts` (crates/openalpaca_storage/src/artifacts/mod.rs)
 - `config_schema` (crates/openalpaca_storage/src/config_schema/mod.rs)
-- `daemon_lifecycle` (crates/openalpaca_storage/src/daemon_lifecycle.rs)
 - `database` (crates/openalpaca_storage/src/database/mod.rs)
-- `discovery` (crates/openalpaca_storage/src/discovery/mod.rs)
 - `hash` (crates/openalpaca_storage/src/hash.rs)
 - `memory_files` (crates/openalpaca_storage/src/memory_files/mod.rs)
 - `memory_index` (crates/openalpaca_storage/src/memory_index/mod.rs)

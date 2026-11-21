@@ -8,6 +8,7 @@
 use super::*;
 
 use axum::body::to_bytes;
+use openalpaca_app_support::paths;
 use openalpaca_core::bus::EventBus;
 use openalpaca_core::events::SystemEvent;
 use openalpaca_core::memory::service::ExtractionProvenance;
@@ -27,6 +28,8 @@ struct Fixture {
     home_store: std::path::PathBuf,
     api: MemoryApi,
     bus: EventBus,
+    /// The service's database, where a note's sources are verified.
+    db: Database,
 }
 
 impl Fixture {
@@ -36,7 +39,7 @@ impl Fixture {
             .path()
             .canonicalize()
             .unwrap()
-            .join(store::STORE_DIR_NAME);
+            .join(paths::STORE_DIR_NAME);
         std::fs::create_dir_all(&home_store).unwrap();
         let env = HomeStoreGuard::set(&home_store);
         let db_dir = tempfile::tempdir().unwrap();
@@ -45,7 +48,7 @@ impl Fixture {
             .create_global_user(OWNER, None)
             .unwrap();
         let bus = EventBus::new(64);
-        let service = MemoryService::new(Some(db), MemoryIndex::open_in_memory().unwrap())
+        let service = MemoryService::new(Some(db.clone()), MemoryIndex::open_in_memory().unwrap())
             .with_bus(bus.clone());
         service.rebuild_index().unwrap();
         Self {
@@ -58,6 +61,7 @@ impl Fixture {
                 owner_id: OWNER.to_string(),
             },
             bus,
+            db,
         }
     }
 
@@ -1646,4 +1650,202 @@ async fn a_write_whose_project_cannot_be_recorded_is_refused_and_writes_nothing(
         "{message}"
     );
     assert!(!repo.join(".openalpaca").exists(), "nothing was written");
+}
+
+/// `/v1/memories*`'s JSON bodies for the API contract's folder
+/// (API-CONTRACT): a saved note with a pending suggestion and two revisions,
+/// a learned note, a candidate, and each write's answer. Since
+/// CONTRACT-SAMPLES-2 every optional value the fixture can fill is filled:
+/// the saved note cites a message and carries an alias, a tag and a key,
+/// and the suggestion changes a tag and cites the message too, so the
+/// `sources` and `changes` shapes reach the folder with their keys.
+/// A suggestion on `target` that changes its tags and cites `message`, as
+/// learning writes one (the producer's own; [`Fixture::suggestion`] stays
+/// what the route tests assert on).
+fn contract_suggestion(f: &Fixture, target: NoteId, target_revision: &str, message: i64) {
+    let ctx = f
+        .api
+        .service
+        .context(
+            OWNER,
+            WorkspaceHint::None,
+            Surface::Extraction,
+            Capabilities::EXTRACTION,
+            Attribution::default(),
+        )
+        .unwrap();
+    let out = f
+        .api
+        .service
+        .store(
+            &ctx,
+            StoreInput {
+                title: "Commute".into(),
+                body: "# Commute\n\n## Knowledge\nBike.\n\n## Evidence and limits\nFrom what you said on 2026-09-24. Replaces “Commute” (saved by you): The user said so.\n".into(),
+                kind: Some(NoteKind::Fact),
+                aliases: vec!["travel to work".to_string()],
+                tags: vec!["work".to_string(), "travel".to_string()],
+                fact_key: Some("commute.mode".to_string()),
+                sources: vec![openalpaca_storage::memory_files::NoteSource {
+                    kind: openalpaca_storage::memory_files::SourceType::Message,
+                    id: message.to_string(),
+                    observed_at: Some(chrono::Utc::now()),
+                }],
+                observed_at: Some(chrono::Utc::now()),
+                supersedes: Some((target, target_revision.to_string())),
+                replace_policy: ReplacePolicy::SuggestUnlessLearned,
+                provenance: Some(ExtractionProvenance::UserWords),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+    assert!(out.suggestion);
+}
+
+pub(crate) async fn contract_samples(out: &mut crate::contract::Samples) {
+    use crate::contract::ok_body;
+    let f = Fixture::new();
+    let message = openalpaca_storage::ConversationRepository::new(&f.db)
+        .insert(&openalpaca_storage::ConversationMessage {
+            lane_key: format!("{OWNER}:gui"),
+            role: "user".to_string(),
+            content: "I take the bus.".to_string(),
+            ..Default::default()
+        })
+        .unwrap();
+    let mut body = create_body("Commute", "# Commute\n\n## Knowledge\nBus.\n", "fact");
+    body.aliases = vec!["travel to work".to_string()];
+    body.tags = vec!["work".to_string()];
+    body.fact_key = Some("commute.mode".to_string());
+    body.sources = vec![SourceBody {
+        kind: "message".to_string(),
+        id: message.to_string(),
+    }];
+    let created = ok_body(f.api.create(&Fixture::headers(), body).await).await;
+    out.response("post-memories", created.clone());
+    let note = NoteId::parse(created["id"].as_str().unwrap()).unwrap();
+    let revision = created["revision"].as_str().unwrap().to_string();
+    contract_suggestion(&f, note, &revision, message);
+    f.extracted("Learned", "# Learned\n\nFrom what you said.\n");
+    let (candidate, candidate_revision) = f.candidate("Candidate", "# Candidate\n\nMaybe.\n");
+
+    let body = ok_body(
+        f.api
+            .list(&Fixture::headers(), ListMemoriesQuery::default())
+            .await,
+    )
+    .await;
+    out.response("get-memories", body);
+    let query = SearchMemoriesQuery {
+        q: "commute".to_string(),
+        ..Default::default()
+    };
+    let body = ok_body(f.api.search(&Fixture::headers(), query).await).await;
+    out.response("get-memories-search", body);
+    let body = ok_body(
+        f.api
+            .recently_learned(&Fixture::headers(), RecentlyLearnedQuery::default())
+            .await,
+    )
+    .await;
+    out.response("get-memories-recently-learned", body);
+    let body = ok_body(
+        f.api
+            .suggestions(&Fixture::headers(), SuggestionsQuery::default())
+            .await,
+    )
+    .await;
+    out.response("get-memories-suggestions", body);
+
+    let edited = ok_body(
+        f.api
+            .update(
+                &Fixture::with_if_match(&revision),
+                &note.to_string(),
+                update_body("edit", Some("# Commute\n\n## Knowledge\nTrain.\n")),
+            )
+            .await,
+    )
+    .await;
+    out.response("post-memories-id-edit", edited);
+    let body = ok_body(
+        f.api
+            .update(
+                &Fixture::with_if_match(&candidate_revision),
+                &candidate.to_string(),
+                update_body("confirm", None),
+            )
+            .await,
+    )
+    .await;
+    out.response("post-memories-id-confirm", body);
+    let body = ok_body(
+        f.api
+            .read(
+                &Fixture::headers(),
+                &note.to_string(),
+                ReadMemoryQuery::default(),
+            )
+            .await,
+    )
+    .await;
+    let current = body["revision"].as_str().unwrap().to_string();
+    out.response("get-memories-id", body);
+    let body = ok_body(f.api.history(&Fixture::headers(), &note.to_string()).await).await;
+    out.response("get-memories-id-history", body);
+
+    let (fresh, fresh_revision) = f.extracted("Fresh", "# Fresh\n\nUndo me.\n");
+    let body = ok_body(
+        f.api
+            .undo(&Fixture::with_if_match(&fresh_revision), &fresh.to_string())
+            .await,
+    )
+    .await;
+    out.response("post-memories-id-undo", body);
+
+    // The CLI's own reads (CLI-PROTOCOL): `memory doctor`, `sync`,
+    // `timeline` and `forget`. Since CONTRACT-SAMPLES-3 the doctor finds a
+    // malformed file and a note's id in two files, and the sync a hand
+    // edit, so the rows `memory doctor` and `memory sync` print reach the
+    // folder with their keys; the two extra files go before the sync.
+    let (edited_by_hand, _) = f.extracted("By hand", "# By hand\n\nEdit me.\n");
+    let edited_file = f.note_file(edited_by_hand);
+    let notes_dir = edited_file.parent().unwrap().to_path_buf();
+    let malformed = notes_dir.join("not-a-note.md");
+    std::fs::write(&malformed, "no frontmatter here\n").unwrap();
+    let duplicate = notes_dir.join("a-copy.md");
+    std::fs::copy(&edited_file, &duplicate).unwrap();
+    let body = ok_body(f.api.doctor(&Fixture::headers()).await).await;
+    out.cli_response("get-memories-doctor", body);
+    std::fs::remove_file(&malformed).unwrap();
+    std::fs::remove_file(&duplicate).unwrap();
+    let mut text = std::fs::read_to_string(&edited_file).unwrap();
+    text.push_str("\nHand-edited.\n");
+    std::fs::write(&edited_file, text).unwrap();
+    let body = ok_body(f.api.sync(&Fixture::headers()).await).await;
+    out.cli_response("post-memories-sync", body);
+    let query = TimelineMemoriesQuery {
+        anchor: Some(note.to_string()),
+        ..Default::default()
+    };
+    let body = ok_body(f.api.timeline(&Fixture::headers(), query).await).await;
+    out.cli_response("get-memories-timeline", body);
+    let (gone, gone_revision) = f.extracted("Gone", "# Gone\n\nForget me.\n");
+    let forget = ForgetMemoriesBody {
+        targets: vec![ForgetTargetBody {
+            id: gone.to_string(),
+            expected_revision: gone_revision,
+        }],
+        reason: Some("contract".to_string()),
+    };
+    let body = ok_body(f.api.forget(&Fixture::headers(), forget).await).await;
+    out.cli_response("post-memories-forget", body);
+
+    let body = ok_body(
+        f.api
+            .delete(&Fixture::with_if_match(&current), &note.to_string())
+            .await,
+    )
+    .await;
+    out.response("delete-memories-id", body);
 }

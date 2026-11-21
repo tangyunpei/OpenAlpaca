@@ -1,0 +1,17 @@
+{
+  "confirmations": [
+    {
+      "agent_id": "",
+      "lane_key": "",
+      "per_call": false,
+      "preview": "",
+      "raised_at": "",
+      "request_id": "",
+      "task_id": "",
+      "tool_arguments": {
+        "path": ""
+      },
+      "tool_name": ""
+    }
+  ]
+}

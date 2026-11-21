@@ -1,0 +1,30 @@
+# cargo-about's configuration for THIRD-PARTY-NOTICES' Rust half (B-22), read
+# by scripts/release/gen_notices.py, which runs cargo-about 0.9.2 as
+#   cargo-about generate --format json --frozen --all-features --workspace --fail
+# (every target, as deny.toml's graph; offline, so no licence file is fetched).
+
+# deny.toml's [licenses] allow list, the set gen_notices.py checks: cargo-about
+# names no licence cargo-deny refuses and fails a crate cargo-deny would. The
+# order is cargo-about's preference among an OR's alternatives: MIT first, as
+# a crate's LICENSE-MIT carries its copyright line, then deny.toml's order.
+accepted = [
+    "MIT",
+    "Apache-2.0",
+    "Apache-2.0 WITH LLVM-exception",
+    "BSD-3-Clause",
+    "BSL-1.0",
+    "CC0-1.0",
+    "CDLA-Permissive-2.0",
+    "ISC",
+    "MPL-2.0",
+    "Unicode-3.0",
+    "Zlib",
+]
+
+# What the daemon, the CLI and the app link: no build or dev dependency.
+ignore-build-dependencies = true
+ignore-dev-dependencies = true
+
+# The workspace's own crates (`publish = false`) are not third-party.
+[private]
+ignore = true

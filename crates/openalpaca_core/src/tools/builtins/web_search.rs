@@ -1,6 +1,5 @@
 use crate::tools::registry::{BuiltInTool, RegisteredTool, ToolBackend};
 use arc_swap::ArcSwap;
-use async_trait::async_trait;
 use openalpaca_llm::{ToolDefinition, WebSearchConfig};
 use std::sync::Arc;
 
@@ -10,7 +9,6 @@ struct WebSearchTool {
     config: Arc<ArcSwap<WebSearchConfig>>,
 }
 
-#[async_trait]
 impl BuiltInTool for WebSearchTool {
     async fn execute(&self, arguments: &serde_json::Value) -> Result<String, String> {
         let query = arguments
@@ -125,7 +123,7 @@ pub(super) fn web_search_tool(config: Arc<ArcSwap<WebSearchConfig>>) -> Register
             strict: Some(true),
             input_examples: None,
         },
-        backend: ToolBackend::BuiltIn(Arc::new(WebSearchTool { config })),
+        backend: ToolBackend::built_in(WebSearchTool { config }),
         provides_capabilities: vec!["web_access".into()],
         exempt_from_timeout: false,
         annotations: annotations_for_builtin("web_search"),

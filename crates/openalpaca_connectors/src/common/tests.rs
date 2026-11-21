@@ -369,7 +369,7 @@ mod confirmation {
         let response = rx.try_recv().expect("broker should deliver response");
         assert!(response.approved);
         // Queue drained
-        assert!(pending.get(&42u64).map(|q| q.is_empty()).unwrap_or(true));
+        assert!(pending.get(&42u64).is_none_or(|q| q.is_empty()));
     }
 
     #[test]
@@ -894,9 +894,9 @@ mod attachments {
     impl HomeStoreGuard {
         fn set(path: &Path) -> Self {
             let lock = ENV_LOCK.lock().unwrap_or_else(|p| p.into_inner());
-            let prev = std::env::var_os(openalpaca_storage::store::HOME_STORE_ENV);
+            let prev = std::env::var_os(openalpaca_app_support::paths::HOME_STORE_ENV);
             // SAFETY: serialized by ENV_LOCK — this module's only writer.
-            unsafe { std::env::set_var(openalpaca_storage::store::HOME_STORE_ENV, path) };
+            unsafe { std::env::set_var(openalpaca_app_support::paths::HOME_STORE_ENV, path) };
             Self { _lock: lock, prev }
         }
     }
@@ -906,9 +906,11 @@ mod attachments {
             // SAFETY: as above — still holding ENV_LOCK.
             match self.prev.take() {
                 Some(v) => unsafe {
-                    std::env::set_var(openalpaca_storage::store::HOME_STORE_ENV, v)
+                    std::env::set_var(openalpaca_app_support::paths::HOME_STORE_ENV, v)
                 },
-                None => unsafe { std::env::remove_var(openalpaca_storage::store::HOME_STORE_ENV) },
+                None => unsafe {
+                    std::env::remove_var(openalpaca_app_support::paths::HOME_STORE_ENV)
+                },
             }
         }
     }

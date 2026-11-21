@@ -43,6 +43,7 @@ const builtin = {
   invocations_today: 4,
   version: "1.0.0",
   author: "builtin",
+  output_schema: null,
 };
 
 const fromMcp = {
@@ -55,6 +56,7 @@ const fromMcp = {
   invocations_today: 12,
   version: "1.4.0",
   author: "mcp:github",
+  output_schema: null,
 };
 
 const health = {

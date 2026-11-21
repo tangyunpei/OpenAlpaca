@@ -285,3 +285,29 @@ fn test_history_for_task_chronological_and_scoped() {
 
     assert!(repo.get_history_for_task("no-such-task").unwrap().is_empty());
 }
+
+/// AGENT-SETS: a stored set lives in the row's `config` column, which the
+/// template's rewrite of the row (`upsert`) leaves as it is.
+#[test]
+fn a_stored_set_outlasts_the_rows_rewrite_and_clears_with_none() {
+    let db = setup_db();
+    let repo = SubAgentRepository::new(&db);
+    assert!(!repo.store_set("sa1", Some("{}")).unwrap(), "no row yet");
+    repo.upsert(&make_config("sa1", "Researcher")).unwrap();
+    assert_eq!(repo.stored_set("sa1").unwrap(), None);
+
+    assert!(
+        repo.store_set("sa1", Some(r#"{"llm":{"model":"m"}}"#))
+            .unwrap()
+    );
+    repo.upsert(&make_config("sa1", "Researcher, rewritten"))
+        .unwrap();
+    assert_eq!(
+        repo.stored_set("sa1").unwrap().as_deref(),
+        Some(r#"{"llm":{"model":"m"}}"#)
+    );
+
+    assert!(repo.store_set("sa1", None).unwrap());
+    assert_eq!(repo.stored_set("sa1").unwrap(), None);
+    assert_eq!(repo.stored_set("absent").unwrap(), None);
+}

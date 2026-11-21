@@ -13,7 +13,7 @@ use super::*;
 use crate::keys::key_encryption::KeyEncryptor;
 use crate::routing::cost_tracker::CostTracker;
 use crate::routing::model_registry::ModelRegistry;
-use crate::{ChatRequest, ChatResponse, LlmProvider, error::LlmError};
+use crate::{ChatRequest, ChatResponse, DynLlmProvider, LlmProvider, error::LlmError};
 use std::path::Path;
 use std::sync::Mutex;
 
@@ -27,7 +27,7 @@ fn hand_authored() -> String {
 
 /// The default model the fixture names. Anthropic's, and one the compiled
 /// registry knows — so the 409 guard resolves it on the first rung.
-const DEFAULT_MODEL: &str = "claude-haiku-4-5-20251001";
+const DEFAULT_MODEL: &str = "claude-haiku-5-5";
 
 fn hand_authored_with(model: &str) -> String {
     format!(
@@ -55,7 +55,6 @@ strategy = "round_robin"
 /// to remove without any provider feature being compiled in.
 struct StubProvider;
 
-#[async_trait::async_trait]
 impl LlmProvider for StubProvider {
     fn name(&self) -> &str {
         "stub"
@@ -129,7 +128,7 @@ impl Harness {
     fn register_stub(&self, provider_type: ProviderType) {
         self.router.register_provider(
             provider_type,
-            Arc::new(StubProvider),
+            DynLlmProvider::new_arc(StubProvider),
             KeyPool::new(vec![], SelectionStrategy::RoundRobin),
         );
     }
@@ -270,7 +269,7 @@ async fn a_failed_write_leaves_the_router_untouched() {
     assert!(
         h.router
             .model_registry()
-            .resolve_provider("gpt-5.2")
+            .resolve_provider("gpt-6.1-sol")
             .is_some(),
         "and its models are still registered"
     );
@@ -310,7 +309,7 @@ async fn the_default_models_provider_cannot_be_disabled() {
     match &err {
         SetProviderEnabledError::IsDefaultProvider { provider, model } => {
             assert_eq!(provider, "anthropic");
-            assert_eq!(model, "claude-haiku-4-5-20251001");
+            assert_eq!(model, "claude-haiku-5-5");
         }
         other => panic!("{other:?}"),
     }
@@ -334,7 +333,7 @@ async fn a_disable_unloads_the_provider_and_strips_its_models() {
     assert!(
         h.router
             .model_registry()
-            .resolve_provider("gpt-5.2")
+            .resolve_provider("gpt-6.1-sol")
             .is_some()
     );
 
@@ -343,7 +342,7 @@ async fn a_disable_unloads_the_provider_and_strips_its_models() {
     assert_eq!(outcome.id, "openai");
     assert!(!outcome.enabled);
     assert!(
-        outcome.removed_models.iter().any(|m| m == "gpt-5.2"),
+        outcome.removed_models.iter().any(|m| m == "gpt-6.1-sol"),
         "the stripped models are reported: {:?}",
         outcome.removed_models
     );
@@ -354,14 +353,14 @@ async fn a_disable_unloads_the_provider_and_strips_its_models() {
     assert!(
         h.router
             .model_registry()
-            .resolve_provider("gpt-5.2")
+            .resolve_provider("gpt-6.1-sol")
             .is_none()
     );
     // Anthropic is untouched.
     assert!(
         h.router
             .model_registry()
-            .resolve_provider("claude-sonnet-4-6")
+            .resolve_provider("claude-sonnet-5-5")
             .is_some()
     );
 }
@@ -374,7 +373,7 @@ async fn an_enable_restores_the_catalogue_the_disable_stripped() {
     assert!(
         h.router
             .model_registry()
-            .resolve_provider("gpt-5.2")
+            .resolve_provider("gpt-6.1-sol")
             .is_none()
     );
 
@@ -388,7 +387,7 @@ async fn an_enable_restores_the_catalogue_the_disable_stripped() {
     assert!(
         h.router
             .model_registry()
-            .resolve_provider("gpt-5.2")
+            .resolve_provider("gpt-6.1-sol")
             .is_some(),
         "otherwise the model picker stays empty until the daemon restarts"
     );
@@ -415,7 +414,7 @@ async fn an_orchestrator_write_goes_through_the_same_locked_writer_as_a_toggle()
 
     h.service
         .update_orchestrator_config(UpdateOrchestratorRequest {
-            model: "claude-sonnet-4-6".to_string(),
+            model: "claude-sonnet-5-5".to_string(),
             fallback_models: vec![],
         })
         .unwrap();
@@ -430,7 +429,7 @@ async fn an_orchestrator_write_goes_through_the_same_locked_writer_as_a_toggle()
         text.contains("enabled = false"),
         "the toggle's bit survived the orchestrator write:\n{text}"
     );
-    assert!(text.contains(r#"model = "claude-sonnet-4-6""#), "{text}");
+    assert!(text.contains(r#"model = "claude-sonnet-5-5""#), "{text}");
     assert!(text.contains(SECRET), "and the encrypted key is still verbatim");
 }
 
@@ -451,14 +450,14 @@ async fn an_orchestrator_write_moves_the_routers_default_model_at_once() {
 
     h.service
         .update_orchestrator_config(UpdateOrchestratorRequest {
-            model: "claude-sonnet-4-6".to_string(),
+            model: "claude-sonnet-5-5".to_string(),
             fallback_models: vec![],
         })
         .unwrap();
 
     assert_eq!(
         h.router.default_model(),
-        "claude-sonnet-4-6",
+        "claude-sonnet-5-5",
         "the write is the hot path's trigger, not the watcher"
     );
 }
@@ -474,7 +473,7 @@ async fn a_failed_orchestrator_write_leaves_the_default_model_alone() {
     let err = h
         .service
         .update_orchestrator_config(UpdateOrchestratorRequest {
-            model: "claude-sonnet-4-6".to_string(),
+            model: "claude-sonnet-5-5".to_string(),
             fallback_models: vec![],
         })
         .expect_err("the writer was told to fail");
@@ -603,11 +602,12 @@ context = 8192
 /// through is the outcome R61 exists to prevent: a default model served by a
 /// provider nobody loaded.
 ///
-/// Staging the race needs a second **process**: the lock is POSIX `fcntl`, which
-/// is per process, so a competing lock taken in this one would not contend at
-/// all. The helper holds the lock while the default model moves under the
-/// disable that is waiting for it. No `python3` on PATH means the race cannot be
-/// staged, and the test says so rather than passing quietly.
+/// The race is staged from a second **process**, as another writer of the file
+/// would hold it: the helper takes the same `flock` lock the service takes and
+/// holds it while the default model moves under the disable that is waiting
+/// for it. (A writer in this process now contends too; the next test pins
+/// that.) No `python3` on PATH means the race cannot be staged, and the test
+/// says so rather than passing quietly.
 #[tokio::test]
 async fn the_default_model_refusal_is_read_under_the_write_lock() {
     use std::io::{BufRead, BufReader, Write};
@@ -628,7 +628,7 @@ async fn the_default_model_refusal_is_read_under_the_write_lock() {
         .arg(
             "import fcntl, sys\n\
              f = open(sys.argv[1], 'a')\n\
-             fcntl.lockf(f, fcntl.LOCK_EX)\n\
+             fcntl.flock(f, fcntl.LOCK_EX)\n\
              print('locked', flush=True)\n\
              sys.stdin.readline()\n",
         )
@@ -667,7 +667,7 @@ async fn the_default_model_refusal_is_read_under_the_write_lock() {
     std::thread::sleep(std::time::Duration::from_millis(200));
 
     // The other writer points the default model at openai, then lets go.
-    std::fs::write(&h.path, hand_authored_with("gpt-5.2")).unwrap();
+    std::fs::write(&h.path, hand_authored_with("gpt-6.1-sol")).unwrap();
     helper.stdin.take().unwrap().write_all(b"\n").unwrap();
     helper.wait().unwrap();
 
@@ -676,7 +676,7 @@ async fn the_default_model_refusal_is_read_under_the_write_lock() {
         .unwrap()
         .expect_err("the provider now serving the default model was disabled");
     assert!(
-        matches!(&err, SetProviderEnabledError::IsDefaultProvider { model, .. } if model == "gpt-5.2"),
+        matches!(&err, SetProviderEnabledError::IsDefaultProvider { model, .. } if model == "gpt-6.1-sol"),
         "{err:?}"
     );
     assert!(
@@ -689,13 +689,66 @@ async fn the_default_model_refusal_is_read_under_the_write_lock() {
     );
 }
 
+/// M17: a second `llm.toml` writer in this same process waits for the write
+/// lock. The lock is a `flock` lock, which belongs to the open file
+/// description, so a lock held on one thread stops `persist_only` on another
+/// until it is dropped — two writers on one GUI screen serialise instead of
+/// losing an update. `lock()` has no timeout, so this test bounds itself with
+/// `recv_timeout`, never a bare join.
+#[test]
+fn a_second_writer_in_this_process_waits_for_the_write_lock() {
+    use std::sync::mpsc::{RecvTimeoutError, channel};
+    use std::time::Duration;
+
+    let h = Arc::new(Harness::new());
+    h.register_stub(ProviderType::Anthropic);
+    h.register_stub(ProviderType::OpenAI);
+
+    let held = crate::keys::key_encryption::acquire_config_write_lock(&h.path).unwrap();
+    let (done, finished) = channel();
+    let disabler = {
+        let h = Arc::clone(&h);
+        // Its own thread and its own runtime: the call blocks on the lock.
+        std::thread::spawn(move || {
+            let result = tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+                .unwrap()
+                .block_on(h.service.set_provider_enabled("openai", false));
+            let _ = done.send(result.map_err(|e| format!("{e:?}")));
+        })
+    };
+
+    let while_held = finished.recv_timeout(Duration::from_millis(500));
+    let written_while_held = h.writes.lock().unwrap().len();
+    // Released before any assert can panic, so the writer is never left
+    // blocked behind a failed test.
+    drop(held);
+
+    assert!(
+        matches!(while_held, Err(RecvTimeoutError::Timeout)),
+        "the second writer finished while the first held the lock: {while_held:?}"
+    );
+    assert_eq!(written_while_held, 0, "a write landed under a held lock");
+    let result = finished
+        .recv_timeout(Duration::from_secs(10))
+        .expect("the second writer did not finish once the lock was released");
+    result.unwrap();
+    disabler.join().unwrap();
+    assert_eq!(
+        h.writes.lock().unwrap().len(),
+        1,
+        "the waiting write landed once"
+    );
+}
+
 // ── The runtime registration path's local-provider arm (L6, L7) ─────────────
 //
 // The other half of "both construction paths must agree": a provider the owner
 // toggles on after boot is built here, not by `build_router`. Feature-gated for
 // the reason given at the top of this file — these drive a real
 // `OllamaProvider` against a loopback mock server.
-#[cfg(all(feature = "ollama", feature = "openai"))]
+#[cfg(feature = "ollama")]
 mod local_provider_registration {
     use super::*;
     use crate::config::llm_config::LlmRuntimeConfig;
@@ -785,7 +838,6 @@ base_url = "{base_url}/v1"
             thinking: None,
             context_management: None,
             fallback_models: Vec::new(),
-            ephemeral_system_notice: None,
         }
     }
 

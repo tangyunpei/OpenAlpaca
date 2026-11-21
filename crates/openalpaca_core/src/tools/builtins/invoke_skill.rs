@@ -22,7 +22,6 @@ use crate::orchestrator::skill_catalog::SkillCatalog;
 use crate::runner::LoopFinishReason;
 use crate::tools::registry::{BuiltInTool, ToolContext, ToolRegistry};
 use arc_swap::ArcSwap;
-use async_trait::async_trait;
 use chrono::Utc;
 use openalpaca_llm::{LlmRouter, ToolDefinition};
 use openalpaca_storage::SkillExecutionEntry;
@@ -129,7 +128,6 @@ impl InvokeSkillTool {
     }
 }
 
-#[async_trait]
 impl BuiltInTool for InvokeSkillTool {
     async fn execute(&self, _arguments: &serde_json::Value) -> Result<String, String> {
         Err("invoke_skill requires execution context — use execute_with_context".to_string())
@@ -183,12 +181,20 @@ impl BuiltInTool for InvokeSkillTool {
         });
 
         // Snapshot hot-reloadable config values before the await.
-        let (auto_approve, circuit_breaker, confirmation_timeout_secs) = {
+        let (
+            auto_approve,
+            circuit_breaker,
+            confirmation_timeout_secs,
+            max_tool_runtime_secs,
+            max_tool_runtime_ceiling_secs,
+        ) = {
             let cfg = self.daemon_config.load();
             (
                 cfg.security.auto_approve_confirmations,
                 cfg.security.circuit_breaker.clone(),
                 cfg.execution.agent_defaults.confirmation_timeout_secs,
+                cfg.execution.agent_defaults.max_tool_runtime_secs,
+                cfg.execution.agent_defaults.max_tool_runtime_ceiling_secs,
             )
         };
 
@@ -211,6 +217,8 @@ impl BuiltInTool for InvokeSkillTool {
             auto_approve,
             circuit_breaker,
             confirmation_timeout_secs,
+            max_tool_runtime_secs,
+            max_tool_runtime_ceiling_secs,
         );
 
         // Map an error finish with no content to Err BEFORE events/telemetry,
@@ -291,7 +299,10 @@ impl BuiltInTool for InvokeSkillTool {
                     .ok()
                     .map(|r| r.total_output_tokens as i32)
                     .unwrap_or(0),
-                cost_usd: result.as_ref().ok().map(|r| r.estimated_cost).unwrap_or(0.0),
+                // UPR-1: what this invocation's requests cost, the last
+                // included, not the tracker's total for its agent id, which
+                // every nested invocation of the skill shares.
+                cost_usd: result.as_ref().ok().map(|r| r.requests_cost).unwrap_or(0.0),
                 model_used: result.as_ref().ok().and_then(|r| r.model_used.clone()),
                 query_preview: if store_preview {
                     Some(query.chars().take(200).collect())
@@ -332,7 +343,6 @@ mod tests {
         requests: Mutex<Vec<Vec<ChatMessage>>>,
     }
 
-    #[async_trait]
     impl LlmProvider for MockProvider {
         fn name(&self) -> &str {
             "mock"
@@ -351,7 +361,7 @@ mod tests {
             Ok(ChatResponse {
                 content: "skill output".to_string(),
                 tool_calls: vec![],
-                model: "claude-sonnet-4-20250514".to_string(),
+                model: "claude-sonnet-4-6".to_string(),
                 usage: Usage {
                     input_tokens: 10,
                     output_tokens: 5,
@@ -359,6 +369,7 @@ mod tests {
                 },
                 finish_reason: FinishReason::Stop,
                 thinking: None,
+                echo: None,
                 parts: None,
             })
         }
@@ -392,7 +403,7 @@ Echo the user's query back to them.
         let router = Arc::new(LlmRouter::single_provider(
             provider,
             ProviderType::Anthropic,
-            "claude-sonnet-4-20250514".to_string(),
+            "claude-sonnet-4-6".to_string(),
         ));
         InvokeSkillTool::new(
             catalog,
@@ -575,7 +586,6 @@ Never runs.
     /// with empty content.
     struct FailingProvider;
 
-    #[async_trait]
     impl LlmProvider for FailingProvider {
         fn name(&self) -> &str {
             "failing"
@@ -586,7 +596,10 @@ Never runs.
         }
 
         async fn chat(&self, _request: ChatRequest) -> Result<ChatResponse, LlmError> {
-            Err(LlmError::Http("provider down".to_string()))
+            Err(LlmError::Transport {
+                kind: openalpaca_llm::error::TransportKind::ConnectRefused,
+                message: "provider down".to_string(),
+            })
         }
     }
 
@@ -598,7 +611,7 @@ Never runs.
         let router = Arc::new(LlmRouter::single_provider(
             Arc::new(FailingProvider),
             ProviderType::Anthropic,
-            "claude-sonnet-4-20250514".to_string(),
+            "claude-sonnet-4-6".to_string(),
         ));
         let tool = InvokeSkillTool::new(
             catalog,
@@ -639,6 +652,54 @@ Never runs.
         );
     }
 
+    /// **UPR-1** (the advisor's (b), which the owner took on 2026-11-17): a
+    /// nested skill's execution record carries what its loop's requests
+    /// cost, each as the caps counted it (`requests_cost`), the request that
+    /// ended the loop included. On the parent it read `estimated_cost`, the
+    /// tracker's total at the top of the last round, so a skill answered in
+    /// one request was recorded at $0.
+    #[tokio::test]
+    async fn a_nested_skills_record_carries_what_its_requests_cost() {
+        let tmp = TempDir::new().unwrap();
+        let dir = TempDir::new().unwrap();
+        let db = openalpaca_storage::Database::open(&dir.path().join("test.db")).unwrap();
+        let provider = mock_provider();
+        let router = Arc::new(LlmRouter::single_provider(
+            provider.clone(),
+            ProviderType::Anthropic,
+            "claude-sonnet-4-6".to_string(),
+        ));
+        let tool = InvokeSkillTool::new(
+            fixture_catalog(&tmp),
+            Arc::new(ToolRegistry::new().unwrap()),
+            router.clone(),
+            EventBus::new(64),
+            Some(db.clone()),
+            Arc::new(ArcSwap::from_pointee(DaemonConfig::default())),
+            1.0,
+        );
+
+        tool.execute_with_context(
+            &serde_json::json!({"skill": "echo-skill", "query": "say hi"}),
+            &ToolContext::default(),
+        )
+        .await
+        .unwrap();
+        assert_eq!(provider.call_count.load(Ordering::SeqCst), 1, "one request");
+
+        let counted = router.cost_tracker.total_cost().await;
+        assert!(counted > 0.0, "the request was counted: ${counted}");
+        let health = SkillExecutionRepository::new(&db)
+            .all_skill_health()
+            .unwrap();
+        assert_eq!(health.len(), 1, "one record");
+        assert!(
+            (health[0].avg_cost_usd - counted).abs() < 1e-12,
+            "the record says what the caps counted: ${} against ${counted}",
+            health[0].avg_cost_usd
+        );
+    }
+
     #[test]
     fn test_tool_definition_shape() {
         let def = invoke_skill_tool_definition();
@@ -650,5 +711,76 @@ Never runs.
             .map(|v| v.as_str().unwrap())
             .collect();
         assert_eq!(required, vec!["skill", "query"]);
+    }
+
+    // ── N-TOOL-1b (B-11): the nested skill tier's per-tool bound ──
+
+    /// A skill run through `invoke_skill` — the nested tier, its executor
+    /// built from the daemon config — has its tool calls cut at
+    /// `[execution.agent_defaults] max_tool_runtime_secs` (1 s here), and its
+    /// `shell_execute` definition states that figure and the configured
+    /// ceiling (7 s here, not the default 600).
+    #[tokio::test]
+    async fn a_nested_skills_tool_call_is_cut_at_the_daemons_per_tool_bound() {
+        let gp = crate::test_util::GuardedProject::new();
+        let tmp = TempDir::new().unwrap();
+        write_skill(
+            tmp.path(),
+            "builder",
+            r#"---
+name: "Builder"
+description: "Builds things"
+tools:
+  allow:
+    - shell_execute
+---
+Build it.
+"#,
+        );
+        let catalog = Arc::new(SkillCatalog::new());
+        catalog.scan_directory(tmp.path(), SkillScope::Project);
+        let registry = Arc::new(ToolRegistry::new().unwrap());
+        registry.register(crate::test_util::slow_shell()).unwrap();
+        let provider = crate::test_util::CallsOneTool::new(
+            "shell_execute",
+            serde_json::json!({"command": "make"}),
+        );
+        let router = Arc::new(LlmRouter::single_provider(
+            provider.clone(),
+            ProviderType::Anthropic,
+            "claude-sonnet-4-6".to_string(),
+        ));
+        let tool = InvokeSkillTool::new(
+            catalog,
+            registry,
+            router,
+            EventBus::new(64),
+            None,
+            Arc::new(ArcSwap::from_pointee(
+                crate::test_util::daemon_config_with_agent_defaults(
+                    "max_tool_runtime_secs = 1\nmax_tool_runtime_ceiling_secs = 7",
+                ),
+            )),
+            1.0,
+        );
+
+        tool.execute_with_context(
+            &serde_json::json!({"skill": "builder", "query": "build it"}),
+            &gp.ctx(),
+        )
+        .await
+        .expect("the skill runs");
+
+        let result = provider.tool_result();
+        assert!(
+            result.contains("Tool 'shell_execute' timed out after 1s"),
+            "the nested skill's call ran past the daemon's bound: {result:?}"
+        );
+        let description = provider.description_of("shell_execute");
+        assert!(
+            description.contains("still running after 1 second is stopped"),
+            "{description}"
+        );
+        assert!(description.contains("up to 7 seconds"), "{description}");
     }
 }

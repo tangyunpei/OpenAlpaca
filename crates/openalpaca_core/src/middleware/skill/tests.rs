@@ -459,3 +459,72 @@ fn the_closing_delimiter_is_a_whole_line() {
     let fm = parse_skill_frontmatter("---\nname: N\ndescription: d\n---").expect("no newline");
     assert_eq!(fm.name, "N");
 }
+
+/// Step 9's golden (M36): each variant's text byte for byte, under `{}` and
+/// `{:#}`, with no `source()` — written against the hand-written `Display`
+/// and kept on the derive. `InvalidYaml` is built with a literal payload, so
+/// this pins its frame, not the YAML crate's text. The `match` has no `_`
+/// arm, so a new variant does not compile without its row.
+#[test]
+fn every_skill_parse_error_prints_its_text_whole_and_has_no_source() {
+    let rows = [
+        SkillParseError::MissingFrontmatter,
+        SkillParseError::UnterminatedFrontmatter,
+        SkillParseError::MissingField("description"),
+        SkillParseError::InvalidYaml("msg \u{202e}x\u{200b}".to_string()),
+        SkillParseError::ReadFailed("permission denied".to_string()),
+        SkillParseError::TooLarge {
+            bytes: 300_000,
+            limit: 262_144,
+        },
+        SkillParseError::IdMismatch {
+            declared: "a".to_string(),
+            directory: "b".to_string(),
+        },
+        SkillParseError::DeprecatedField {
+            field: "version",
+            note: "Remove it.",
+        },
+        SkillParseError::SlashConflict {
+            command: "plan".to_string(),
+            other: "planner".to_string(),
+        },
+        SkillParseError::UnknownKey("colour".to_string()),
+        SkillParseError::NoTools,
+        SkillParseError::StaleShippedFile {
+            file: "/c/skills/x/SKILL.md".to_string(),
+            skill: "x".to_string(),
+        },
+    ];
+    for error in rows {
+        let want = match &error {
+            SkillParseError::MissingFrontmatter => "Missing YAML frontmatter",
+            SkillParseError::UnterminatedFrontmatter => "Unterminated YAML frontmatter",
+            SkillParseError::MissingField(_) => "Missing required frontmatter field 'description'",
+            SkillParseError::InvalidYaml(_) => "Invalid YAML: msg \u{202e}x\u{200b}",
+            SkillParseError::ReadFailed(_) => "Could not read SKILL.md: permission denied",
+            SkillParseError::TooLarge { .. } => {
+                "SKILL.md is 300000 bytes, over the 262144-byte limit"
+            }
+            SkillParseError::IdMismatch { .. } => {
+                "Frontmatter id 'a' does not match directory name 'b'"
+            }
+            SkillParseError::DeprecatedField { .. } => {
+                "'version' is deprecated and has no effect. Remove it."
+            }
+            SkillParseError::SlashConflict { .. } => {
+                "Slash command '/plan' is also claimed by skill 'planner'; this skill now answers it"
+            }
+            SkillParseError::UnknownKey(_) => "Unknown frontmatter key 'colour' is ignored",
+            SkillParseError::NoTools => {
+                "The skill declares no tools: 'requires_capabilities', 'tools.allow', 'scripts' and 'depends_on' are all empty, so it runs with none"
+            }
+            SkillParseError::StaleShippedFile { .. } => {
+                "/c/skills/x/SKILL.md is the version an earlier build shipped; the built-in x's differs, and this override runs the old file"
+            }
+        };
+        assert_eq!(error.to_string(), want);
+        assert_eq!(format!("{error:#}"), want);
+        assert!(std::error::Error::source(&error).is_none(), "{want}");
+    }
+}

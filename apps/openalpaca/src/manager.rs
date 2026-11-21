@@ -1,10 +1,11 @@
 use anyhow::{Context, Result};
 use nix::sys::signal::{self, Signal};
 use nix::unistd::Pid;
-use openalpaca_storage::{daemon_lifecycle, discovery, store};
+use openalpaca_app_support::{daemon_lifecycle, discovery, paths};
+use openalpaca_storage::store;
 use std::fs;
 use std::path::{Path, PathBuf};
-use std::process::{Command, Stdio};
+use std::process::{Child, Command, Stdio};
 use sysinfo::System;
 
 const DAEMON_BIN_ENV: &str = "OPENALPACA_DAEMON_BIN";
@@ -23,25 +24,77 @@ enum GuiLaunch {
     DevTauri { workspace_root: PathBuf },
 }
 
-/// Start the Daemon if not running.
-pub fn start_daemon() -> Result<()> {
+/// The daemon process [`start_daemon`] spawned, kept so the wait after the
+/// start sees it exit (`reuse::Spawned`): dropping it, as the start did
+/// before, left the wait to find out only from the files.
+pub struct SpawnedDaemon {
+    child: Child,
+    /// Whether the child is the development fallback's `cargo run`, which
+    /// exits when the daemon it runs does.
+    cargo_run: bool,
+    /// The daemon log's length just before the spawn.
+    log_start: u64,
+}
+
+impl SpawnedDaemon {
+    pub(crate) fn new(child: Child, cargo_run: bool, log_start: u64) -> Self {
+        Self {
+            child,
+            cargo_run,
+            log_start,
+        }
+    }
+}
+
+impl crate::reuse::Spawned for SpawnedDaemon {
+    fn pid(&self) -> u32 {
+        self.child.id()
+    }
+
+    fn who(&self) -> String {
+        let pid = self.child.id();
+        if self.cargo_run {
+            format!("The `cargo run` this start spawned for the daemon (pid {pid})")
+        } else {
+            format!("The daemon this start spawned (pid {pid})")
+        }
+    }
+
+    fn exited(&mut self) -> Option<String> {
+        // An error asking is no answer: the wait goes on as it would have
+        // without the child, on the files alone.
+        self.child
+            .try_wait()
+            .ok()
+            .flatten()
+            .map(|status| status.to_string())
+    }
+
+    fn log_start(&self) -> u64 {
+        self.log_start
+    }
+}
+
+/// Start the Daemon if not running: the process spawned, `None` when one
+/// was running already.
+pub fn start_daemon() -> Result<Option<SpawnedDaemon>> {
     if is_daemon_running() {
         println!("⚠️  Daemon is already running.");
-        return Ok(());
+        return Ok(None);
     }
 
     println!("🚀 Starting OpenAlpaca Daemon...");
 
     let runtime_dir = ensure_runtime_dirs()?;
-    let config_dir = store::ensure_runtime_config_dir()?;
-    store::logs_dir().context("Failed to create the daemon log directory")?;
-    let log_path = store::daemon_log_path()?;
+    let config_dir = paths::ensure_runtime_config_dir()?;
+    paths::logs_dir().context("Failed to create the daemon log directory")?;
+    let log_path = paths::daemon_log_path()?;
     // Bound it before opening it: a log that is already past its cap becomes
     // `daemon.log.1` and this run starts a fresh one. A rotation that fails is
     // reported and not fatal — a daemon that will not start because its log
     // could not be renamed would be the worse bug. The rotation is the
     // store's, shared with the GUI sidecar, the other launcher.
-    if let Err(e) = store::rotate_daemon_log() {
+    if let Err(e) = paths::rotate_daemon_log() {
         println!("⚠️  Could not rotate the daemon log ({e:#}); appending to it as it is.");
     }
     // Append, not truncate: the rotation is what bounds the file, so a restart
@@ -51,6 +104,9 @@ pub fn start_daemon() -> Result<()> {
         .append(true)
         .open(&log_path)
         .with_context(|| format!("Failed to open daemon log file: {}", log_path.display()))?;
+    // Where this run's lines begin, for the tail the wait shows if the
+    // daemon exits at boot; an unreadable length shows the whole log's.
+    let log_start = log_file.metadata().map(|m| m.len()).unwrap_or(0);
 
     let current_exe = std::env::current_exe().context("Failed to resolve current executable")?;
     let launch = resolve_daemon_launch(&current_exe)?;
@@ -63,7 +119,12 @@ pub fn start_daemon() -> Result<()> {
     .stderr(Stdio::from(log_file))
     .stdin(Stdio::null());
 
-    cmd.spawn().context("Failed to spawn daemon process")?;
+    let child = cmd.spawn().context("Failed to spawn daemon process")?;
+    let spawned = SpawnedDaemon::new(
+        child,
+        matches!(launch, DaemonLaunch::CargoRun { .. }),
+        log_start,
+    );
 
     match launch {
         DaemonLaunch::Binary(path) => {
@@ -74,7 +135,7 @@ pub fn start_daemon() -> Result<()> {
         }
     }
     println!("📝 Daemon log: {}", log_path.display());
-    Ok(())
+    Ok(Some(spawned))
 }
 
 /// What [`stop_daemon`] did.
@@ -116,7 +177,7 @@ pub fn stop_daemon() -> Result<StopRequest> {
 /// Whether `discovery.json` names a live `openalpacad` (not a recycled PID).
 ///
 /// The CLI's one name for the predicate; the implementation is shared with
-/// the app shell in `openalpaca_storage::daemon_lifecycle`.
+/// the app shell in `openalpaca_app_support::daemon_lifecycle`.
 pub fn is_daemon_running() -> bool {
     daemon_lifecycle::running_daemon_pid().is_some()
 }
@@ -136,10 +197,7 @@ pub fn start_gui() -> Result<()> {
         }
         GuiLaunch::DevTauri { workspace_root } => {
             ensure_runtime_dirs()?;
-            let log_path = store::logs_dir()?.join("gui.log");
-            let log_file = fs::File::create(&log_path).with_context(|| {
-                format!("Failed to create GUI log file: {}", log_path.display())
-            })?;
+            let (log_path, log_file) = open_gui_dev_log()?;
             let gui_path = workspace_root.join("apps/openalpaca-gui");
 
             Command::new("bun")
@@ -157,10 +215,30 @@ pub fn start_gui() -> Result<()> {
                 })?;
 
             println!("✅ GUI started via development fallback.");
-            println!("📝 GUI log: {}", log_path.display());
+            println!("📝 GUI dev log: {}", log_path.display());
         }
     }
     Ok(())
+}
+
+/// Open `state/logs/gui-dev.log` to append the output of `bun run tauri dev`
+/// (Q14). `gui.log` is the app shell's own log, which the shell this launch
+/// starts writes itself, so a dev launch never truncates or writes it; its
+/// own file is appended across launches and bounded by the store's rotation
+/// (16 MB, three older generations), like `daemon.log`. A rotation that fails
+/// is reported and not fatal.
+fn open_gui_dev_log() -> Result<(PathBuf, fs::File)> {
+    paths::logs_dir().context("Failed to create the GUI log directory")?;
+    let log_path = paths::gui_dev_log_path()?;
+    if let Err(e) = paths::rotate_gui_dev_log() {
+        println!("⚠️  Could not rotate the GUI dev log ({e:#}); appending to it as it is.");
+    }
+    let log_file = fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(&log_path)
+        .with_context(|| format!("Failed to open GUI dev log file: {}", log_path.display()))?;
+    Ok((log_path, log_file))
 }
 
 /// Stop GUI (Naive approach: lookup by name or port?)
@@ -221,14 +299,14 @@ fn daemon_launch_command(launch: &DaemonLaunch, runtime_dir: &Path, config_dir: 
     // — mark it so `GET /v1/status` can tell it apart from a daemon nobody
     // pointed at the file (Important #3, T44 fix round 1). The GUI sidecar
     // sets the same marker for the same reason (T30).
-    cmd.env(store::MANAGED_LOG_ENV, "1");
+    cmd.env(paths::MANAGED_LOG_ENV, "1");
     cmd
 }
 
 fn ensure_runtime_dirs() -> Result<PathBuf> {
     let home_root = store::ensure_store(&store::StoreScope::Home)
         .context("Failed to create the OpenAlpaca home store")?;
-    store::ensure_runtime_config_dir().context("Failed to create the runtime config directory")?;
+    paths::ensure_runtime_config_dir().context("Failed to create the runtime config directory")?;
     Ok(home_root)
 }
 
@@ -287,7 +365,7 @@ fn resolve_gui_launch(current_exe: &Path) -> Result<GuiLaunch> {
     resolve_gui_launch_from_inputs(
         current_exe,
         env_path(GUI_APP_ENV),
-        home_dir(),
+        paths::user_home(),
         Path::new("/Applications/openalpaca-gui.app"),
     )
 }
@@ -368,12 +446,6 @@ fn find_workspace_root(current_exe: &Path, required_relative_path: &str) -> Opti
     None
 }
 
-fn home_dir() -> Option<PathBuf> {
-    std::env::var_os("HOME")
-        .or_else(|| std::env::var_os("USERPROFILE"))
-        .map(PathBuf::from)
-}
-
 fn find_in_path(binary_name: &str) -> Option<PathBuf> {
     let path_var = std::env::var_os("PATH")?;
     std::env::split_paths(&path_var)
@@ -437,6 +509,52 @@ mod tests {
     use super::*;
     use std::fs;
 
+    /// Q14: a dev launch writes its own `gui-dev.log`, appended and rotated
+    /// past the store's cap, and leaves `gui.log` — the shell's own log —
+    /// exactly as it was.
+    #[test]
+    fn a_dev_launch_appends_to_gui_dev_log_and_truncates_nothing() {
+        let tmp = tempfile::tempdir().expect("a scratch root");
+        let _env = crate::test_util::EnvSandbox::enter(tmp.path());
+        let logs = paths::logs_dir().expect("the scratch logs dir");
+        fs::write(logs.join("gui.log"), "the shell's own line\n").unwrap();
+        fs::write(logs.join("gui-dev.log"), "an earlier dev launch\n").unwrap();
+
+        let (path, mut file) = open_gui_dev_log().expect("the dev log opens");
+        assert_eq!(path, logs.join("gui-dev.log"));
+        std::io::Write::write_all(&mut file, b"this dev launch\n").unwrap();
+        drop(file);
+
+        assert_eq!(
+            fs::read_to_string(logs.join("gui-dev.log")).unwrap(),
+            "an earlier dev launch\nthis dev launch\n",
+            "the dev log is appended, never truncated"
+        );
+        assert_eq!(
+            fs::read_to_string(logs.join("gui.log")).unwrap(),
+            "the shell's own line\n",
+            "a dev launch leaves the shell's gui.log alone"
+        );
+
+        // A gui-dev.log past the store's cap is rotated before it is opened,
+        // like daemon.log; gui.log is still left alone.
+        fs::File::create(logs.join("gui-dev.log"))
+            .unwrap()
+            .set_len(paths::DAEMON_LOG_MAX_BYTES + 1)
+            .unwrap();
+        let (_, file) = open_gui_dev_log().expect("the dev log opens again");
+        assert_eq!(file.metadata().unwrap().len(), 0, "a fresh gui-dev.log");
+        assert_eq!(
+            fs::metadata(logs.join("gui-dev.log.1")).unwrap().len(),
+            paths::DAEMON_LOG_MAX_BYTES + 1,
+            "the full one rotated to gui-dev.log.1"
+        );
+        assert_eq!(
+            fs::read_to_string(logs.join("gui.log")).unwrap(),
+            "the shell's own line\n"
+        );
+    }
+
     fn touch_executable(path: &Path) {
         if let Some(parent) = path.parent() {
             fs::create_dir_all(parent).expect("parent dir must be created");
@@ -467,7 +585,7 @@ mod tests {
 
         let managed = cmd
             .get_envs()
-            .find(|(key, _)| *key == std::ffi::OsStr::new(store::MANAGED_LOG_ENV))
+            .find(|(key, _)| *key == std::ffi::OsStr::new(paths::MANAGED_LOG_ENV))
             .and_then(|(_, value)| value);
         assert_eq!(managed, Some(std::ffi::OsStr::new("1")));
     }
@@ -638,6 +756,73 @@ mod tests {
             resolve_gui_launch_from_inputs(&current_exe, None, Some(home_dir), &system_app)
                 .expect("system app");
         assert_eq!(launch, GuiLaunch::AppBundle(system_app));
+    }
+
+    /// With no usable home (`paths::user_home`: none for an unset, empty or
+    /// relative one, 121-1/121-2) no `Applications/openalpaca-gui.app` is
+    /// looked for under one: the system bundle is next, never a relative
+    /// path the process's directory resolves.
+    #[test]
+    fn gui_resolution_without_a_home_goes_to_the_system_app() {
+        let root = tempfile::TempDir::new().unwrap();
+        let current_exe = root.path().join("bin/openalpaca");
+        touch_executable(&current_exe);
+        let system_app = root.path().join("system/openalpaca-gui.app");
+        fs::create_dir_all(&system_app).expect("system app");
+
+        let home = paths::usable_home(Some(PathBuf::from("relative-home")));
+        assert_eq!(home, None);
+        let launch = resolve_gui_launch_from_inputs(&current_exe, None, home, &system_app)
+            .expect("system app");
+        assert_eq!(launch, GuiLaunch::AppBundle(system_app));
+    }
+
+    /// 121-2's wiring: `resolve_gui_launch` itself looks under the home
+    /// `paths::user_home` reports. A child of this binary, `OPENALPACA_GUI_APP`
+    /// unset, resolves under an absolute `HOME` holding
+    /// `Applications/openalpaca-gui.app`, which it launches, and under a
+    /// relative one naming, from the child's directory, a folder that holds
+    /// one too, which it never launches: a hand read of `HOME` would.
+    #[test]
+    fn gui_resolution_reads_the_home_user_home_reports() {
+        use crate::test_util::{HOME_CHILD_ENV, run_with_home};
+        if std::env::var_os(HOME_CHILD_ENV).is_some() {
+            let home = PathBuf::from(std::env::var_os("HOME").expect("the child's HOME"));
+            let cwd = std::env::current_dir().expect("the child's directory");
+            let launch = resolve_gui_launch(&cwd.join("bin/openalpaca"));
+            let user_app = home.join("Applications").join("openalpaca-gui.app");
+            if home.is_absolute() {
+                assert_eq!(
+                    launch.expect("the user's app"),
+                    GuiLaunch::AppBundle(user_app)
+                );
+            } else if let Ok(GuiLaunch::AppBundle(app)) = &launch {
+                assert!(
+                    !app.starts_with(&home) && !app.starts_with(cwd.join(&home)),
+                    "a relative home's app was taken: {app:?}"
+                );
+            }
+            return;
+        }
+        let root = tempfile::TempDir::new().unwrap();
+        for home in ["abs-home", "rel-home"] {
+            let app = root
+                .path()
+                .join(home)
+                .join("Applications/openalpaca-gui.app");
+            fs::create_dir_all(app).expect("a user app");
+        }
+        let test = concat!(
+            module_path!(),
+            "::gui_resolution_reads_the_home_user_home_reports"
+        );
+        run_with_home(
+            test,
+            &root.path().join("abs-home"),
+            root.path(),
+            &[GUI_APP_ENV],
+        );
+        run_with_home(test, Path::new("rel-home"), root.path(), &[GUI_APP_ENV]);
     }
 
     #[test]

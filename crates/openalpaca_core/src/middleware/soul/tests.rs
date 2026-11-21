@@ -103,3 +103,30 @@ fn test_render_soul_markdown_roundtrip() {
     assert_eq!(doc.vibe, reparsed.vibe);
     assert_eq!(doc.continuity, reparsed.continuity);
 }
+
+/// Step 9's golden (M35): each variant's text byte for byte, under `{}` and
+/// `{:#}`, with no `source()` — written against the hand-written `Display`
+/// and kept on the derive. The `match` has no `_` arm, so a new variant does
+/// not compile without its row.
+#[test]
+fn every_soul_parse_error_prints_its_text_whole_and_has_no_source() {
+    let rows = [
+        SoulParseError::MissingFrontmatter,
+        SoulParseError::UnterminatedFrontmatter,
+        SoulParseError::MissingField("ti\u{202e}tle\u{200b}"),
+        SoulParseError::MissingSection("Core\u{202e} Truths"),
+        SoulParseError::EmptySection("Vibe\u{200b}"),
+    ];
+    for error in rows {
+        let want = match &error {
+            SoulParseError::MissingFrontmatter => "Missing YAML frontmatter",
+            SoulParseError::UnterminatedFrontmatter => "Unterminated YAML frontmatter",
+            SoulParseError::MissingField(_) => "Missing frontmatter field 'ti\u{202e}tle\u{200b}'",
+            SoulParseError::MissingSection(_) => "Missing required section 'Core\u{202e} Truths'",
+            SoulParseError::EmptySection(_) => "Section 'Vibe\u{200b}' is empty",
+        };
+        assert_eq!(error.to_string(), want);
+        assert_eq!(format!("{error:#}"), want);
+        assert!(std::error::Error::source(&error).is_none(), "{want}");
+    }
+}

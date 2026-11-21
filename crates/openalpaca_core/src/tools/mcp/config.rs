@@ -267,9 +267,8 @@ impl McpConfig {
 pub fn is_valid_server_name(s: &str) -> bool {
     if s.len() > 31 { return false; }
     let mut chars = s.chars();
-    let first = match chars.next() {
-        Some(c) => c,
-        None => return false,
+    let Some(first) = chars.next() else {
+        return false;
     };
     if !first.is_ascii_alphabetic() { return false; }
     chars.all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-')

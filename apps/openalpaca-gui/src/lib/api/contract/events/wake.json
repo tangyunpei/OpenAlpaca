@@ -1,0 +1,10 @@
+{
+  "instance_id": "",
+  "ts": "",
+  "type": "wake",
+  "wake": {
+    "job_id": "",
+    "kind": "",
+    "tag": ""
+  }
+}

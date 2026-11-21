@@ -1,0 +1,11 @@
+{
+  "agent_id": "",
+  "cost_usd": 0,
+  "input_tokens": 0,
+  "instance_id": "",
+  "model": "",
+  "output_tokens": 0,
+  "task_id": "",
+  "ts": "",
+  "type": "llm_call_completed"
+}

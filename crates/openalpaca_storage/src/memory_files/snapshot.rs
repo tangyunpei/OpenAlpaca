@@ -186,24 +186,15 @@ pub struct ControlSnapshot {
 pub const SNAPSHOT_SCHEMA: u32 = 1;
 
 /// Why a snapshot file is not a snapshot.
-#[derive(Debug)]
+#[derive(Debug, thiserror::Error)]
 pub enum SnapshotError {
     /// Unparseable, an unknown `schema`, or a binding that is not the
     /// directory it was read for: the partition is quarantined.
+    #[error("invalid control snapshot: {0}")]
     Invalid(String),
+    #[error("{0:#}")]
     Io(anyhow::Error),
 }
-
-impl fmt::Display for SnapshotError {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            SnapshotError::Invalid(r) => write!(f, "invalid control snapshot: {r}"),
-            SnapshotError::Io(e) => write!(f, "{e:#}"),
-        }
-    }
-}
-
-impl std::error::Error for SnapshotError {}
 
 impl ControlSnapshot {
     /// A fresh, empty snapshot bound to `root`.

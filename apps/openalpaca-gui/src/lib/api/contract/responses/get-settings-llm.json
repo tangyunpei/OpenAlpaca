@@ -1,0 +1,27 @@
+{
+  "orchestrator": {
+    "fallback_models": [
+      ""
+    ],
+    "model": ""
+  },
+  "providers": {
+    "*": {
+      "enabled": false,
+      "key_selection_strategy": "",
+      "keys": [
+        {
+          "id": "",
+          "masked_secret": "",
+          "monthly_usage_usd": null,
+          "notes": "",
+          "priority": "",
+          "source": "",
+          "status": "",
+          "tier": ""
+        }
+      ],
+      "requires_key": false
+    }
+  }
+}

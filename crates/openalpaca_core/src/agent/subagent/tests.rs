@@ -54,7 +54,7 @@ fn test_agent_status_display() {
 #[test]
 fn test_default_preset() {
     let p = AgentPreset::default();
-    assert_eq!(p.temperature, 0.5);
+    assert_eq!(p.temperature, None);
     assert_eq!(p.verbosity, "normal");
 }
 
@@ -90,4 +90,31 @@ fn test_constraints_with_capabilities() {
     let c: AgentConstraints = serde_json::from_str(json).unwrap();
     assert_eq!(c.allowed_capabilities, vec!["web_search", "summarize"]);
     assert_eq!(c.denied_capabilities, vec!["shell_execute"]);
+}
+
+/// TEMPLATE-TEMP-OPTIONAL (item 24 of the owner's answer of 2026-11-14): a
+/// preset with no temperature is stored without one (`preset_json`), and a
+/// stored preset reads back whole whether it was written before (with
+/// `temperature: 0.5`) or after (without the key) — a missing key is not a
+/// parse failure that would replace the persona with the default one.
+#[test]
+fn a_preset_without_a_temperature_is_stored_and_read_without_one() {
+    let stored = serde_json::to_value(AgentPreset::default()).unwrap();
+    assert!(stored.get("temperature").is_none(), "{stored}");
+
+    let after: AgentPreset = serde_json::from_str(r#"{"persona":"Count.","verbosity":"normal"}"#)
+        .expect("a preset without a temperature reads back");
+    assert_eq!(after.persona, "Count.");
+    assert!(
+        serde_json::to_value(&after)
+            .unwrap()
+            .get("temperature")
+            .is_none()
+    );
+
+    let before: AgentPreset =
+        serde_json::from_str(r#"{"persona":"Count.","temperature":0.5,"verbosity":"normal"}"#)
+            .expect("a preset written before reads back");
+    assert_eq!(before.persona, "Count.");
+    assert_eq!(serde_json::to_value(&before).unwrap()["temperature"], 0.5);
 }

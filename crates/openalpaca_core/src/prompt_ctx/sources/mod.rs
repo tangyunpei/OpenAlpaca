@@ -4,7 +4,6 @@ pub mod skill;
 pub mod workspace;
 
 use crate::prompt_ctx::section::ContextSection;
-use async_trait::async_trait;
 
 /// Which execution path is requesting context.
 #[derive(Debug, Clone)]
@@ -27,10 +26,11 @@ pub struct ContextRequest {
     pub reserved_tokens: usize,
 }
 
-#[async_trait]
+#[dynosaur::dynosaur(pub DynContextSource = dyn(box) ContextSource)]
 pub trait ContextSource: Send + Sync {
     fn name(&self) -> &'static str;
-    async fn resolve(&self, request: &ContextRequest) -> Vec<ContextSection>;
+    fn resolve(&self, request: &ContextRequest)
+    -> impl Future<Output = Vec<ContextSection>> + Send;
     fn active_for(&self, _path: &ExecutionPath) -> bool {
         true
     }

@@ -2,7 +2,7 @@
 
 use super::EventBroadcaster;
 use chrono::Utc;
-use openalpaca_api::events::{ConfirmationOutcome, ServerEvent};
+use openalpaca_api::events::{ConfirmationOutcome, ServerEvent, ToolFailureReason};
 
 impl EventBroadcaster {
     /// Broadcast a task status event and persist it
@@ -287,6 +287,11 @@ impl EventBroadcaster {
     /// insert itself is unconditional — the writer's copy is best-effort (a
     /// full channel drops it, a cancelled round loses it) and an audit row
     /// `invocations_today` counts is not.
+    ///
+    /// `reason` is why a failed run failed, where the sandbox named it
+    /// (`timeout`, TIMEOUT-ONE-CLOCK): broadcast, and written into the
+    /// `event_log` row's detail. The `tool_execution_log` row's
+    /// `error_message` stays the session writer's: the error's own text.
     #[allow(clippy::too_many_arguments)]
     pub fn tool_executed(
         &self,
@@ -297,6 +302,7 @@ impl EventBroadcaster {
         task_id: Option<&str>,
         session_id: Option<&str>,
         tool_use_id: Option<&str>,
+        reason: Option<ToolFailureReason>,
     ) {
         let event = ServerEvent::ToolExecuted {
             agent_id: agent_id.to_string(),
@@ -304,6 +310,7 @@ impl EventBroadcaster {
             success,
             duration_ms,
             task_id: task_id.map(|t| t.to_string()),
+            reason,
             ts: Utc::now(),
             instance_id: self.instance_id.clone(),
         };

@@ -319,6 +319,9 @@ pub struct HistoryInput {
 #[derive(Debug, Clone)]
 pub struct HistoryOutput {
     pub messages: Vec<ChatMessage>,
+    /// Whether `messages` ends with the input's `current_user_turn` — the
+    /// turn Layer 5's trim never takes (SA-2b).
+    pub ends_with_current_turn: bool,
     pub fingerprint: HistoryFingerprint,
 }
 

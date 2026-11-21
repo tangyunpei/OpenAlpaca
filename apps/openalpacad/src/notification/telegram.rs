@@ -9,10 +9,7 @@ impl NotificationDispatcher {
     /// Try cross-channel Telegram delivery for non-Telegram tasks.
     /// Returns the chat_id that was sent to (for artifact delivery), or None.
     pub(super) async fn try_cross_channel_telegram(&self, created_by: &str, message: &str) -> Option<i64> {
-        let bot = match self.telegram_bot() {
-            Some(b) => b,
-            None => return None,
-        };
+        let bot = self.telegram_bot()?;
         let pref_repo = PreferenceRepository::new(&self.db);
 
         let should_notify = pref_repo
@@ -26,22 +23,17 @@ impl NotificationDispatcher {
                     .get("telegram.notify_task_completion")
                     .ok()
                     .flatten()
-                    .map(|v| v == "true")
-                    .unwrap_or(false)
+                    .is_some_and(|v| v == "true")
             });
         if !should_notify {
             return None;
         }
 
-        let chat_id = match pref_repo
+        let chat_id = pref_repo
             .get(created_by, "telegram.last_chat_id")
             .ok()
             .flatten()
-            .and_then(|p| p.value.parse::<i64>().ok())
-        {
-            Some(id) => id,
-            None => return None,
-        };
+            .and_then(|p| p.value.parse::<i64>().ok())?;
 
         if let Err(e) = bot.send_message(ChatId(chat_id), message).await {
             warn!("Failed to send cross-channel notification: {e}");

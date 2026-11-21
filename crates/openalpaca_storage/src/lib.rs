@@ -1,16 +1,15 @@
 //! OpenAlpaca Storage Module
 //!
-//! Provides the single path module (`store`), the discovery mechanism,
-//! the singleton lock, the daemon-liveness primitive (`daemon_lifecycle`),
-//! a project's re-point and its recovery (`project_life`),
-//! and the SQLite database for daemon/GUI/CLI coordination.
+//! Provides the content stores and the projects (`store`), a project's
+//! re-point and its recovery (`project_life`), and the SQLite database for
+//! daemon/GUI/CLI coordination. The home store's own paths, discovery, the
+//! daemon-liveness primitive and the wire protocol's numbers are
+//! `openalpaca_app_support`'s (Q05), which this crate imports.
 
 pub mod artifacts;
 pub mod config_schema;
 mod content_io;
-pub mod daemon_lifecycle;
 pub mod database;
-pub mod discovery;
 pub mod hash;
 pub mod memory_files;
 pub mod memory_index;

@@ -195,7 +195,6 @@ pub fn update(
         thinking: Some(ThinkingConfig::Disabled),
         context_management: None,
         fallback_models: Vec::new(),
-        ephemeral_system_notice: None,
     }
 }
 
@@ -976,6 +975,7 @@ mod tests {
             },
             finish_reason: finish,
             thinking: None,
+            echo: None,
             parts: None,
         }
     }
@@ -1729,7 +1729,7 @@ mod tests {
         let router = router_recording(provider.clone());
         let mut cfg = DaemonConfig::default();
         cfg.orchestrator.memory.summary_min_new_older_messages = 1;
-        cfg.orchestrator.costs.summary_model = Some("claude-haiku-4-5-20251001".to_string());
+        cfg.orchestrator.costs.summary_model = Some("claude-haiku-5-5".to_string());
         let previous = WorkingState {
             next: "Pick the dates".to_string(),
             ..lisbon()
@@ -1753,7 +1753,7 @@ mod tests {
             request.thinking
         );
         assert_eq!(request.max_tokens, Some(1536));
-        assert_eq!(request.model.as_deref(), Some("claude-haiku-4-5-20251001"));
+        assert_eq!(request.model.as_deref(), Some("claude-haiku-5-5"));
         let user = &request
             .messages
             .iter()

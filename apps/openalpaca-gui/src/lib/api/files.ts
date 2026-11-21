@@ -1,5 +1,5 @@
 /**
- * `/v1/files*` — upload, metadata, download, and host-side open.
+ * `/v1/files*` — upload, metadata, download, and host-side open and reveal.
  *
  * Reading content for a *preview* lives in `api/artifacts` instead: the content
  * routes take `?token=` inline, so `artifactContentUrl` hands a browser a URL
@@ -9,7 +9,12 @@
 
 import { ApiError, apiFetch, apiFetchBlob } from "../http";
 import { workspaceHeader } from "../workspace-header";
-import type { FileAsset, FileOpenResponse, FileUploadResponse } from "./types";
+import type {
+  FileAsset,
+  FileOpenResponse,
+  FileRevealResponse,
+  FileUploadResponse,
+} from "./types";
 
 /**
  * `POST /v1/files/upload` — one file, multipart (U5).
@@ -77,14 +82,28 @@ export async function downloadFile(
 
 /**
  * `POST /v1/files/{id}/open` — opens with the daemon host's default app: the
- * `Open` button. Showing the file in Finder is the Tauri shell's
- * `reveal_path` command (`lib/reveal.ts`), not this route.
+ * `Open` button. Showing the file in Finder is `revealFile`, below.
  */
 export async function openFileWithSystemDefault(
   id: string,
 ): Promise<FileOpenResponse> {
   return await apiFetch<FileOpenResponse>(
     `/v1/files/${encodeURIComponent(id)}/open`,
+    {
+      method: "POST",
+    },
+  );
+}
+
+/**
+ * `POST /v1/files/{id}/reveal` (Q06) — the daemon shows the file in its folder
+ * on its host (Finder with it selected on macOS) and answers no path: the
+ * `Reveal in Finder` button, through `lib/reveal.ts`. The id is the only
+ * thing sent; the daemon resolves it to the file and checks that one.
+ */
+export async function revealFile(id: string): Promise<FileRevealResponse> {
+  return await apiFetch<FileRevealResponse>(
+    `/v1/files/${encodeURIComponent(id)}/reveal`,
     {
       method: "POST",
     },

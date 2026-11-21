@@ -44,9 +44,8 @@ impl Orchestrator {
     /// working state's `through` and the recent window via ID-range query
     /// (fixes 120-window bug), and reads the working state from the session row.
     pub(super) fn build_context(&self, lane_key: &str, current_query: &str) -> ConversationContext {
-        let db = match &self.db {
-            Some(db) => db,
-            None => return ConversationContext::default(),
+        let Some(db) = &self.db else {
+            return ConversationContext::default();
         };
 
         let repo = ConversationRepository::new(db);
@@ -82,9 +81,8 @@ impl Orchestrator {
             Some(id) => repo.list_recent_by_session(id, recent_limit),
             None => repo.list_recent_by_lane(lane_key, recent_limit),
         };
-        let raw_messages = match raw_messages {
-            Ok(msgs) => msgs,
-            Err(_) => return ConversationContext::default(),
+        let Ok(raw_messages) = raw_messages else {
+            return ConversationContext::default();
         };
 
         // Step 3: Build canonical list and dedup current query
@@ -111,8 +109,7 @@ impl Orchestrator {
         // Dedup (D6) — if the last row matches current_query, drop it (Bug A fix).
         let should_dedup = chat_rows
             .last()
-            .map(|(_, role, content, _, _)| role == "user" && content == current_query)
-            .unwrap_or(false);
+            .is_some_and(|(_, role, content, _, _)| role == "user" && content == current_query);
         if should_dedup {
             tracing::debug!("Dedup: dropping duplicate user message from recent window");
             chat_rows.pop();

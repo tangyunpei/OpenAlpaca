@@ -9,6 +9,7 @@
 use super::*;
 
 use axum::body::to_bytes;
+use openalpaca_app_support::paths;
 use openalpaca_core::memory::service::{
     Attribution, Capabilities, MemoryAccessContext, ReadInput, StoreInput, StoreOutput, Surface,
     WorkspaceHint,
@@ -51,7 +52,7 @@ impl Fixture {
             .path()
             .canonicalize()
             .expect("canonicalize home")
-            .join(store::STORE_DIR_NAME);
+            .join(paths::STORE_DIR_NAME);
         std::fs::create_dir_all(&home_store).expect("home store");
         let env = HomeStoreGuard::set(&home_store);
         let projects = tempfile::tempdir().expect("projects");
@@ -215,7 +216,7 @@ impl Fixture {
             .path()
             .canonicalize()
             .expect("canonicalize home")
-            .join(store::STORE_DIR_NAME)
+            .join(paths::STORE_DIR_NAME)
             .to_string_lossy()
             .into_owned()
     }

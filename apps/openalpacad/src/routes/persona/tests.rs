@@ -230,3 +230,24 @@ fn if_match_reads_the_quoted_bare_and_weak_forms() {
     assert_eq!(if_match(&headers_with(Some("\"\""))), None);
     assert_eq!(if_match(&headers_with(None)), None);
 }
+
+/// `GET|PUT /v1/persona/user`'s JSON bodies for the API contract's folder
+/// (API-CONTRACT).
+pub(crate) async fn contract_samples(out: &mut crate::contract::Samples) {
+    use crate::contract::ok_body;
+    let f = Fixture::new();
+    let body = ok_body(read_user_document(&f.writer)).await;
+    out.response("get-persona-user", body);
+    let current = UserDocumentWriter::sha256(DOC);
+    let body = ok_body(
+        replace_user_document(
+            &f.writer,
+            &headers_with(Some(&format!("\"{current}\""))),
+            PersonaUserBody { content: edited() },
+            |_| {},
+        )
+        .await,
+    )
+    .await;
+    out.response("put-persona-user", body);
+}

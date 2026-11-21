@@ -67,7 +67,10 @@ scripts:
     name: check_exists
     description: >
       Check if a skill ID already exists. Returns JSON with "exists" (boolean)
-      and "path" fields.
+      and "path" fields, and "bundled": true when a built-in skill holds the
+      ID (with "exists": false, a new skill of that ID would override the
+      built-in one; with "exists": true, the folder is an override or an
+      unedited copy an earlier build seeded, which the daemon does not read).
     parameters:
       type: object
       properties:
@@ -76,22 +79,25 @@ scripts:
           description: "The skill ID to check (lowercase kebab-case)"
         scope:
           type: string
-          enum: [project, user]
-          description: "Scope to check: project (default) or user"
+          enum: [project]
+          description: "Where to check: project, the default and only scope (the config directory's skills/, the one directory the daemon reads skills from)"
       required: [id]
 
   - file: list_skills.sh
     name: list_skills
     description: >
-      List all existing skills with their IDs, names, slash commands, and paths.
-      Returns a JSON array. Use this to check for slash command conflicts.
+      List all existing skills with their IDs, names, slash commands, sources
+      ("config" for the config directory's, "bundled" for the built-in ones)
+      and paths. Returns a JSON array. Use this to check for slash command
+      conflicts. An ID listed under both sources is a built-in skill with a
+      folder of the same ID in the config directory (see check_exists).
     parameters:
       type: object
       properties:
         scope:
           type: string
-          enum: [project, user, both]
-          description: "Which scope to scan: project, user, or both (default)"
+          enum: [project]
+          description: "Which skills to list: project, the default and only scope (the config directory's skills/, the one directory the daemon reads skills from)"
 
   - file: scaffold.sh
     name: scaffold
@@ -107,8 +113,8 @@ scripts:
           description: "Skill ID (lowercase kebab-case directory name)"
         scope:
           type: string
-          enum: [project, user]
-          description: "Where to create: project (default) or user"
+          enum: [project]
+          description: "Where to create: project, the default and only scope (the config directory's skills/, the one directory the daemon reads skills from)"
         dirs:
           type: string
           description: "Comma-separated optional dirs to create: scripts,examples,templates,assets"
@@ -137,8 +143,8 @@ scripts:
           description: "Short description of what the skill does"
         scope:
           type: string
-          enum: [project, user]
-          description: "Where to create: project (default) or user"
+          enum: [project]
+          description: "Where to create: project, the default and only scope (the config directory's skills/, the one directory the daemon reads skills from)"
         mode:
           type: string
           enum: [manual, auto, scheduled, disabled]
@@ -213,6 +219,8 @@ Collect the three required pieces of information:
      - Must NOT be a reserved name: `config`, `test`, `tests`, `example`, `examples`, `template`, `templates`, `assets`. If reserved, say: "'{id}' is a reserved directory name and cannot be used as a skill ID."
      - Must NOT be `remember`, `forget` or `memories`: those are the chat memory commands, which the daemon answers itself, so a skill with that ID would never be reached by its slash command. If so, say: "'{id}' is reserved for a chat memory command and cannot be used as a skill ID."
    - Use `skill_script:check_exists` to verify the ID is not already taken.
+   - If it answers `"bundled": true`, the ID is a built-in skill's: a new skill with that ID overrides the built-in one, which then no longer runs. Say so and ask the user to confirm before going on, or to choose another ID.
+   - If it answers `"exists": true` and `"bundled": true`, the folder at `path` is either the user's override of the built-in skill or an unedited copy an earlier build seeded, which the daemon does not read (the built-in skill runs; `openalpaca skills tidy` lists such copies). Say so. `skill_script:scaffold` refuses an existing ID, so to make a new skill with that ID the user first moves an unedited copy aside with `openalpaca skills tidy --apply`, or edits that folder as their own override; otherwise choose another ID.
 
 2. **Name** (human-readable)
    - Ask: "What is the human-readable name for this skill? (e.g., 'Code Review', 'Summarize PR')"
@@ -328,6 +336,8 @@ If the user chose `mode: auto`, collect the following. If `mode: manual`, skip t
 ### Error Handling
 
 - **Duplicate skill ID**: `skill_script:check_exists` returns `{"exists": true}`. Inform the user and ask them to choose a different ID or confirm overwrite.
+- **A built-in skill's ID with a folder in the config directory**: `skill_script:check_exists` returns `{"exists": true, "bundled": true}`. The folder is an override or an unedited copy the daemon does not read; tell the user, and that `openalpaca skills tidy --apply` moves an unedited copy aside (step 1).
+- **A built-in skill's ID**: `skill_script:check_exists` returns `{"exists": false, "bundled": true}`. The new skill would override the built-in one; ask the user first.
 - **Invalid characters in ID**: Reject immediately with the validation message. Suggest a corrected kebab-case version.
 - **Empty name or description**: Re-prompt: "Name/description is required and cannot be empty."
 - **Invalid permission level**: Show the three valid options and re-prompt.

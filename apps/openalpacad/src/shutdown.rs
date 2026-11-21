@@ -40,15 +40,16 @@ pub fn install_signal_handlers() -> Arc<AtomicBool> {
 /// - Never fails startup.
 #[cfg(unix)]
 pub fn warn_if_ctrl_c_unavailable_on_tty() {
+    use std::io::IsTerminal;
     use std::os::fd::AsRawFd;
 
-    let fd = std::io::stdin().as_raw_fd();
+    let stdin = std::io::stdin();
 
     // Non-interactive launch (GUI/service/redirect): no warning noise.
-    // SAFETY: `isatty` is thread-safe and does not retain pointers.
-    if unsafe { libc::isatty(fd) } != 1 {
+    if !stdin.is_terminal() {
         return;
     }
+    let fd = stdin.as_raw_fd();
 
     let mut termios = std::mem::MaybeUninit::<libc::termios>::uninit();
     // SAFETY: valid fd from stdin; `tcgetattr` initializes `termios` on success.

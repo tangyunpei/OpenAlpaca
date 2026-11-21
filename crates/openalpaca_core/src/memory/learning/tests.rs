@@ -99,7 +99,6 @@ impl Scripted {
     }
 }
 
-#[async_trait::async_trait]
 impl LlmProvider for Scripted {
     fn name(&self) -> &str {
         "scripted"
@@ -163,6 +162,7 @@ impl LlmProvider for Scripted {
             },
             finish_reason,
             thinking: None,
+            echo: None,
             parts: None,
         })
     }
@@ -210,6 +210,8 @@ impl Scene {
             ProviderType::Anthropic,
             RECORDED_MODEL.to_string(),
         ));
+        // The extractor's and the summariser's own request, as they build it.
+        crate::test_util::without_request_contract(&router, RECORDED_MODEL);
         Self::with_router(model, router, config)
     }
 
@@ -863,7 +865,6 @@ async fn the_gateway_returns_while_a_flush_is_stuck() {
     }
 
     struct Echo;
-    #[async_trait::async_trait]
     impl crate::gateway::MessageHandler for Echo {
         async fn handle(
             &self,
@@ -1110,7 +1111,6 @@ struct FlushMidTurn {
     report: Mutex<Option<FlushReport>>,
 }
 
-#[async_trait::async_trait]
 impl crate::gateway::MessageHandler for FlushMidTurn {
     async fn handle(
         &self,
@@ -3045,6 +3045,9 @@ fn router_for(model: Arc<Scripted>, provider: ProviderType, id: &str) -> Arc<Llm
             supports_reasoning: false,
             supports_tools: true,
             declared: false,
+            long_prompt: None,
+            cache_rates: None,
+            request_contract: openalpaca_llm::RequestContract::NONE,
         },
     );
     Arc::new(router)
@@ -3123,6 +3126,40 @@ async fn an_openai_provider_on_localhost_yields() {
     assert_yielded(&scene, &s, &report);
 }
 
+/// The same for a keyed `openai` provider on the person's home network —
+/// a llama.cpp or LM Studio server on another computer of theirs, at a
+/// private address or an mDNS name — which counts as local too (item 17,
+/// widened by the owner's second answers of 2026-11-14): its flush yields.
+#[tokio::test]
+async fn an_openai_provider_on_the_home_network_yields() {
+    for base in [
+        "http://192.168.1.20:8080/v1",
+        "http://gpu-box.local:8080/v1",
+    ] {
+        let model = Scripted::new(vec![Say::Hang]);
+        let router = router_for(model.clone(), ProviderType::OpenAI, "lan-openai");
+        let mut runtime = openalpaca_llm::LlmRuntimeConfig::default();
+        runtime
+            .provider_defaults
+            .get_mut("openai")
+            .expect("openai has defaults")
+            .base_url = Some(base.to_string());
+        router.reload_runtime_config(runtime);
+        let scene = Scene::with_router(model, router, DaemonConfig::default());
+        scene.no_quiet_period();
+        let s = scene.session();
+        scene.turn(&s, PREF, "Noted.");
+
+        let flush = flush_until_the_call(&scene, &s).await;
+        let _chat = scene.queue.turn_started(uuid::Uuid::new_v4(), LANE, true);
+        let report = tokio::time::timeout(std::time::Duration::from_secs(10), flush)
+            .await
+            .unwrap_or_else(|_| panic!("the flush did not yield on {base}"))
+            .unwrap();
+        assert_yielded(&scene, &s, &report);
+    }
+}
+
 /// The quiet check and the call are one decision: a chat turn that starts
 /// while the flush is between them — here, waiting on its window read —
 /// makes a local model's flush yield **before** the call goes out. The call
@@ -3186,7 +3223,7 @@ fn keyed_router(model: Arc<Scripted>, tpm: u32) -> Arc<LlmRouter> {
     providers.insert(
         ProviderType::Anthropic,
         openalpaca_llm::ProviderEntry {
-            provider: model,
+            provider: openalpaca_llm::DynLlmProvider::from_arc(model),
             key_pool: Arc::new(ArcSwap::from_pointee(openalpaca_llm::KeyPool::new(
                 vec![openalpaca_llm::ApiKey::new(
                     "k1".to_string(),
@@ -3267,7 +3304,6 @@ async fn a_keyed_flush_leaves_half_the_rate_budget() {
             thinking: None,
             context_management: None,
             fallback_models: Vec::new(),
-            ephemeral_system_notice: None,
         })
         .await
         .unwrap();

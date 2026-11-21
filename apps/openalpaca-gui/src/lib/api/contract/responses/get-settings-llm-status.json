@@ -1,0 +1,10 @@
+{
+  "*": [
+    {
+      "consecutive_rate_limits": 0,
+      "health": "",
+      "id": "",
+      "is_available": false
+    }
+  ]
+}

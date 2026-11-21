@@ -1,0 +1,11 @@
+{
+  "agent_id": "",
+  "duration_ms": 0,
+  "instance_id": "",
+  "reason": "",
+  "success": false,
+  "task_id": "",
+  "tool_name": "",
+  "ts": "",
+  "type": "tool_executed"
+}

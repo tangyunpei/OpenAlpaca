@@ -1,0 +1,38 @@
+[
+  {
+    "author": "",
+    "description": "",
+    "id": "",
+    "invocations_today": 0,
+    "name": "",
+    "not_used": [
+      {
+        "edit": null,
+        "path": "",
+        "plugin": null,
+        "reason": "",
+        "source": "",
+        "version": ""
+      }
+    ],
+    "origin": {
+      "enabled": false,
+      "id": "",
+      "kind": "",
+      "state": ""
+    },
+    "overrides_bundled": false,
+    "requires_capabilities": [
+      ""
+    ],
+    "schedule": "",
+    "source": "",
+    "triggers": {
+      "keywords": [
+        ""
+      ],
+      "slash": ""
+    },
+    "version": ""
+  }
+]

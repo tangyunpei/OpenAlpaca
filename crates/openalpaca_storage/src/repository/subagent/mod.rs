@@ -123,6 +123,37 @@ impl<'a> SubAgentRepository<'a> {
         })
     }
 
+    /// The set stored for an agent's id (`PUT /v1/agents/{id}/config`,
+    /// `openalpaca agents set`): the fields it changes over its template, as
+    /// JSON, in the row's `config` column — the baseline's column, which
+    /// `upsert` never writes, so the template's rewrite of the row at each
+    /// start keeps it. `None` when no row or no set.
+    pub fn stored_set(&self, id: &str) -> Result<Option<String>> {
+        self.db.with_connection(|conn| {
+            let set = conn
+                .query_row("SELECT config FROM agent WHERE id = ?", [id], |row| {
+                    row.get::<_, Option<String>>(0)
+                })
+                .optional()
+                .context("Failed to read an agent's stored set")?;
+            Ok(set.flatten())
+        })
+    }
+
+    /// Store (or, with `None`, clear) the set of an agent's id: see
+    /// `stored_set`. Returns false when no row has the id.
+    pub fn store_set(&self, id: &str, set: Option<&str>) -> Result<bool> {
+        self.db.with_connection(|conn| {
+            let rows = conn
+                .execute(
+                    "UPDATE agent SET config = ?1 WHERE id = ?2",
+                    rusqlite::params![set, id],
+                )
+                .context("Failed to store an agent's set")?;
+            Ok(rows > 0)
+        })
+    }
+
     /// Delete a SubAgent config by ID.
     pub fn delete(&self, id: &str) -> Result<()> {
         self.db.with_connection(|conn| {

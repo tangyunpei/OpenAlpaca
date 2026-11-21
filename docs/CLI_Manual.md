@@ -48,7 +48,7 @@ Defaults:
 - binaries: `~/.local/openalpaca`
 - GUI app: `~/Applications/openalpaca-gui.app`
 - PATH link: `~/.local/bin/openalpaca`
-- runtime config/data: `~/.openalpaca/` (`OPENALPACA_HOME_STORE` overrides — absolute paths only)
+- runtime config/data: `~/.openalpaca/` (`OPENALPACA_HOME_STORE` overrides — absolute paths only; without it a relative `HOME` is no home, and the store is refused: "Failed to determine the home directory")
 
 Linux and Windows packaging/install scripts also exist under `scripts/release/` (`package-linux.sh`, `package-windows.ps1`, `install-windows.ps1`, `uninstall.sh`, `uninstall-windows.ps1`).
 
@@ -56,9 +56,14 @@ Linux and Windows packaging/install scripts also exist under `scripts/release/` 
 
 - The daemon writes discovery metadata to `~/.openalpaca/state/discovery.json` when it starts (under `OPENALPACA_HOME_STORE` instead, when that is set).
 - CLI reads base URL and token from discovery.
+- Before a command uses that daemon, the CLI asks its `GET /v1/health` which protocol it speaks and judges it as the app does (the same check, `openalpaca_app_support::protocol`): the CLI and the app always use one daemon, and a command never stops one or starts one beside it. `openalpaca daemon tail`, `tasks confirmations watch` and `daemon status` run the same check (below); `openalpaca daemon start` runs it before it starts anything.
+  - A daemon of the CLI's protocol and version is used as is. One of the same protocol at another version, or of an older protocol the CLI still reads, is used too, with one `Note:` line on stderr naming both versions (or both protocols) and `openalpaca daemon restart` as the way to this CLI's own daemon.
+  - A daemon the CLI cannot use — a newer protocol, one older than the CLI reads, or a discovery file another build wrote — is refused with a sentence saying nothing was stopped or started and giving the way out, worded per case. A readable file's refusal names the daemon's pid, version and protocol and the CLI's protocol (and how far back it reads); the way out is `openalpaca daemon stop` and then `openalpaca daemon start` for this CLI's own. Another build's file's refusal names the daemon's pid, version and protocol but not the CLI's; the way out is to stop that daemon with that build's own `openalpaca` or `kill <pid>`, then start this CLI's own. Updating the CLI is offered only when the daemon's protocol is newer than the CLI's or none is stated; for an older protocol the refusal gives the stop alone.
+  - A daemon still starting — its discovery file written, its process running, its health not answering yet — is waited for, with one line on stderr, up to 45 seconds from the first look; past that the command fails with `The daemon (pid <n>) is still starting after 45 seconds`, naming its log and the way out. Nothing is started over it.
+  - A discovery file whose process is not a running `openalpacad` reads as `Daemon is not running (…)`, naming the pid it names.
 - Protected endpoints use `Authorization: Bearer <token>`.
 - Streaming endpoints may use query-token auth (handled by CLI internals).
-- The token is valid for 24 hours from daemon start. After that the CLI refuses it with `Discovery token has expired`; `openalpaca daemon restart` writes a fresh one.
+- The token is valid for 24 hours from its issue, and a running daemon writes a new one into `discovery.json` every 12 hours, accepting the one it replaced until that one expires, so a daemon up for days stays reachable. The CLI still refuses a file whose token has expired, with `Discovery token has expired`, once the daemon has answered its health check (above): one built before the rotation, or a Mac woken from a sleep past the expiry, for up to a minute until the daemon writes a new token; `openalpaca daemon restart` writes a fresh one. A hung daemon, whose health does not answer, is waited for as one still starting and reported after 45 seconds; a file whose process is gone reads as `Daemon is not running`. `openalpaca tasks confirmations watch` reads the file again for each answer it sends, and the chat REPL reconnects when a request is refused.
 
 If discovery is missing or expired, daemon-backed commands fail until daemon is started/restarted. `config` is the exception — it works on local files and needs no daemon.
 
@@ -106,7 +111,7 @@ openalpaca llm status                        # shows which model will answer
 | [`plugin`](#plugin) | Plugin-only shortcut over `ext` |
 | [`sessions`](#sessions) | Stored conversations |
 | [`store`](#store) | Projects: list them, re-point a moved one, delete one's data |
-| [`memory`](#memory) | Memory notes: list, search, add, edit, confirm, undo, forget, sync, doctor, adopt |
+| [`memory`](#memory) | Memory notes: list, search, timeline, show, add, edit, suggestions, confirm, undo, forget, sync, doctor, adopt |
 | [`persona`](#persona) | `USER.md`: show it, edit it |
 | [`skills`](#skills) | The skill catalog and the problems its last scan found |
 | [`chat`](#chat) | Talk to the orchestrator |
@@ -124,11 +129,11 @@ openalpaca daemon restart
 ```
 
 Notes:
-- `start` launches daemon and then GUI unless `--daemon-only` is set.
+- `start` launches daemon and then GUI unless `--daemon-only` is set. It first looks at the daemon `discovery.json` names, with the check above: a live daemon this CLI cannot use — a protocol it does not speak, or a discovery file another build wrote — is refused with the sentence above before anything is started or the daemon log rotated: the sentence is printed on stderr and the app is started all the same, or, with `--daemon-only`, `start` exits 1; a daemon this CLI uses, or one still starting, is `already running` and nothing is spawned. Then it waits until the daemon answers as one this CLI uses — up to 45 seconds for a discovery file, and 45 seconds from the first look at a daemon still starting. Before the GUI, so the app finds it serving and uses it, a wait that ends otherwise (a daemon this CLI cannot use, one still starting, none at all) is printed on stderr with its reason, and the app is started all the same: its own check then shows the same verdict in its window. With `--daemon-only` the same wait is the command's: a wait that ends otherwise fails it with its reason, and it exits 1. A daemon this start spawned that exits before it answers ends the wait at once: the lines it wrote to `daemon.log` and its exit status are printed on stderr, and then the app is started all the same, or, with `--daemon-only`, `start` exits 1.
 - `stop` asks the daemon to stop and waits until its process has exited and its single-instance lock is free — at most 15 s — and stops nothing else: an open app window stays open, keeps its unsent draft and shows `stopped elsewhere` (below). To quit the app too, run `openalpaca gui stop`. A daemon still there after 15 s is reported with its PID, the daemon log to read and the `kill -9` that finishes the job by hand, and `stop` exits with status 2.
-- `restart` restarts the daemon only. It stops it the same way and starts the new one only once the old process has exited **and** the lock is free: a daemon keeps the lock for up to 10 s after its port closes, and a new one started into it would exit at once. If the old daemon is not gone within 15 s, nothing is started — `restart` prints why, and the commands that finish the job, and exits with status 2.
-- `status` reads the discovery file and calls the daemon's health endpoint. It prints status, version, PID, instance id and URL.
-- `tail` streams live daemon events (not historical query output); `--count` limits the number of events shown, default `0` = unlimited (Ctrl+C to stop). When the daemon shuts down, `tail` prints its `daemon_shutting_down` frame as an unknown event and then `Connection closed by server`. An `artifact` line for a file an agent wrote into the project shows `[in the project]` where a by-product's shows its kind and version (`[markdown v2]`): a file in the project has no versions.
+- `restart` restarts the daemon only. It stops it the same way and starts the new one only once the old process has exited **and** the lock is free: a daemon keeps the lock for up to 10 s after its port closes, and a new one started into it would exit at once. If the old daemon is not gone within 15 s, nothing is started — `restart` prints why, and the commands that finish the job, and exits with status 2. The new daemon is then waited for as `start --daemon-only` waits (without its first look: a daemon `restart` stopped is replaced): one that exits before it answers (its `daemon.log` lines printed on stderr), or does not answer within 45 seconds, fails `restart` with the reason, and it exits 1.
+- `status` takes one look with the check above, without its wait: a live daemon this CLI cannot use is printed as the sentence above instead of its health, and a discovery file naming no daemon — none, one that names nothing, or another build's whose process is gone — as `Daemon is not running (…)` with why. Otherwise it calls the daemon's health endpoint and prints status, version, PID, instance id and URL. Each of these is a report, not an error: `status` exits 0.
+- `tail` streams live daemon events (not historical query output), from the daemon the check above accepts: one of another protocol is refused before the socket is opened, and one still starting is waited for; `--count` limits the number of events shown, default `0` = unlimited (Ctrl+C to stop). When the daemon shuts down, `tail` prints its `daemon_shutting_down` frame as an unknown event and then `Connection closed by server`. An `artifact` line for a file an agent wrote into the project shows `[in the project]` where a by-product's shows its kind and version (`[markdown v2]`): a file in the project has no versions.
 - The CLI and the GUI app manage one daemon, not one each. A `stop` or `restart` from here shows in an open app window as `stopped elsewhere`; the app does not start a daemon again until someone chooses `Start daemon` there, which after a `restart` finds the new one. This verb sends the daemon SIGTERM and the app sends `POST /v1/command {"command":"shutdown"}`; the daemon treats the two as one shutdown, and both then wait the same way — for the process, then for the lock.
 - `start` finds `openalpacad` in this order: `OPENALPACA_DAEMON_BIN=/abs/path/openalpacad`, next to the `openalpaca` binary (symlinks followed), `../libexec/`, then `PATH`. From a repository checkout it falls back to `cargo run -p openalpacad`.
 - Daemon startup sets `OPENALPACA_CONFIG_DIR` to `~/.openalpaca/config` and runs the daemon with `~/.openalpaca` as its working directory.
@@ -193,7 +198,7 @@ openalpaca gui start
 openalpaca gui stop
 ```
 
-`start` looks for the app bundle in this order: `OPENALPACA_GUI_APP=/abs/path/openalpaca-gui.app`, `~/Applications/openalpaca-gui.app`, `/Applications/openalpaca-gui.app`. From a repository checkout it falls back to the Tauri dev build. `stop` sends SIGTERM to the app's process — on macOS the bundle's `openalpaca_gui` — and leaves the daemon running; an unsent draft in the app is lost.
+`start` looks for the app bundle in this order: `OPENALPACA_GUI_APP=/abs/path/openalpaca-gui.app`, `~/Applications/openalpaca-gui.app`, `/Applications/openalpaca-gui.app`. From a repository checkout it falls back to the Tauri dev build, whose output (`bun run tauri dev`'s) is appended to `~/.openalpaca/state/logs/gui-dev.log`, rotated past 16 MB like `daemon.log`; the app itself logs to `gui.log` beside it, which a dev launch never truncates. `stop` sends SIGTERM to the app's process — on macOS the bundle's `openalpaca_gui` — and leaves the daemon running; an unsent draft in the app is lost.
 
 ### `connector`
 
@@ -225,7 +230,7 @@ openalpaca tasks status <task_id> [--format table|json]
 openalpaca tasks log <task_id> [--limit <n>]
 openalpaca tasks create [description] [--priority <n>]
 openalpaca tasks cancel <task_id>
-openalpaca tasks pause <task_id>
+openalpaca tasks pause <task_id>    # not supported: prints the refusal, exits 1 (Notes)
 openalpaca tasks resume <task_id>
 openalpaca tasks confirmations list [--format table|json]
 openalpaca tasks confirmations watch
@@ -242,6 +247,7 @@ Notes:
 - `log` prints one line per event of the run: time, event, `[agent]` and the event's detail. An approval prompt's rows (`tool_confirmation_requested`, `tool_confirmation_resolved`) name a tool and an agent that can come from a third party, so the agent is shown with every hidden character as `<U+XXXX>` and a detail printed as JSON writes them with JSON's own `\u` escapes — never raw.
 - `status` prints the task and, under `Lanes:`, one line per subagent it spawned. With `--format json` the subagents are the `lanes` array; `lanes_error` is present when the timeline could not be read, so an empty array is never mistaken for "spawned nothing".
 - Every command that takes a `<task_id>` needs the **full** id; the daemon does not match a prefix. The `list` table shortens it, so copy it from `openalpaca tasks list --format json`.
+- `pause` is **not supported** until a later design: it prints the sentence the chat's `/pause` answers ("Pause and resume are not supported — a workflow runs until it finishes or /cancel stops it.") on stderr and exits 1, without reaching the daemon, so it answers with no daemon running. A pause never stopped a run — its work went on and its completion wrote over `paused` — so the daemon refuses it on every surface (`POST /v1/tasks/{id}/action`, the chat, the GUI). `cancel` stops a run; `resume` still works (below).
 
 #### Creating a task
 
@@ -254,7 +260,7 @@ Notes:
 
 `resume` is one word over two verbs:
 
-- On a **paused** run it is the plain transition back to running.
+- On a **paused** run — one an earlier build paused — it is the plain transition back to running, so no run is left stuck.
 - On an **interrupted** run it is *replay resume* — **experimental, and off by default**. The daemon rebuilds the run's loop history from its session log (the lead's rounds and their tool results) and continues it under the same id, telling the model not to repeat side-effecting calls it already made. The run's subagents come back too: one that finished is known again with its whole answer, kept beside the log, and one the stop interrupted is reported as interrupted, so the lead can collect the first and spawn the second again. Nothing recorded is re-executed.
 - Turn replay resume on with `resume_enabled = true` under `[orchestrator.routing]` in `daemon.toml`. Until then an interrupted run answers `RESUME_DISABLED`.
 - The other way to redo an interrupted run is a re-run: the GUI's `Re-run` button, or `POST /v1/tasks/{id}/rerun` directly. The CLI has no `rerun` verb yet.
@@ -265,7 +271,7 @@ Notes:
 
 A tool on the confirm list suspends its run and asks. In the GUI the card is there; from a terminal these are the way:
 
-- `watch` sits on the daemon's event socket and prompts for each one as it is raised: `Allow? [y]es / [a]lways this tool / [N]o`. `y` allows this call, `a` allows every later call of that tool for the rest of the session, anything else (Enter included) denies.
+- `watch` sits on the daemon's event socket — the daemon the check above accepts, as every answer it sends does — and prompts for each one as it is raised: `Allow? [y]es / [a]lways this tool / [N]o`. `y` allows this call, `a` allows every later call of that tool for the rest of the session, anything else (Enter included) denies.
   - This is what answers a **background workflow's** prompt from a terminal: that run raises it long after the interactive `openalpaca chat` turn that started it has finished, so the chat itself is no longer listening.
   - Prompts that were already waiting when `watch` started are not replayed; `list` shows those.
   - Ctrl+C leaves every unanswered prompt exactly as it was.
@@ -297,13 +303,20 @@ openalpaca agents resume <agent_id>
 openalpaca agents set <agent_id> <dotted.path> <value>
 openalpaca agents create [--from-file <path>] [--interactive]
 openalpaca agents remove <agent_id>
+openalpaca agents tidy [--apply]
 ```
 
 Notes:
-- `openalpaca agents` with no subcommand enters interactive creation mode. So does `agents create` with no flags.
+- `openalpaca agents` with no subcommand enters interactive creation mode. So does `agents create` with no flags. It asks for a name, the agent's `id`, a description, a model, capabilities, a cost cap and a persona; the `id` it offers is the name in lower case, each run of characters other than ASCII letters and digits one `_` (`Code Reviewer` is `code_reviewer`; a name with no ASCII letter or digit is `agent`), and Enter keeps it or you type another. A typed `id` is taken only in that same form — lower-case ASCII letters and digits, each run of other characters one `_`, none at either end; in any other the prompt says so and asks again, offering that form of what you typed. The daemon refuses an `id` that is already taken; it checks no other form, so this check is the CLI's own (`agents create --from-file` sends the file's `id` unchecked). The capabilities are the names the agent is assigned (`capabilities.assigned`), which the sandbox admits tools by — for example `web_access` or `memory_read`, as the shipped templates assign them; nothing checks them when the agent is created. The `openalpaca config` screen creates an agent the same way.
 - `--from-file <path>` creates the agent from a TOML file.
 - `set` takes a dotted config path, for example `openalpaca agents set <agent_id> llm.model <model-id>`. Every section on the way to the last key must already exist in the agent's config (`agents config <agent_id>` shows it). The value is read as a number, then `true`/`false`, then a string.
+- For a template, `config` shows what its next run gets: the template with your sets over it. A `set` never changes an agent that is running; it is stored (in the store's database, not the template's file) and loaded for every new run of that template, the lead's (`lead_agent`) and a subagent's alike, and again after the daemon restarts. A set keeps the fields you changed: a later edit of the template reaches every other field, while a field you set keeps your value until you set it back to the template's, which drops it from the set. A set stays with the `id`, so a template deleted and written again under it runs with it. `set` on a run's own instance (`<template>::<id>`, as `GET /v1/agent-instances` names it) is refused while it runs, naming the template to set instead.
+- `create` with the `id` of a template that has an agent — every template but a plugin's, or one a file withholds or switches off — is refused naming the template: change it with `set`, or edit its file.
 - `remove` archives the agent.
+- A template's `temperature` is kept and not sent: no lead or subagent turn sends a temperature to the model, which answers at its own default. A template that sets none has none, so `config <agent_id>` shows no `temperature` for it — the built-in templates set none — and the `openalpaca config` screen does not ask for one when it creates an agent.
+- `list`'s MODEL and SKILLS columns, and `status`'s `Model:` and `Skills:` lines, are the stored agent's model and assigned capabilities; `-` (and no `Skills:` line) when it has none.
+- `list` and `status` show one row per agent template, built-in ones included. A template a file in `~/.openalpaca/config/agents` switches off — a file holding its `id:` and `disabled: true` — reads `disabled` in the STATUS column and has no instance, so `config` and `set` do not find it; delete that file, or remove the line, and it reads `idle` again once a template runs under that `id`. An `id` switched off before this store ever ran a template of it has no row: `list` leaves it out and `status` does not find it, while `GET /v1/agent-templates` and Settings → Agents still list it. The file, not a command, is the switch; `GET /v1/agent-templates` names the file (`state: "disabled"`, `path`).
+- `tidy` lists the files in `~/.openalpaca/config/agents` that are unedited copies of a template OpenAlpaca shipped — what an earlier build wrote there, or a copy of the repository's `config/` — which this build does not read (the built-in template runs in its place): each file, its `version` (`current`, or `earlier` for a version an earlier build shipped), its `edit` when it is a copy as the Installation Manual's step 7 or 8 left it, and where it would go. It moves nothing. `tidy --apply` moves each to `agents/.archived/<file name without .md>.<UTC timestamp>.md`, one line per move, and ends with what that means for an earlier build: one started afterwards finds `agents/` without these files and does not write them again (Installation Manual → *Keep the builds apart*). Nothing else is moved: a template you edited, one of your own, a file that switches a template off, a file that does not parse. No start, reload or route ever moves a file; only this command does, when you run it. It reads the files itself and needs no daemon. When a daemon is running, it asks that daemon first and moves only the copies the daemon also lists as unused (a daemon of an earlier build may read a copy as yours); it names each copy it leaves. The config directory is `OPENALPACA_CONFIG_DIR` when that names a directory, else `~/.openalpaca/config` — the one `openalpaca daemon start` and the app give the daemon. When there is no unedited copy, `tidy` and `tidy --apply` alike say there is nothing to tidy, wherever the config directory is. Inside a git work tree `tidy --apply` moves nothing: when the config directory is in one (a `.git` folder or file in it or a folder above it), it stops with an error naming the config directory and the work tree, before it moves anything or asks the daemon, and `tidy` alone still lists the copies and says so in its last line. The same holds when `agents/` is a link into a work tree, the config directory outside one: the error names `agents/` and the work tree the link leads into; and when `agents/` is a work tree itself, a folder of its own holding its own `.git`: the error names `agents/`. A `.git` deeper down, in a folder inside `agents/`, is not looked for. A development checkout's `config/` is where the built-in templates come from, so every file there is an unedited copy; a store you keep under git (a home folder that is a work tree, say) is refused the same way. Move such copies yourself if you mean to.
 
 ### `llm`
 
@@ -316,7 +329,7 @@ openalpaca llm keys add [--provider <name>] [--secret <key>] [--priority primary
 openalpaca llm keys remove <provider> <key_id>
 openalpaca llm keys validate --provider <name> [--secret <key>]
 openalpaca llm keys set-primary <provider> <key_id>
-openalpaca llm keys reorder <key_id>...
+openalpaca llm keys reorder <provider> <key_id>...
 openalpaca llm usage [--agent <id>] [--key <key_id>] [--daily [--date YYYY-MM-DD]] [--format table|json]
 openalpaca llm models [--refresh] [--format table|json]
 openalpaca llm strategy --provider <name> <strategy>
@@ -353,12 +366,13 @@ openalpaca config set ai.ollama.enabled true      # also ai.anthropic.enabled, a
 
 - `llm keys add` asks interactively for whatever was not passed: provider, secret, source and notes. Pass all of `--provider`, `--secret`, `--source` and `--notes` to run it without a prompt. The key is checked first and the verdict printed (`valid` / `invalid`), but it is added either way.
 - `llm keys remove` asks for confirmation before it deletes.
+- `llm keys set-primary` and `llm keys reorder` read the provider's keys first and change nothing when one of four checks fails, each with its own refusal: a provider the daemon does not list (`unknown provider '<provider>': the daemon lists <name>, …`, naming the providers it lists), one that holds no keys (`<provider> holds no keys`), no key id given (`reorder` only: `no key ids given: <provider> holds <key id>, …`), or a key id the provider does not hold (`<provider> holds no key '<key id>': <provider> holds <key id>, …`); the last two name the key ids it holds. `reorder` may name only some keys: the others keep their order after the named ones, and the success line names them.
 - A provider that **needs no API key** (Ollama) reads `· <provider> — no key needed` under `Key Health` in `llm status`, and gets a row saying the same in `llm keys list`. A keyed provider with an empty pool reads `✗ <provider> — no key configured`.
 - `llm keys validate --provider <keyless provider>` answers that no key is needed and posts nothing. For a keyed provider, `--secret` is required.
 
 #### Other notes
 
-- `--format json` echoes the daemon's own field names. For `llm models` those are `id`, `input_price_per_million`, `output_price_per_million` and `supports_tools`. For `llm keys list` the row carries the daemon's `priority` string and a `keyless` flag.
+- `--format json` echoes the daemon's own field names. For `llm models` those are `id`, `input_price_per_million`, `output_price_per_million` and `supports_tools`. A `0` price on an Anthropic or OpenAI model that discovery found and nothing prices is no price: its calls are counted at the $3 / $15 fallback (the Daemon Manual's *Cost*), unless it is the `openai` provider's and that provider's `base_url` is local — this machine (`localhost`, `127.0.0.0/8`, `::1`) or the home network (a private or link-local address, a `.local` name; the Daemon Manual's *Cost* has the conditions) — where the `0` is its price. The same holds for a price a `[models."<id>"]` row of yours leaves out when no built-in row names the id: it is shown as `0` and counted at the fallback for that half, and at `0` only on Ollama or such a local `base_url` (a row naming a built-in id shows and counts the built-in price it leaves out). For `llm keys list` the row carries the daemon's `priority` string and a `keyless` flag.
 - `llm usage --date` only applies together with `--daily`.
 - **`llm strategy` has no effect at present.** The command prints a success line, but the daemon route it calls (`PUT /v1/orchestrator/config`) reads only `model` and `fallback_models` and ignores the strategy. Key selection is read from `llm.toml`: `strategy = "round_robin"` (the default), `"lru"` or `"primary_fallback"` under `[providers.<name>]`.
 
@@ -418,31 +432,51 @@ directory can never load.
 
 **Installing grants nothing.** The plugin arrives with its toggle at the
 default (on) and *no consent decision*, so it sits `unapproved`/`never_seen`
-and nothing runs. `ext approve <id>` is the single action that starts it. The
-command prints the manifest first — what it contributes, what capabilities it
-asks for, which config keys it needs — because that is the decision approving
-makes. Every hidden character the plugin's author put in it — in the name,
-version, description, entry, capabilities or keys: a bidi override, a zero-width
-or control character, a variation selector, any space but a plain one, an object
-replacement character, a code point Unicode has not assigned or leaves to
-private use, a line break or a tab — is shown as `<U+XXXX>`, and a line under
-the manifest counts them (`Note: this request contains 2 hidden characters,
-shown as <U+…>.`). On a terminal the manifest starts with the same reset as an
-approval prompt (see [Approval prompts](#approval-prompts)). `install --dry-run`
-and `update` print it the same way. The lines under the manifest — `ok installed
-<id>`, the `ext approve <id>` it tells you to run, and `update`'s `ok updated
-<id>` and `now also asks for:` — show the id and each capability the same way,
-and the count under the manifest covers them: they are the manifest's own name
-and capabilities. A warning `update` prints shows its control characters as
+and nothing runs. `ext approve <id>` is the single action that starts it.
+`ext install` prints the manifest first — what it contributes, what
+capabilities it asks for, which config keys it needs — because that is the
+decision approving makes. Every hidden character the plugin's author put in the
+manifest — in the name, version, description, entry, capabilities or keys: a
+bidi override, a zero-width or control character, a variation selector, any
+space but a plain one, an object replacement character, a code point Unicode
+has not assigned or leaves to private use, a line break or a tab — is shown as
+`<U+XXXX>`, and a line under the manifest counts them (`Note: this request
+contains 2 hidden characters, shown as <U+…>.`). On a terminal the manifest
+starts with the same reset as an approval prompt (see
+[Approval prompts](#approval-prompts)). `install --dry-run` and `update` print
+it the same way. The lines under the manifest — `ok installed <id>`, the
+`ext approve <id>` it tells you to run, and `update`'s `ok updated <id>` and
+`now also asks for:` — show the id and each capability the same way, and the
+count under the manifest covers them: they are the manifest's own name and
+capabilities. A warning `update` prints shows its control characters as
 `<U+XXXX>` and is not counted.
+
+One line of OpenAlpaca's own says what approving grants. `install --dry-run`
+prints it under the manifest; `install`, and `update` when it leaves the plugin
+awaiting consent, print it last; `ext info` prints it for a plugin awaiting
+consent. An `update` that kept consent leaves nothing to approve and prints
+none. The line reads:
+
+```text
+Approving lets this plugin's program run as you, with the daemon's environment (less OPENALPACA_MASTER_KEY) and all the file and network access your account has; the capabilities it asks for name what it contributes to agents, not what it can do (Daemon Manual, Extensions).
+```
+
+The capabilities are what consent is recorded for: they name what the plugin
+contributes to agents, not what the program can do — the program runs
+unconfined (see the Daemon Manual's
+[Extensions](Daemon_Manual.md#extensions-mcp-servers--plugins)). The line is
+not the author's, so nothing in it is escaped or counted.
 
 Under the manifest, a `warning:` line names each key `plugin.toml` sets that
 OpenAlpaca does not read — a top-level `tool = true` is ignored, since the
 switch is `types.tools`, and the line says what the key likely meant — and says
 that `types.connector` (connectors are not supported) and `types.provider` (the
-plugin provider bridge is not wired) contribute nothing. A warning never
-refuses: `install --dry-run`, `install` and `update` print it, the
-`ext approve` row repeats it, and `ext info plugin <id>` says it for an
+plugin provider type is removed: LLM providers are the built-in ones,
+configured in `llm.toml` or with `openalpaca llm`) contribute nothing, and
+that a `[config]` on a plugin with `mcp_compatible = true` is never sent to it (such
+a plugin is opened with MCP's `initialize`, which carries no configuration).
+A warning never refuses: `install --dry-run`, `install` and `update` print it,
+the `ext approve` row repeats it, and `ext info plugin <id>` says it for an
 installed plugin — one dropped in by hand included, before you approve it. The
 key is shown with its hidden characters as `<U+XXXX>`, as every manifest line
 is.
@@ -969,15 +1003,17 @@ Notes:
 
 ### `skills`
 
-The skills the daemon loaded from `config/skills/`, and every problem its last
-scan of that directory found, through `GET /v1/skills` and
-`GET /v1/skills/diagnostics`. Both are reads: a skill has no on/off switch.
+The skills the daemon loaded — the ones built into it and those in
+`config/skills/` — and every problem its last scan of that directory found,
+through `GET /v1/skills` and `GET /v1/skills/diagnostics`. Both are reads: a
+skill has no on/off switch.
 
 ```bash
 openalpaca skills list                 # the catalog, then the problems
 openalpaca skills list --format json   # {"skills": [...], "diagnostics": [...]}
 openalpaca skills info review          # one skill, by id or slash command
 openalpaca skills info /review
+openalpaca skills tidy [--apply]       # the unedited copies in config/skills
 ```
 
 Notes:
@@ -994,12 +1030,43 @@ Notes:
   `requires_capabilities` leaves the skill with no tools), `deprecated_field`,
   `id_mismatch` (the frontmatter's `id` is not the directory's name, which is
   the id), `slash_conflict` (two skills claim one slash command; the one
-  named answers it) and `no_tools` (no `requires_capabilities`, `tools.allow`,
-  `scripts` or `depends_on`: the skill runs with no tools), warnings. Each line gives the file and the daemon's message.
+  named answers it), `no_tools` (no `requires_capabilities`, `tools.allow`,
+  `scripts` or `depends_on`: the skill runs with no tools) and
+  `stale_shipped_file` (a folder overriding a built-in skill runs a file an
+  earlier build shipped, which the built-in skill has since changed),
+  warnings. Each line gives the file and the daemon's message.
+- The SOURCE column says where each skill comes from: `file:bundled` (built
+  into the daemon), `file:project` (a folder in `config/skills/`),
+  `file:override` (a folder there that overrides the built-in skill of the
+  same id — the route's `file:project` with `overrides_bundled: true`) or
+  `plugin:<id>`. `info` keeps the route's word on its `source:` line, adds
+  `overrides:   the bundled skill <id>` for an override, and a `not used:`
+  line for each definition of the id that does not run: the built-in skill
+  under your folder, or a folder set aside because it is an unedited copy of
+  a version OpenAlpaca shipped (the built-in skill runs in its place). With
+  `--format json` each skill carries the route's `overrides_bundled` and
+  `not_used` as they are.
 - `info` on a skill the daemon skipped says it is not loaded and shows why; a
   name that is neither a loaded skill nor in the problems is an error.
 - The scan runs when the daemon starts, and a skill's problems are re-read when
   its directory changes.
+- `tidy` is `agents tidy` for `config/skills/`: it lists each folder there that
+  is an unedited copy of a skill OpenAlpaca shipped (every file in it a version
+  shipped at its path; a missing file allowed), which this build does not read,
+  and moves nothing; `tidy --apply` moves each folder, whole, to
+  `skills/.archived/<id>.<UTC timestamp>/` and ends with the same warning for
+  an earlier build. A folder you edited or added a file to stays. A folder
+  moved there is not read as a skill. Inside a git work tree `tidy --apply`
+  moves nothing and stops with an error naming it, as `agents tidy --apply`
+  does, also when `skills/` is a link into one or holds its own `.git`;
+  `tidy` alone still lists, and with no unedited copy either says there is
+  nothing to tidy. A `.git` with any file in it (a repository's `HEAD`, a
+  linked worktree's `.git` file) makes a skill's folder yours, so it is not
+  listed at all; an unedited copy whose folder holds a `.git` with no file
+  in it is left where it is: `tidy` says it would be left and
+  `tidy --apply` that it was left, each naming it and why, and every other
+  copy moves as before; when every copy listed would be left, `tidy`'s
+  last line says `tidy --apply` would move none of them.
 
 ### `chat`
 
@@ -1111,7 +1178,7 @@ A tool on the confirm list suspends the turn and asks before it runs.
 
 #### Slash commands
 
-- The daemon answers these chat-level commands itself, without asking a model: `/status [task_id]`, `/tasks`, `/cancel`/`/pause`/`/resume` (bare forms target the lane's active workflows, or pass an explicit task id), and `/steer <text>` (inject a correction into the running workflow).
+- The daemon answers these chat-level commands itself, without asking a model: `/status [task_id]`, `/tasks`, `/cancel` (the bare form targets the lane's active workflows, or pass an explicit task id), `/pause` and `/resume` (each answers that pause is not supported — `/cancel` stops a run — and changes nothing), and `/steer <text>` (inject a correction into the running workflow).
 - `/<skill>` runs that skill directly, without the main loop choosing it.
 - In the REPL, only the client-side commands (`/help`, `/model`, `/models`, `/agents`, `/keys`, `/usage`, `/clear`, `/verbose`) are handled locally. Every other slash line — the daemon commands here, the [memory commands](#memory-commands), and anything unrecognized (which may be a skill command) — is forwarded to the daemon as a chat message, so `/steer focus on the tests` works directly at the prompt. `/help` lists them and Tab completes them.
 - One-shot mode works too: `openalpaca chat --message "/steer focus on the tests"`.
@@ -1146,10 +1213,11 @@ Alpaca: Forgot “I review diffs in a split view” (3f9a1c2d). The note files, 
 
 ## Troubleshooting
 
-- Discovery missing/expired: start or restart daemon. `Discovery token has expired` means the daemon has been up for more than 24 hours — `openalpaca daemon restart`.
+- Discovery missing/expired: start or restart daemon. A running daemon renews its token every 12 hours, so `Discovery token has expired` means a daemon that answers is not renewing it: it was built before the renewal, or the Mac has just woken from a sleep past the expiry (wait a minute and try again) — otherwise `openalpaca daemon restart`. A hung daemon is reported `still starting after 45 seconds` instead.
 - Auth errors: ensure CLI and daemon use the same current discovery file (the same `OPENALPACA_HOME_STORE`, if you set one).
 - `daemon status` unhealthy: inspect the daemon log (`~/.openalpaca/state/logs/daemon.log` for a daemon started with `openalpaca daemon start` or by the GUI app) and `RUST_LOG` settings.
 - `daemon stop` or `restart` exits with status 2: the old daemon was not gone 15 s after it was asked to stop. The message says whether the process is still running (it prints the `kill -9 <pid>` that finishes the job) or something still holds the single-instance lock (check `openalpaca daemon status`). `restart` starts nothing in either case.
+- `daemon start --daemon-only` or `restart` exits with status 1 after starting a daemon: the daemon did not answer. One that exited at boot has its own lines from `daemon.log` printed above the message — a database written by another build is refused there (`openalpaca config reset --factory` is the way through); one still silent after 45 seconds is still starting, and its log says what it is doing. When no daemon has written its discovery file 45 seconds after the start, the message also names the process the start spawned if it is still running, which is not stopped: from a repository checkout it is the `cargo run -p openalpacad` fallback, whose first build can take longer than that, and the daemon it then starts is the one `status` finds.
 - Chat/stream failures: verify daemon is reachable on `127.0.0.1` and token is valid.
 - A chat turn fails with no routable model: run `openalpaca llm status` — its `Model:` line names the fix. With a local Ollama that is `openalpaca config set ai.ollama.enabled true`, then `openalpaca llm models --refresh`.
 - A scripted or piped turn reports that a tool needs an approval it cannot ask for: the turn was unattended, so the tool was refused without a prompt. Run that work from the GUI or from an interactive `openalpaca chat`, and approve it there.

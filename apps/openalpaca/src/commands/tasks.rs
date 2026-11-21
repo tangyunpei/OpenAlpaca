@@ -1,5 +1,8 @@
 //! Tasks command — list, status, log, create, cancel, pause, resume
 //!
+//! `pause` is refused here, before any request, until a later design
+//! (PAUSE-OFF): the daemon's route refuses it too.
+//!
 //! `resume` is one word over two verbs, exactly as the daemon route is: it
 //! un-pauses a paused run, and — when the daemon has §5.6c's experimental
 //! replay resume enabled — continues an `interrupted` one from the history
@@ -22,11 +25,14 @@ pub struct TasksArgs {
     pub command: TasksCommands,
 }
 
-/// The help text below may hold commas, apostrophes and `//` lines again:
-/// `scripts/gen_api_docs.py` blanks comment text before it splits a
-/// `Subcommand` enum body, so prose no longer invents or shadows a variant.
-/// Covered by `scripts/tests/test_gen_api_docs.py`.
+// The help text below may hold commas, apostrophes and `//` lines again:
+// `scripts/gen_api_docs.py` blanks comment text before it splits a
+// `Subcommand` enum body, so prose no longer invents or shadows a variant.
+// Covered by `scripts/tests/test_gen_api_docs.py`. A plain comment: a doc
+// comment here would be clap's about text, and under the deferred
+// `Commands` (M61) it would replace `tasks --help`'s own.
 #[derive(Subcommand)]
+#[command(defer = true)]
 pub enum TasksCommands {
     /// List tasks
     List {
@@ -69,7 +75,8 @@ pub enum TasksCommands {
         /// Task ID
         task_id: String,
     },
-    /// Pause a running task
+    /// Not supported until a later design: says so and exits 1 without
+    /// reaching the daemon. Cancel stops a run
     Pause {
         /// Task ID
         task_id: String,
@@ -91,7 +98,7 @@ pub enum TasksCommands {
 // ── Local deserialization structs ────────────────────────────────
 
 #[derive(Debug, Serialize, Deserialize)]
-struct TaskItem {
+pub(crate) struct TaskItem {
     id: String,
     title: String,
     status: String,
@@ -107,12 +114,12 @@ struct TaskItem {
 }
 
 #[derive(Debug, Serialize, Deserialize)]
-struct TaskDetail {
+pub(crate) struct TaskDetail {
     task: TaskInner,
 }
 
 #[derive(Debug, Serialize, Deserialize)]
-struct TaskInner {
+pub(crate) struct TaskInner {
     id: String,
     title: String,
     #[serde(default)]
@@ -139,7 +146,7 @@ struct TaskInner {
 /// opened when the subagent is spawned, so a lane still working has a row here
 /// where `agent_task_history` had none at all.
 #[derive(Debug, Clone, Serialize, Deserialize)]
-struct TimelineLane {
+pub(crate) struct TimelineLane {
     label: String,
     template_id: String,
     /// `running` / `done` / `failed` / `blocked` / `cancelled`.
@@ -154,7 +161,7 @@ struct TimelineLane {
 
 /// `GET /v1/tasks/{id}/timeline` (GAP-09).
 #[derive(Debug, Clone, Serialize, Deserialize)]
-struct TaskTimeline {
+pub(crate) struct TaskTimeline {
     lanes: Vec<TimelineLane>,
 }
 
@@ -174,7 +181,7 @@ struct TaskStatusJson<'a> {
 
 /// One row of `GET /v1/events/history`.
 #[derive(Debug, Serialize, Deserialize)]
-struct EventLogEntry {
+pub(crate) struct EventLogEntry {
     id: Option<i64>,
     timestamp: String,
     event_type: String,
@@ -193,7 +200,7 @@ struct EventLogEntry {
 
 /// `GET /v1/events/history` — always this envelope, never a bare array (P20).
 #[derive(Debug, Serialize, Deserialize)]
-struct EventHistoryPage {
+pub(crate) struct EventHistoryPage {
     events: Vec<EventLogEntry>,
     /// Pass back as `?before=` to walk to the older page; `null` at the end.
     #[serde(default)]
@@ -263,7 +270,7 @@ pub async fn run(args: TasksArgs) -> Result<()> {
             priority,
         } => create_task(description, priority).await,
         TasksCommands::Cancel { task_id } => task_action(&task_id, "cancel").await,
-        TasksCommands::Pause { task_id } => task_action(&task_id, "pause").await,
+        TasksCommands::Pause { .. } => pause_refused(),
         TasksCommands::Resume { task_id } => task_action(&task_id, "resume").await,
         TasksCommands::Confirmations { command } => {
             crate::commands::confirmations::run(command).await
@@ -271,12 +278,28 @@ pub async fn run(args: TasksArgs) -> Result<()> {
     }
 }
 
-async fn list_tasks(status: Option<String>, limit: usize, format: OutputFormat) -> Result<()> {
-    let client = DaemonClient::connect()?;
+/// `GET /v1/tasks`'s path for `tasks`: `status` as typed, encoded (*Rev
+/// 147*'s item 6, (b)); held to the route's query sample by `contract_queries`.
+pub(crate) fn list_path(status: Option<&str>, limit: usize) -> String {
     let mut path = format!("/v1/tasks?limit={}", limit);
-    if let Some(ref s) = status {
-        path.push_str(&format!("&status={}", s));
+    if let Some(s) = status {
+        path.push_str(&format!("&status={}", urlencoding::encode(s)));
     }
+    path
+}
+
+/// `GET /v1/events/history`'s path for `tasks log`: one run's rows.
+pub(crate) fn log_path(task_id: &str, limit: usize) -> String {
+    format!(
+        "/v1/events/history?task_id={}&limit={}",
+        urlencoding::encode(task_id),
+        limit
+    )
+}
+
+async fn list_tasks(status: Option<String>, limit: usize, format: OutputFormat) -> Result<()> {
+    let client = DaemonClient::connect().await?;
+    let path = list_path(status.as_deref(), limit);
     let tasks: Vec<TaskItem> = client.get(&path).await?;
     print_list(&tasks, format);
     Ok(())
@@ -374,7 +397,7 @@ fn render_task_status(t: &TaskInner, lanes: Result<&[TimelineLane], &str>) -> St
 }
 
 async fn task_status(task_id: &str, format: OutputFormat) -> Result<()> {
-    let client = DaemonClient::connect()?;
+    let client = DaemonClient::connect().await?;
     let detail: TaskDetail = client.get(&format!("/v1/tasks/{}", task_id)).await?;
     // The agent runs come from the timeline now — the task routes stopped
     // carrying them with P8. It is a second call, so it fails independently:
@@ -413,17 +436,11 @@ async fn task_status(task_id: &str, format: OutputFormat) -> Result<()> {
 }
 
 async fn task_log(task_id: &str, limit: usize) -> Result<()> {
-    let client = DaemonClient::connect()?;
+    let client = DaemonClient::connect().await?;
     // The server filters by run now (GAP-10) — the whole page is this task's,
     // so `--limit` is a limit on *its* rows rather than on a global window
     // that a busy daemon would fill with other runs' events.
-    let page: EventHistoryPage = client
-        .get(&format!(
-            "/v1/events/history?task_id={}&limit={}",
-            urlencoding::encode(task_id),
-            limit
-        ))
-        .await?;
+    let page: EventHistoryPage = client.get(&log_path(task_id, limit)).await?;
 
     if page.events.is_empty() {
         println!("{}", "No log entries found for this task.".dimmed());
@@ -495,6 +512,12 @@ fn owner_of(lane_key: &str) -> &str {
         .map_or(lane_key, |(owner, _)| owner)
 }
 
+/// `POST /v1/tasks/{id}/action`'s body (`cancel`, `pause`, `resume`,
+/// `start`), from `task cancel|pause|resume`.
+pub(crate) fn action_body(action: &str) -> serde_json::Value {
+    serde_json::json!({ "action": action })
+}
+
 /// The body `POST /v1/tasks` takes.
 ///
 /// **The lane is the caller's own** (V6). `"cli_user:cli"` was a lane nobody
@@ -511,7 +534,12 @@ fn owner_of(lane_key: &str) -> &str {
 /// the GUI, the follow-up runner — inherits what the parker said unless it
 /// declares for itself. Sent only when it is true, so an attended create's
 /// body is what it was but for the lane.
-fn create_body(title: &str, priority: i32, unattended: bool, lane_key: &str) -> serde_json::Value {
+pub(crate) fn create_body(
+    title: &str,
+    priority: i32,
+    unattended: bool,
+    lane_key: &str,
+) -> serde_json::Value {
     let mut body = serde_json::json!({
         "title": title,
         "created_by": owner_of(lane_key),
@@ -536,7 +564,7 @@ async fn create_task(description: Option<String>, priority: i32) -> Result<()> {
         }
     };
 
-    let client = DaemonClient::connect()?;
+    let client = DaemonClient::connect().await?;
     // V6: the lane this CLI talks on, as the daemon names it — the same read
     // `openalpaca chat` does, not a second resolver.
     let lane_key = crate::commands::sessions::default_lane_key(&client).await?;
@@ -556,14 +584,22 @@ async fn create_task(description: Option<String>, priority: i32) -> Result<()> {
 }
 
 async fn task_action(task_id: &str, action: &str) -> Result<()> {
-    let client = DaemonClient::connect()?;
-    let body = serde_json::json!({ "action": action });
+    let client = DaemonClient::connect().await?;
+    let body = action_body(action);
     let result: serde_json::Value = client
         .post(&format!("/v1/tasks/{}/action", task_id), &body)
         .await?;
 
     println!("{}", action_line(task_id, &result));
     Ok(())
+}
+
+/// `openalpaca tasks pause` (PAUSE-OFF): the daemon refuses `pause` until a
+/// later design, so the verb says so itself, before any daemon is reached —
+/// it answers with none running. The sentence is the chat's and the route's
+/// own; `main` prints it on stderr and exits 1.
+fn pause_refused() -> Result<()> {
+    anyhow::bail!(openalpaca_core::orchestrator::PAUSE_UNSUPPORTED)
 }
 
 /// The one line an action prints, split out so its shape is testable without
@@ -596,6 +632,33 @@ fn action_line(task_id: &str, result: &serde_json::Value) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// PAUSE-OFF: `openalpaca tasks pause` answers the chat's and the route's
+    /// sentence itself and reaches no daemon. The sandbox holds no discovery
+    /// file, so a verb that tried to connect would fail "Daemon is not
+    /// running" instead; `main` prints the error on stderr and exits 1.
+    #[test]
+    fn pause_is_refused_with_the_sentence_and_no_request() {
+        let tmp = tempfile::tempdir().unwrap();
+        let _env = crate::test_util::EnvSandbox::enter(tmp.path());
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("a runtime");
+
+        let err = runtime
+            .block_on(run(TasksArgs {
+                command: TasksCommands::Pause {
+                    task_id: "task-1".to_string(),
+                },
+            }))
+            .expect_err("pause is refused");
+
+        assert_eq!(
+            err.to_string(),
+            openalpaca_core::orchestrator::PAUSE_UNSUPPORTED
+        );
+    }
 
     /// `colored` decides by tty at first use; pin it off so a table row's
     /// cells can be read literally.
@@ -861,7 +924,10 @@ mod tests {
     fn tasks_list_status_help_names_interrupted() {
         use clap::Args as _;
 
-        let cmd = TasksArgs::augment_args(clap::Command::new("tasks"));
+        // `TasksCommands` defers its variants' arguments (M61): built, the
+        // `list` subcommand carries them.
+        let mut cmd = TasksArgs::augment_args(clap::Command::new("tasks"));
+        cmd.build();
         let list = cmd
             .find_subcommand("list")
             .expect("tasks has a list subcommand");

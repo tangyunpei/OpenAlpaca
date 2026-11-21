@@ -165,7 +165,6 @@
 //! state identically, so whether those bytes survive no longer depends on
 //! whether anyone happened to open the file first.
 
-use std::fmt;
 use std::fs;
 use std::io::Write as _;
 use std::path::{Path, PathBuf};
@@ -243,11 +242,13 @@ const LINE_COUNT_DEADLINE: std::time::Duration = std::time::Duration::from_milli
 /// The typed failures callers branch on. Returned inside `anyhow::Error`, so a
 /// route recovers them with `err.downcast_ref::<ArtifactError>()` and maps
 /// [`ArtifactError::code`] onto the status codes of §4.9.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
 pub enum ArtifactError {
     /// No such artifact id (or it is not visible to this owner).
+    #[error("artifact {id} not found")]
     NotFound { id: String },
     /// The row exists but its bytes are gone — §4.9's **410** `ARTIFACT_GONE`.
+    #[error("artifact {id} is gone: {path} no longer exists")]
     Gone { id: String, path: String },
     /// A result file of a project whose recorded root no longer leads to its
     /// own folder — gone, renamed by case only, or moved with a link left at
@@ -256,13 +257,20 @@ pub enum ArtifactError {
     /// R-T26): **410** `ARTIFACT_PROJECT_MISSING`, naming the root as
     /// recorded and the re-point. The row is marked missing, as an absent
     /// head is.
+    #[error(fmt = project_missing)]
     ProjectMissing { id: String, root: String },
     /// The artifact exists but has no such version.
+    #[error("artifact {id} has no version {version}")]
     VersionNotFound { id: String, version: u32 },
     /// §4.9: `kind ∈ {image, binary}` → **409** `NOT_DIFFABLE`.
+    #[error("artifact {id} of kind {kind} is not diffable")]
     NotDiffable { id: String, kind: &'static str },
     /// R32: one side of the diff is above [`MAX_DIFF_BYTES`] → **409**
     /// `DIFF_TOO_LARGE`. Refused before the bytes are read, not after.
+    #[error(
+        "artifact {id} version {version} is {size_bytes} bytes, above the \
+         {limit}-byte diff limit; its stored line counts are the summary"
+    )]
     DiffTooLarge {
         id: String,
         version: u32,
@@ -278,7 +286,20 @@ pub enum ArtifactError {
     /// row-less file is as likely the user's (a factory reset keeps every
     /// artifact file) as an interrupted create's; this is what is left when
     /// stepping past runs out.
+    #[error(
+        "no free name in {MAX_HEAD_PROBES} tries from {path}: each is held by a \
+         file this store will not replace; move them aside and write again"
+    )]
     NameTaken { path: String },
+}
+
+/// [`ArtifactError::ProjectMissing`]'s sentence: the one every reader of a
+/// missing project's file shows
+/// ([`crate::store::projects::missing_project_sentence`]).
+fn project_missing(_id: &str, root: &str, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+    f.write_str(&crate::store::projects::missing_project_sentence(
+        Path::new(root),
+    ))
 }
 
 impl ArtifactError {
@@ -295,43 +316,6 @@ impl ArtifactError {
         }
     }
 }
-
-impl fmt::Display for ArtifactError {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            Self::NotFound { id } => write!(f, "artifact {id} not found"),
-            Self::Gone { id, path } => {
-                write!(f, "artifact {id} is gone: {path} no longer exists")
-            }
-            Self::ProjectMissing { root, .. } => f.write_str(
-                &crate::store::projects::missing_project_sentence(Path::new(root)),
-            ),
-            Self::VersionNotFound { id, version } => {
-                write!(f, "artifact {id} has no version {version}")
-            }
-            Self::NotDiffable { id, kind } => {
-                write!(f, "artifact {id} of kind {kind} is not diffable")
-            }
-            Self::DiffTooLarge {
-                id,
-                version,
-                size_bytes,
-                limit,
-            } => write!(
-                f,
-                "artifact {id} version {version} is {size_bytes} bytes, above the \
-                 {limit}-byte diff limit; its stored line counts are the summary"
-            ),
-            Self::NameTaken { path } => write!(
-                f,
-                "no free name in {MAX_HEAD_PROBES} tries from {path}: each is held by a \
-                 file this store will not replace; move them aside and write again"
-            ),
-        }
-    }
-}
-
-impl std::error::Error for ArtifactError {}
 
 // ============================================================================
 // Types
@@ -2474,7 +2458,7 @@ fn read_version_text(id: &str, version: u32, path: &Path) -> Result<String> {
         }));
     }
     let bytes = fs::read(path).with_context(|| format!("failed to read {}", path.display()))?;
-    Ok(String::from_utf8_lossy(&bytes).into_owned())
+    Ok(String::from_utf8_lossy_owned(bytes))
 }
 
 /// One produced head sitting directly in a run/loose directory.

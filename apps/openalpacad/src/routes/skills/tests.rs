@@ -28,13 +28,12 @@ struct SkillBridge {
     skill: &'static str,
 }
 
-#[async_trait::async_trait]
 impl openalpaca_api::plugin_traits::PluginSkillExecutor for SkillBridge {
     async fn invoke(
         &self,
         _query: &str,
         _context: &serde_json::Value,
-        _tool_executor: &dyn openalpaca_api::plugin_traits::ToolCallbackExecutor,
+        _tool_executor: &openalpaca_api::plugin_traits::DynToolCallbackExecutor<'_>,
     ) -> Result<String, String> {
         Ok(String::new())
     }
@@ -187,9 +186,11 @@ fn an_unrecorded_plugins_skill_reads_as_enabled() {
     assert_eq!(row["origin"]["state"], "enabled");
 }
 
-/// **The row shape, exactly** — eleven keys and no twelfth, on both sources.
+/// **The row shape, exactly** — thirteen keys and no fourteenth, on both
+/// sources (subagent design §2.7 R-2 added `overrides_bundled` and
+/// `not_used`).
 #[test]
-fn every_row_carries_the_eleven_keys_and_no_others() {
+fn every_row_carries_the_thirteen_keys_and_no_others() {
     let dir = tempfile::tempdir().expect("tempdir");
     let catalog = SkillCatalog::new();
     scan_file_skill(&catalog, dir.path(), "code-review", REVIEW_SKILL);
@@ -207,6 +208,8 @@ fn every_row_carries_the_eleven_keys_and_no_others() {
         "invocations_today",
         "version",
         "author",
+        "overrides_bundled",
+        "not_used",
     ];
     expected.sort_unstable();
 
@@ -224,6 +227,8 @@ fn every_row_carries_the_eleven_keys_and_no_others() {
         assert!(row["triggers"]["keywords"].is_array());
         assert!(row["invocations_today"].is_i64());
         assert!(row["author"].is_string());
+        assert!(row["overrides_bundled"].is_boolean());
+        assert!(row["not_used"].is_array());
         assert!(
             ["file", "plugin"].contains(&row["source"].as_str().unwrap()),
             "unknown source: {row}"
@@ -234,6 +239,72 @@ fn every_row_carries_the_eleven_keys_and_no_others() {
             "the origin-null rule does not hold for {row}"
         );
     }
+}
+
+/// Subagent design §2.7 R-2, over a store as the daemon starts it: a
+/// bundled skill keeps `source: "file"` and reads `author: "file:bundled"`;
+/// a config folder over a bundled key reads `file:project` with
+/// `overrides_bundled: true` and the bundled skill in `not_used`; a set-aside
+/// unedited copy is in its key's `not_used`, with its version.
+#[test]
+fn skills_rows_carry_file_bundled_overrides_bundled_and_not_used() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let root = dir.path().canonicalize().unwrap();
+    let _guard = crate::test_util::HomeStoreGuard::set(&root.join("home"));
+    let pack = root.join("state/cache/bundled-skills");
+    let skills = root.join("config/skills");
+    // An edited code-review, and this build's explain-code, unedited.
+    let mine = skills.join("code-review");
+    std::fs::create_dir_all(&mine).unwrap();
+    std::fs::write(mine.join("SKILL.md"), REVIEW_SKILL).unwrap();
+    let copy = skills.join("explain-code");
+    std::fs::create_dir_all(&copy).unwrap();
+    let explain = openalpaca_core::bundled::BUNDLED_SKILLS
+        .iter()
+        .find(|f| f.path == "skills/explain-code/SKILL.md")
+        .unwrap();
+    std::fs::write(copy.join("SKILL.md"), explain.contents).unwrap();
+
+    let catalog = SkillCatalog::new();
+    assert_eq!(catalog.load_bundled_layer(&pack), 4);
+    catalog.scan_config_layer(&skills);
+    let rows = skills_json(&catalog, &ExtensionLedger::new(), &HashMap::new());
+
+    let bundled = find(&rows, "commit-message");
+    assert_eq!(bundled["source"], "file");
+    assert_eq!(bundled["author"], "file:bundled");
+    assert_eq!(bundled["overrides_bundled"], false);
+    assert_eq!(bundled["not_used"], serde_json::json!([]));
+
+    let overriding = find(&rows, "code-review");
+    assert_eq!(overriding["author"], "file:project");
+    assert_eq!(overriding["overrides_bundled"], true);
+    assert_eq!(
+        overriding["not_used"],
+        serde_json::json!([{
+            "source": "bundled",
+            "path": pack.join("code-review").display().to_string(),
+            "plugin": null,
+            "reason": "overridden",
+            "version": null,
+            "edit": null,
+        }])
+    );
+
+    let set_aside = find(&rows, "explain-code");
+    assert_eq!(set_aside["author"], "file:bundled");
+    assert_eq!(set_aside["overrides_bundled"], false);
+    assert_eq!(
+        set_aside["not_used"],
+        serde_json::json!([{
+            "source": "file",
+            "path": copy.display().to_string(),
+            "plugin": null,
+            "reason": "unedited_copy",
+            "version": "current",
+            "edit": null,
+        }])
+    );
 }
 
 /// `HashMap` iteration jitters, so the array is sorted by id and two reads of
@@ -417,4 +488,68 @@ fn the_catalog_stays_a_bare_array_of_the_loaded_skills() {
     for row in &rows {
         assert!(row.get("diagnostics").is_none(), "{row}");
     }
+}
+
+/// `/v1/skills*`'s JSON bodies for the API contract's folder (API-CONTRACT):
+/// the bundled layer under a config folder (an override and a set-aside
+/// copy), a plugin's skill, the troubled scan's diagnostics, and one run's
+/// health.
+pub(crate) async fn contract_samples(out: &mut crate::contract::Samples) {
+    use crate::contract::ok_body;
+    let dir = tempfile::tempdir().expect("tempdir");
+    let root = dir.path().canonicalize().unwrap();
+    let _guard = crate::test_util::HomeStoreGuard::set(&root.join("home"));
+    let pack = root.join("state/cache/bundled-skills");
+    let skills = root.join("config/skills");
+    let mine = skills.join("code-review");
+    std::fs::create_dir_all(&mine).unwrap();
+    std::fs::write(mine.join("SKILL.md"), REVIEW_SKILL).unwrap();
+    let copy = skills.join("explain-code");
+    std::fs::create_dir_all(&copy).unwrap();
+    let explain = openalpaca_core::bundled::BUNDLED_SKILLS
+        .iter()
+        .find(|f| f.path == "skills/explain-code/SKILL.md")
+        .unwrap();
+    std::fs::write(copy.join("SKILL.md"), explain.contents).unwrap();
+    let catalog = SkillCatalog::new();
+    catalog.load_bundled_layer(&pack);
+    catalog.scan_config_layer(&skills);
+    register_plugin_skill(&catalog, "notion", "daily-digest");
+    let rows = skills_json(&catalog, &ExtensionLedger::new(), &HashMap::new());
+    out.response("get-skills", serde_json::Value::Array(rows));
+
+    let troubled = tempfile::tempdir().expect("tempdir");
+    let rows = diagnostics_json(&troubled_catalog(troubled.path()));
+    out.response("get-skills-diagnostics", serde_json::Value::Array(rows));
+
+    let db = openalpaca_storage::Database::open(&root.join("test.db")).expect("open db");
+    openalpaca_storage::SkillExecutionRepository::new(&db)
+        .record(
+            &openalpaca_storage::models::skill_execution::SkillExecutionEntry {
+                id: None,
+                request_id: "req-1".to_string(),
+                skill_id: "code-review".to_string(),
+                agent_id: "orchestrator".to_string(),
+                status: "completed".to_string(),
+                finish_reason: Some("stop".to_string()),
+                error_message: None,
+                validation_failures: None,
+                duration_ms: 5,
+                rounds_used: Some(1),
+                tool_calls_made: Some(0),
+                input_tokens: 10,
+                output_tokens: 5,
+                cost_usd: 0.01,
+                model_used: Some("qwen3:8b".to_string()),
+                query_preview: Some("review".to_string()),
+                route_score: Some(1.0),
+                was_auto_selected: true,
+                repair_attempted: false,
+                repair_succeeded: false,
+                timestamp: None,
+            },
+        )
+        .expect("record a run");
+    let body = ok_body(skill_health(&db)).await;
+    out.response("get-skills-health", body);
 }

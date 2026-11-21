@@ -136,9 +136,8 @@ fn walk_dir_glob(
     if results.len() >= max {
         return;
     }
-    let entries = match std::fs::read_dir(current) {
-        Ok(e) => e,
-        Err(_) => return,
+    let Ok(entries) = std::fs::read_dir(current) else {
+        return;
     };
     for entry in entries.flatten() {
         if results.len() >= max {
@@ -161,12 +160,9 @@ fn matches_glob_pattern(path: &Path, root: &Path, pattern: &str) -> bool {
 
 /// Simple glob matcher supporting `**` (recursive) and `*` (single-segment wildcard).
 fn simple_glob_match(pattern: &str, text: &str) -> bool {
-    if pattern.contains("**/") {
-        let parts: Vec<&str> = pattern.splitn(2, "**/").collect();
-        if parts.len() == 2 {
-            // ** matches any number of directories
-            return text.ends_with(parts[1]) || simple_glob_match(parts[1], text);
-        }
+    if let Some((_, rest)) = pattern.split_once("**/") {
+        // ** matches any number of directories
+        return text.ends_with(rest) || simple_glob_match(rest, text);
     }
     // Simple * wildcard matching
     if pattern.contains('*') {

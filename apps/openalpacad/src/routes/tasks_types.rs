@@ -44,10 +44,11 @@ pub struct ListTasksQuery {
 
 #[derive(Debug, Deserialize)]
 pub struct TaskActionRequest {
-    /// `"cancel"` | `"pause"` | `"resume"` — state transitions applied by
+    /// `"cancel"` | `"resume"` — state transitions applied by
     /// `apply_task_action` — plus `"start"`, which is not a transition at all
     /// but a dispatch of the stored row under its own id (D5, GAP-06) and is
-    /// answered by the route before it reaches that function.
+    /// answered by the route before it reaches that function, and `"pause"`,
+    /// which the route refuses (`409`, PAUSE-OFF) before it reaches it.
     pub action: String,
     /// **S5**, on the two actions that dispatch (`start`, `resume`): this
     /// client cannot answer a tool-approval prompt.

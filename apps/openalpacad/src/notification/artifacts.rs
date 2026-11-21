@@ -2,7 +2,7 @@
 
 use std::path::{Path, PathBuf};
 
-use openalpaca_core::orchestrator::ConnectorSendProvider;
+use openalpaca_core::orchestrator::{ConnectorSendProvider, DynConnectorSendProvider};
 use openalpaca_storage::store::StoreScope;
 use openalpaca_storage::{ArtifactRecord, ArtifactStore, Database, FileAssetRepository};
 use tracing::warn;
@@ -118,7 +118,7 @@ fn deliverable_path(record: &ArtifactRecord, run_project: Option<&str>) -> Resul
 /// run whose project cannot be read delivers nothing.
 pub(super) async fn deliver_artifacts(
     db: &Database,
-    send: &dyn ConnectorSendProvider,
+    send: &DynConnectorSendProvider<'_>,
     task_id: &str,
     channel: &str,
     recipient: &str,
@@ -127,9 +127,8 @@ pub(super) async fn deliver_artifacts(
 ) {
     use openalpaca_core::orchestrator::task_state::TaskOutcome;
 
-    let outcome_json = match outcome_json {
-        Some(oj) => oj,
-        None => return,
+    let Some(outcome_json) = outcome_json else {
+        return;
     };
     let outcome: TaskOutcome = match serde_json::from_str(outcome_json) {
         Ok(o) => o,
@@ -159,14 +158,13 @@ pub(super) async fn deliver_artifacts(
     let file_repo = FileAssetRepository::new(db);
     let store = ArtifactStore::new(db);
     for artifact in outcome.artifacts.iter().take(MAX_ARTIFACTS_PER_TASK) {
-        let asset = match resolve_artifact_file(
+        let Some(asset) = resolve_artifact_file(
             &file_repo,
             artifact.file_asset_id.as_deref(),
             &artifact.key,
             expected_owner,
-        ) {
-            Some(a) => a,
-            None => continue,
+        ) else {
+            continue;
         };
         let record = match store.get(&asset.id, expected_owner) {
             Ok(Some(record)) => record,
@@ -233,7 +231,6 @@ mod tests {
         files: Mutex<Vec<(String, String, String)>>,
     }
 
-    #[async_trait::async_trait]
     impl ConnectorSendProvider for RecordingSender {
         async fn send_message(&self, _: &str, _: &str, _: &str) -> Result<String, String> {
             Ok("sent".to_string())
@@ -332,7 +329,7 @@ mod tests {
         let send = RecordingSender::default();
         deliver_artifacts(
             &db,
-            &send,
+            DynConnectorSendProvider::from_ref(&send),
             TASK_ID,
             "telegram",
             "12345",
@@ -372,7 +369,7 @@ mod tests {
         let send = RecordingSender::default();
         deliver_artifacts(
             &db,
-            &send,
+            DynConnectorSendProvider::from_ref(&send),
             TASK_ID,
             "telegram",
             "12345",
@@ -406,7 +403,7 @@ mod tests {
         let send = RecordingSender::default();
         deliver_artifacts(
             &db,
-            &send,
+            DynConnectorSendProvider::from_ref(&send),
             TASK_ID,
             "telegram",
             "12345",
@@ -442,7 +439,7 @@ mod tests {
     async fn deliver(db: &Database, send: &RecordingSender, id: &str) {
         deliver_artifacts(
             db,
-            send,
+            DynConnectorSendProvider::from_ref(send),
             TASK_ID,
             "telegram",
             "12345",

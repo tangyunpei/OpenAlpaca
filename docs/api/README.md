@@ -1,7 +1,7 @@
 # API Docs
 
-> Generated from source by `python3 scripts/gen_api_docs.py`.
-> Validate freshness with `python3 scripts/gen_api_docs.py --check`.
+> Generated from source by `python3.11 scripts/gen_api_docs.py`.
+> Validate freshness with `python3.11 scripts/gen_api_docs.py --check`.
 
 ## Apps
 
@@ -12,6 +12,7 @@
 ## Crates
 
 - [openalpaca_api](crates/openalpaca_api.md)
+- [openalpaca_app_support](crates/openalpaca_app_support.md)
 - [openalpaca_connectors](crates/openalpaca_connectors.md)
 - [openalpaca_core](crates/openalpaca_core.md)
 - [openalpaca_llm](crates/openalpaca_llm.md)

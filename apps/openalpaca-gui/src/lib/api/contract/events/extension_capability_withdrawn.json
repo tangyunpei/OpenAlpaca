@@ -1,0 +1,25 @@
+{
+  "affected_cron_skills": [
+    ""
+  ],
+  "affected_skills": [
+    ""
+  ],
+  "affected_templates": [
+    ""
+  ],
+  "capabilities": [
+    ""
+  ],
+  "cause": "",
+  "id": "",
+  "instance_id": "",
+  "kind": "",
+  "notice_lane": "",
+  "state": "",
+  "tools": [
+    ""
+  ],
+  "ts": "",
+  "type": "extension_capability_withdrawn"
+}

@@ -73,6 +73,71 @@ fn test_parse_provider_type_fn() {
     assert_eq!(parse_provider_type("unknown"), None);
 }
 
+// ── M86: a `plugin:` provider section is skipped with one warning ───────────
+
+/// The plugin provider type is removed (D-I (revised)), and M86's own question
+/// was taken (a): a `[providers."plugin:<name>"]` section left in `llm.toml`
+/// (by hand, or by an earlier build's key route) is skipped with one warning,
+/// so it does not stop every model at the next start. The name is no provider
+/// any more.
+#[test]
+#[tracing_test::traced_test]
+fn an_enabled_plugin_provider_section_is_skipped_with_one_warning() {
+    assert_eq!(parse_provider_type("plugin:acme"), None);
+
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("llm.toml");
+    std::fs::write(
+        &path,
+        r#"[orchestrator]
+model = "claude-haiku-5-5"
+
+[providers."plugin:acme"]
+enabled = true
+"#,
+    )
+    .unwrap();
+
+    let router = build_router(&path).expect("a plugin: section does not stop the router");
+    assert!(router.configured_providers().is_empty());
+    logs_assert(|lines: &[&str]| {
+        let said = lines
+            .iter()
+            .filter(|l| l.contains("WARN") && l.contains("plugin:acme"))
+            .count();
+        match said {
+            1 => Ok(()),
+            n => Err(format!(
+                "{n} warnings naming the section, not one: {lines:?}"
+            )),
+        }
+    });
+    assert!(logs_contain("the plugin provider type is removed"));
+}
+
+/// Every other unknown provider name keeps its refusal.
+#[test]
+fn an_enabled_unknown_provider_section_still_refuses_the_router() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("llm.toml");
+    std::fs::write(
+        &path,
+        r#"[orchestrator]
+model = "claude-haiku-5-5"
+
+[providers.bogus]
+enabled = true
+"#,
+    )
+    .unwrap();
+
+    match build_router(&path) {
+        Err(LlmError::UnknownProvider(name)) => assert_eq!(name, "bogus"),
+        Err(other) => panic!("expected UnknownProvider, got {other}"),
+        Ok(_) => panic!("an unknown provider section built the router"),
+    }
+}
+
 // ── R58(b): a disabled provider contributes no models ───────────────────────
 
 /// A provider the owner turned off must not be in the catalogue after a
@@ -87,7 +152,7 @@ fn a_disabled_provider_contributes_no_models_at_boot() {
     std::fs::write(
         &path,
         r#"[orchestrator]
-model = "claude-haiku-4-5-20251001"
+model = "claude-haiku-5-5"
 
 [providers.openai]
 enabled = false
@@ -108,12 +173,12 @@ context = 128000
         "the disabled provider's own [models] row must stay out"
     );
     assert_eq!(
-        registry.resolve_provider("gpt-5.2"),
+        registry.resolve_provider("gpt-6.1-sol"),
         None,
         "and so must its compiled defaults"
     );
     assert!(
-        registry.resolve_provider("claude-haiku-4-5-20251001").is_some(),
+        registry.resolve_provider("claude-haiku-5-5").is_some(),
         "the enabled providers are untouched"
     );
 }
@@ -142,7 +207,11 @@ fn the_seeded_template_describes_a_discoverable_ollama() {
         "empty means 'whatever is installed', not a tag nobody pulled"
     );
     assert_eq!(ollama.default_max_tokens, Some(8192));
-    assert_eq!(ollama.request_timeout_secs, Some(600));
+    assert_eq!(
+        ollama.request_timeout_secs,
+        Some(3600),
+        "a call to a local model may run up to an hour (LOCAL-CALL-HOUR)"
+    );
     assert!(
         config.models.is_none(),
         "discovery writes the catalogue; the owner writes no [models] rows"
@@ -155,13 +224,64 @@ fn the_seeded_template_describes_a_discoverable_ollama() {
     let runtime = LlmRuntimeConfig::from(&config);
     assert_eq!(
         runtime.request_timeout_for("ollama"),
-        std::time::Duration::from_secs(600),
+        std::time::Duration::from_secs(3600),
         "the local provider's own budget"
     );
     assert_eq!(
         runtime.request_timeout_for("anthropic"),
         std::time::Duration::from_secs(120),
         "and the cloud default is untouched"
+    );
+}
+
+// ── OUTPUT-BUDGET (item 8): 16,000 output tokens by default ────────────────
+
+/// The owner's figure ("budget can be 16000 or higher") on both cloud
+/// providers of the seeded template, where they said 4096; the local
+/// provider keeps its 8192.
+#[test]
+fn the_seeded_template_gives_both_cloud_providers_sixteen_thousand_tokens() {
+    const TEMPLATE: &str = include_str!("../../../../../scripts/release/templates/config/llm.toml");
+    let config: LlmRouterConfig = toml::from_str(TEMPLATE).expect("the seeded template parses");
+    let providers = config.providers.as_ref().expect("providers");
+    assert_eq!(providers["anthropic"].default_max_tokens, Some(16_000));
+    assert_eq!(providers["openai"].default_max_tokens, Some(16_000));
+    assert_eq!(providers["ollama"].default_max_tokens, Some(8192));
+
+    let runtime = LlmRuntimeConfig::from(&config);
+    for (name, budget) in [("anthropic", 16_000), ("openai", 16_000), ("ollama", 8192)] {
+        assert_eq!(
+            runtime.provider_defaults[name].default_max_tokens, budget,
+            "{name}"
+        );
+    }
+}
+
+/// The compiled defaults a file that names no `default_max_tokens` falls
+/// back on: every built-in provider's row and a provider the defaults do
+/// not know are 16,000.
+#[test]
+fn a_file_naming_no_budget_gets_sixteen_thousand_tokens() {
+    let compiled = LlmRuntimeConfig::default();
+    for name in ["anthropic", "openai", "ollama"] {
+        assert_eq!(
+            compiled.provider_defaults[name].default_max_tokens, 16_000,
+            "{name}"
+        );
+    }
+
+    let config: LlmRouterConfig = toml::from_str(
+        "[providers.anthropic]\nenabled = true\n\n[providers.elsewhere]\nenabled = true\n",
+    )
+    .expect("parses");
+    let runtime = LlmRuntimeConfig::from(&config);
+    assert_eq!(
+        runtime.provider_defaults["anthropic"].default_max_tokens,
+        16_000
+    );
+    assert_eq!(
+        runtime.provider_defaults["elsewhere"].default_max_tokens,
+        16_000
     );
 }
 
@@ -182,8 +302,8 @@ fn the_request_timeout_defaults_to_two_minutes() {
 }
 
 /// `[timeouts]` moves every provider; `[providers.<name>] request_timeout_secs`
-/// moves one — a local model that generates for ten minutes without the cloud
-/// providers waiting that long for a dead socket.
+/// moves one — a local model that generates for an hour without the cloud
+/// providers waiting that long for a dead socket. An hour is inside the clamp.
 #[test]
 fn a_per_provider_timeout_outranks_the_global_one() {
     let config: LlmRouterConfig = toml::from_str(
@@ -195,7 +315,7 @@ llm_request_timeout_secs = 45
 
 [providers.ollama]
 enabled = true
-request_timeout_secs = 600
+request_timeout_secs = 3600
 "#,
     )
     .unwrap();
@@ -203,7 +323,7 @@ request_timeout_secs = 600
 
     assert_eq!(
         runtime.request_timeout_for("ollama"),
-        std::time::Duration::from_secs(600),
+        std::time::Duration::from_secs(3600),
         "the provider's own value wins"
     );
     assert_eq!(
@@ -237,7 +357,7 @@ request_timeout_secs = 999999999
     );
     assert_eq!(
         runtime.request_timeout_for("openai"),
-        std::time::Duration::from_secs(86_400)
+        std::time::Duration::from_hours(24)
     );
 }
 
@@ -247,7 +367,7 @@ request_timeout_secs = 999999999
 // builds the crate with none of them, and these tests drive a real
 // `OllamaProvider` against a loopback mock server. `cargo test --workspace`
 // runs them, because `openalpacad` asks for all three features.
-#[cfg(all(feature = "ollama", feature = "openai"))]
+#[cfg(feature = "ollama")]
 mod local_provider_boot {
     use crate::routing::router::{RequestContext, RouterRequest};
     use crate::test_support::{MockHttpServer, MockResponse};
@@ -295,7 +415,6 @@ context = 262144
             thinking: None,
             context_management: None,
             fallback_models: Vec::new(),
-            ephemeral_system_notice: None,
         }
     }
 
@@ -419,5 +538,300 @@ context = 262144
 
         assert_eq!(collected.content, "tick tock done");
         assert_eq!(collected.usage.output_tokens, 3);
+    }
+}
+
+/// M-3: `[providers.<name>.model_aliases]` takes `fast`, `balanced` and
+/// `strong` (any case); any other key is warned at load and ignored, and so
+/// is a pin naming no model.
+#[test]
+#[tracing_test::traced_test]
+fn an_unknown_model_aliases_key_is_warned_and_ignored() {
+    use crate::routing::model_alias::ModelAlias;
+    let config: LlmRouterConfig = toml::from_str(
+        r#"
+[providers.ollama.model_aliases]
+Fast = "qwen3:4b"
+fastest = "qwen3:0.6b"
+strong = "  "
+"#,
+    )
+    .expect("parses");
+    let runtime = LlmRuntimeConfig::from(&config);
+    let pins = &runtime.provider_defaults["ollama"].model_aliases;
+    assert_eq!(pins.len(), 1, "{pins:?}");
+    assert_eq!(pins[&ModelAlias::Fast], "qwen3:4b");
+    // Both are said at WARN: the unknown key, and the pin naming no model.
+    logs_assert(|lines: &[&str]| {
+        let warned = |needles: &[&str]| {
+            lines
+                .iter()
+                .filter(|l| l.contains("WARN") && needles.iter().all(|n| l.contains(n)))
+                .count()
+        };
+        let unknown = warned(&[
+            "[providers.ollama.model_aliases] has a key 'fastest' that is no model alias",
+            "fast, balanced or strong",
+        ]);
+        let empty = warned(&["[providers.ollama.model_aliases] strong names no model"]);
+        match (unknown, empty) {
+            (1, 1) => Ok(()),
+            (u, e) => Err(format!(
+                "one WARN each: the unknown key {u} times, the empty pin {e} times"
+            )),
+        }
+    });
+    // The raw table survives a write of the file's typed form.
+    let written = toml::to_string(&config).expect("serialises");
+    assert!(written.contains("fastest"), "{written}");
+}
+
+/// The one locality rule (LR7, item 17 widened by the owner's second
+/// answers of 2026-11-14): loopback first, then the home network — IPv4's
+/// private ranges and link-local, IPv6's unique-local and link-local, and
+/// an mDNS `.local` name — each range's edges in and the address just
+/// outside each edge out. Every other spelling fails closed: a false yes
+/// would price a paid host at 0, and no name is looked up.
+#[test]
+fn local_urls_are_loopback_or_the_home_network() {
+    for url in [
+        // Loopback, LR7's cases as moved from core.
+        "http://localhost:1234/v1",
+        "http://LOCALHOST/v1",
+        "http://127.0.0.1:8080/v1",
+        "http://127.1.2.3/v1",
+        "http://[::1]:11434/v1",
+        "http://user:pw@localhost:1/v1",
+        // 10.0.0.0/8
+        "http://10.0.0.0/v1",
+        "http://10.0.0.5/v1",
+        "http://10.255.255.255:8080/v1",
+        // 172.16.0.0/12
+        "http://172.16.0.0/v1",
+        "http://172.31.255.255/v1",
+        // 192.168.0.0/16
+        "http://192.168.0.0/v1",
+        "http://192.168.1.20:8080/v1",
+        "http://192.168.255.255/v1",
+        // 169.254.0.0/16, IPv4 link-local
+        "http://169.254.0.0/v1",
+        "http://169.254.255.255/v1",
+        // fc00::/7, IPv6 unique-local
+        "http://[fc00::]/v1",
+        "http://[fd12:3456:789a::1]:8080/v1",
+        "http://[fdff:ffff:ffff:ffff:ffff:ffff:ffff:ffff]/v1",
+        // fe80::/10, IPv6 link-local
+        "http://[fe80::1]/v1",
+        "http://[febf:ffff:ffff:ffff:ffff:ffff:ffff:ffff]/v1",
+        // An mDNS name.
+        "http://gpu-box.local:8080/v1",
+        // The parser lowercases an http name, so this pins the parse, not
+        // the rule's own case-blind comparison.
+        "http://Studio.LOCAL/v1",
+        "https://a.b.local/v1",
+        "http://user:pw@gpu-box.local/v1",
+    ] {
+        assert!(is_local_url(url), "{url}");
+    }
+    for url in [
+        // A public host, by name and by address.
+        "https://api.openai.com/v1",
+        "http://8.8.8.8/v1",
+        "http://[2001:4860:4860::8888]/v1",
+        // Just outside each range.
+        "http://9.255.255.255/v1",
+        "http://11.0.0.0/v1",
+        "http://172.15.255.255/v1",
+        "http://172.32.0.0/v1",
+        "http://192.167.255.255/v1",
+        "http://192.169.0.0/v1",
+        "http://169.253.255.255/v1",
+        "http://169.255.0.0/v1",
+        "http://[fbff:ffff:ffff:ffff:ffff:ffff:ffff:ffff]/v1",
+        "http://[fe00::]/v1",
+        "http://[fe7f:ffff:ffff:ffff:ffff:ffff:ffff:ffff]/v1",
+        "http://[fec0::]/v1",
+        // A host name that is neither localhost nor `.local`: never
+        // looked up, so never local, whatever it resolves to.
+        "http://gpu-box/v1",
+        "http://gpu-box.lan:8080/v1",
+        "http://local/v1",
+        "http://xlocal/v1",
+        "http://gpu-box.local.example.com/v1",
+        // `.local` with no label before it, or with an empty one.
+        "http://.local/v1",
+        "http://..local/v1",
+        "http://gpu-box..local/v1",
+        "http://192.168.1.20.example.com/v1",
+        "http://localhost.example.com/v1",
+        // A trailing dot is another spelling, refused like the rest.
+        "http://gpu-box.local./v1",
+        "http://localhost./v1",
+        // Not a URL, or no host.
+        "not a url",
+        "localhost:1234/v1",
+        "192.168.1.20:8080/v1",
+        // The host is what follows the user info, and a backslash ends
+        // the authority in an http URL.
+        "http://127.0.0.1@api.openai.com/v1",
+        "http://192.168.1.20@api.openai.com/v1",
+        "http://gpu-box.local@api.openai.com/v1",
+        "http://api.openai.com\\@127.0.0.1/v1",
+        "http://api.openai.com\\@192.168.1.20/v1",
+        // IPv4-mapped IPv6 is not read through to its IPv4 address.
+        "http://[::ffff:127.0.0.1]/v1",
+        "http://[::ffff:192.168.1.20]/v1",
+        // A zone index does not parse.
+        "http://[fe80::1%25en0]/v1",
+    ] {
+        assert!(!is_local_url(url), "{url}");
+    }
+}
+
+/// A provider is on a local server by its own `base_url` in the runtime
+/// config — loopback, or the home network since item 17's widening; one
+/// with none, an unknown one, or one at a public host or a bare name, is
+/// not.
+#[test]
+fn a_provider_is_on_a_local_server_by_its_base_url() {
+    let mut runtime = LlmRuntimeConfig::default();
+    assert!(!runtime.is_on_local_server(&ProviderType::OpenAI));
+    assert!(!runtime.is_on_local_server(&ProviderType::Anthropic));
+    runtime
+        .provider_defaults
+        .get_mut("openai")
+        .unwrap()
+        .base_url = Some("http://127.0.0.1:8080/v1".to_string());
+    assert!(runtime.is_on_local_server(&ProviderType::OpenAI));
+    for (base, local) in [
+        ("http://192.168.1.20:8080/v1", true),
+        ("http://gpu-box.local:8080/v1", true),
+        ("http://[fd12::5]:8080/v1", true),
+        ("https://api.openai.com/v1", false),
+        ("http://gpu-box:8080/v1", false),
+    ] {
+        runtime
+            .provider_defaults
+            .get_mut("openai")
+            .unwrap()
+            .base_url = Some(base.to_string());
+        assert_eq!(
+            runtime.is_on_local_server(&ProviderType::OpenAI),
+            local,
+            "{base}"
+        );
+    }
+}
+
+// ── No CLI found on PATH in a guarded test build (CLI-BACKEND-GUARD) ────────
+//
+// pending-decisions *Rev 137* item 1, the advisor's pick (b), taken *Rev 138*:
+// a `claude` or `codex` that `build_router` finds on PATH runs under the
+// developer's own login, so a test build that carries `test-endpoint-guard`
+// (this crate's own tests too) registers none; a configured `path` still
+// does. Off under `live-eval`, as the providers' guard is.
+#[cfg(all(unix, not(feature = "live-eval")))]
+mod cli_backend_guard {
+    use crate::cli_backend::{ClaudeCodeCliProvider, CodexCliProvider};
+    use crate::keys::key_pool::ProviderType;
+    use std::path::{Path, PathBuf};
+
+    const CHILD: &str = "OPENALPACA_TEST_CLI_GUARD_CHILD";
+
+    /// A config with no provider, one declared model and `extra` after it.
+    fn router_for(dir: &Path, extra: &str) -> crate::routing::router::LlmRouter {
+        let path = dir.join("llm.toml");
+        std::fs::write(
+            &path,
+            format!("[orchestrator]\nmodel = \"local-model\"\n{extra}"),
+        )
+        .unwrap();
+        super::build_router(&path).expect("router")
+    }
+
+    /// Stub `claude` and `codex` executables that, if anything ran them,
+    /// would append their arguments to `ran.log` and fail.
+    fn stub_dir() -> (tempfile::TempDir, PathBuf) {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = tempfile::tempdir().unwrap();
+        let ran = dir.path().join("ran.log");
+        for name in ["claude", "codex"] {
+            let stub = dir.path().join(name);
+            std::fs::write(
+                &stub,
+                format!("#!/bin/sh\necho \"$0 $*\" >> '{}'\nexit 1\n", ran.display()),
+            )
+            .unwrap();
+            std::fs::set_permissions(&stub, std::fs::Permissions::from_mode(0o755)).unwrap();
+        }
+        (dir, ran)
+    }
+
+    /// In a child of this test binary whose PATH is only a folder of stubs
+    /// (so no other test in this process sees the change), the stubs are
+    /// what a PATH lookup finds, and still `build_router` registers no CLI
+    /// backend: not with no `[cli_backends]` section, and not from a
+    /// section that names no `path`. Nothing runs either stub.
+    #[test]
+    fn a_guarded_test_build_registers_no_cli_found_on_path() {
+        if let Some(stubs) = std::env::var_os(CHILD) {
+            let stubs = PathBuf::from(stubs);
+            assert_eq!(ClaudeCodeCliProvider::detect(), Some(stubs.join("claude")));
+            assert_eq!(CodexCliProvider::detect(), Some(stubs.join("codex")));
+            let dir = tempfile::tempdir().unwrap();
+            let router = router_for(dir.path(), "");
+            assert!(
+                router.cli_backend_providers().is_empty(),
+                "no [cli_backends]: {:?}",
+                router.cli_backend_providers()
+            );
+            let router = router_for(
+                dir.path(),
+                "\n[cli_backends.claude_code]\nenabled = true\n\n[cli_backends.codex]\nenabled = true\n",
+            );
+            assert!(
+                router.cli_backend_providers().is_empty(),
+                "a section with no path: {:?}",
+                router.cli_backend_providers()
+            );
+            return;
+        }
+        let (dir, ran) = stub_dir();
+        let out = std::process::Command::new(std::env::current_exe().expect("this test binary"))
+            .args([
+                "--exact",
+                "config::llm_config::tests::cli_backend_guard::a_guarded_test_build_registers_no_cli_found_on_path",
+                "--test-threads=1",
+            ])
+            .env(CHILD, dir.path())
+            .env("PATH", dir.path())
+            .output()
+            .expect("the child run");
+        let stdout = String::from_utf8_lossy(&out.stdout);
+        assert!(
+            out.status.success() && stdout.contains("test result: ok. 1 passed"),
+            "{stdout}{}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+        assert!(!ran.exists(), "a stub was run");
+    }
+
+    /// A configured `path` still registers each backend in a guarded build
+    /// (registering runs nothing). A pin: the parent registers it too.
+    #[test]
+    fn a_configured_cli_path_still_registers_in_a_guarded_test_build() {
+        let (stubs, ran) = stub_dir();
+        let dir = tempfile::tempdir().unwrap();
+        let router = router_for(
+            dir.path(),
+            &format!(
+                "\n[cli_backends.claude_code]\npath = '{}'\n\n[cli_backends.codex]\npath = '{}'\n",
+                stubs.path().join("claude").display(),
+                stubs.path().join("codex").display()
+            ),
+        );
+        assert!(router.has_cli_backend(&ProviderType::Anthropic));
+        assert!(router.has_cli_backend(&ProviderType::OpenAI));
+        assert!(!ran.exists(), "a stub was run");
     }
 }

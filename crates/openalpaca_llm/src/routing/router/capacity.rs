@@ -9,68 +9,6 @@ use crate::keys::key_pool::ProviderType;
 const DEFAULT_LOCAL_CONTEXT_WINDOW: u32 = 8192;
 
 impl LlmRouter {
-    /// Estimate the parallel LLM capacity given the current state of API keys
-    /// and rate limiters.
-    ///
-    /// Returns a [`LlmCapacityInfo`] struct so callers can base stagger delay
-    /// on the raw key count and reserve slots for the lead agent.
-    ///
-    /// CLI fallback is **not** counted as parallel bandwidth — it is only used
-    /// when all API keys are exhausted (see `try_fallback()`). When
-    /// `key_capacity == 0` and a CLI backend exists, `effective_capacity` is 1
-    /// so at least one subagent can proceed via fallback.
-    ///
-    /// Used by `SpawnSubagentTool` to dynamically reduce parallelism when
-    /// the number of available API keys cannot support `max_concurrent_subagents`.
-    pub async fn estimated_llm_capacity(&self, model: Option<&str>) -> LlmCapacityInfo {
-        let zero = LlmCapacityInfo {
-            available_api_keys: 0,
-            per_key_concurrency: 0,
-            key_capacity: 0,
-            has_cli_fallback: false,
-            effective_capacity: 0,
-        };
-
-        let default = self.default_model();
-        let model_id = model.unwrap_or(&default);
-
-        let provider_type = match self.model_registry.resolve_provider(model_id) {
-            Some(pt) => pt,
-            None => return zero,
-        };
-
-        // Cloned out before the await — see `LlmRouter::provider_entry` (R59).
-        let available_keys = match self.provider_entry(&provider_type) {
-            Some(entry) => {
-                let pool = entry.key_pool.load();
-                pool.available_api_key_count().await
-            }
-            None => return zero,
-        };
-
-        let per_key = self.rate_limiter_registry.config().per_key_concurrency;
-        let key_capacity = available_keys * per_key;
-        let has_cli_fallback = self.cli_backends.contains_key(&provider_type);
-
-        let effective_capacity = if key_capacity > 0 {
-            let global_available = self.concurrency_limiter.available_permits();
-            key_capacity.min(global_available)
-        } else if has_cli_fallback {
-            // All keys exhausted but CLI fallback can handle 1 request
-            1
-        } else {
-            0
-        };
-
-        LlmCapacityInfo {
-            available_api_keys: available_keys,
-            per_key_concurrency: per_key,
-            key_capacity,
-            has_cli_fallback,
-            effective_capacity,
-        }
-    }
-
     /// List models confirmed by provider API refresh (for GUI dropdowns).
     /// Returns only discovered models so the dropdown reflects real availability.
     pub fn available_models(&self) -> Vec<ModelEntry> {
@@ -121,9 +59,7 @@ impl LlmRouter {
             Err(_) if !prov_entry.provider.requires_key() => String::new(),
             Err(_) => {
                 // No API-compatible key — fall back to hardcoded defaults
-                let count = self
-                    .model_registry
-                    .mark_defaults_discovered_for_provider(provider_type);
+                let count = self.mark_unlisted_served(provider_type, &prov_entry);
                 if count > 0 {
                     tracing::info!(
                         "No API key for {:?}, marked {} default models as discovered",
@@ -144,9 +80,7 @@ impl LlmRouter {
         let status = match prov_entry.provider.discover_models(&key_secret).await {
             Ok(models) => {
                 if models.is_empty() {
-                    let dc = self
-                        .model_registry
-                        .mark_defaults_discovered_for_provider(provider_type);
+                    let dc = self.mark_unlisted_served(provider_type, &prov_entry);
                     tracing::info!(
                         "Provider {:?} returned 0 models, marked {} defaults",
                         provider_type,
@@ -156,7 +90,21 @@ impl LlmRouter {
                 let present: std::collections::HashSet<String> =
                     models.iter().map(|m| m.id.clone()).collect();
                 for model in &models {
-                    self.model_registry.register_discovered(
+                    // A model the provider only named — Ollama's failed
+                    // `/api/show` (BARE-NOT-READING), or a keyed provider's
+                    // listing of ids, which reads no capability or window
+                    // (pending-decisions *Rev 118*, taken as (a)) — is no
+                    // reading: it is listed, but the registry keeps what a
+                    // reading gave, so Ollama's reading of an id a
+                    // compatible server also lists stands in either order.
+                    use crate::routing::model_registry::ModelRegistry;
+                    let register = if model.described {
+                        ModelRegistry::register_discovered
+                    } else {
+                        ModelRegistry::register_listed
+                    };
+                    register(
+                        &self.model_registry,
                         model.id.clone(),
                         ModelInfo {
                             provider: provider_type.clone(),
@@ -176,8 +124,33 @@ impl LlmRouter {
                             supports_reasoning: false,
                             supports_tools: model.supports_tools,
                             declared: false,
+                            long_prompt: None,
+                            cache_rates: None,
+                            request_contract: crate::routing::model_registry::RequestContract::NONE,
                         },
                     );
+                }
+                self.note_unknown_windows(provider_type, &models);
+                let retired: std::collections::BTreeSet<&str> = models
+                    .iter()
+                    .map(|m| m.id.as_str())
+                    .filter(|id| crate::routing::model_registry::RETIRED_IDS.contains(id))
+                    .collect();
+                for id in &retired {
+                    warn_retired(id, provider_type);
+                }
+                self.retired_listed.insert(
+                    provider_type.clone(),
+                    retired.into_iter().map(str::to_string).collect(),
+                );
+                // The list was read across an await: a `deregister_provider`
+                // that ran meanwhile cleared a record this insert has just
+                // put back, and nothing else would clear it. Insert, then
+                // look: `deregister_provider` drops the provider before its
+                // record, so whichever order the two take, a provider gone
+                // keeps none (the registry's own rows are R59's).
+                if !self.has_provider(provider_type) {
+                    self.retired_listed.remove(provider_type);
                 }
                 if provider_type.is_local() {
                     let withdrawn = self
@@ -205,8 +178,7 @@ impl LlmRouter {
                     error = %e,
                     "Could not list models — the provider stays registered with the catalogue it has"
                 );
-                self.model_registry
-                    .mark_defaults_discovered_for_provider(provider_type);
+                self.mark_unlisted_served(provider_type, &prov_entry);
                 ProviderDiscovery {
                     models: 0,
                     error: Some(e.to_string()),
@@ -215,6 +187,98 @@ impl LlmRouter {
         };
 
         self.record_discovery(provider_type, status)
+    }
+
+    /// Say once a model that a provider built to call another server than
+    /// its vendor's — the `openai` provider pointed at llama.cpp, LM
+    /// Studio, vLLM or a gateway, on this machine, the home network or
+    /// elsewhere — listed with no context window and no row gives it one
+    /// (MODEL-ROWS, *Rev 96* (5); MODEL-ROWS-2, *Rev 102* (5) (b): every
+    /// server that is not OpenAI's own, where the scope had been the local
+    /// ones).
+    ///
+    /// The window stays unknown, so a run on the model is budgeted at the
+    /// agent loop's 200,000-token default rather than at
+    /// [`DEFAULT_LOCAL_CONTEXT_WINDOW`]: the stock lead's system prompt and
+    /// tools alone come to more than 8,192 tokens, and a loop sized there
+    /// compacts on every round (the advisor's pick, built as its
+    /// conditional's fallback, option (a) with this warning). OpenAI's own
+    /// API (`LlmProvider::serves_compiled_rows`) is not said: its models
+    /// are the compiled rows' vendor's, not a server's of unknown size.
+    /// Ollama gives each model a window of its own.
+    fn note_unknown_windows(
+        &self,
+        provider_type: &ProviderType,
+        listed: &[crate::routing::model_registry::DiscoveredModel],
+    ) {
+        if provider_type.is_local() || self.serves_compiled_rows(provider_type) {
+            return;
+        }
+        for model in listed {
+            let unknown = model.context_window.is_none()
+                && self
+                    .model_registry
+                    .get_model_info(&model.id)
+                    .is_some_and(|info| info.context_window == 0);
+            if unknown && self.unknown_windows_logged.insert(model.id.clone()) {
+                tracing::warn!(
+                    model = %model.id,
+                    provider = %provider_type,
+                    "A model on a server that is not OpenAI's own reports no context \
+                     window, so a run on it is budgeted at 200,000 tokens and may overrun \
+                     the window the server gives it. Give it a [models.\"<id>\"] row \
+                     with provider = \"{provider_type}\" and context = <its window, in tokens> \
+                     in llm.toml."
+                );
+            }
+        }
+    }
+
+    /// Say once more, for a hot reload of `llm.toml`, each id a loaded
+    /// provider's last read listing named that the catalogue retired
+    /// ([`RETIRED_IDS`]), and return them, by id (RETIRED-ID,
+    /// pending-decisions *Rev 125*: (a) with (c)). A discovery pass says
+    /// its own listing's (`refresh_models_for`, which keeps them; a list
+    /// that could not be read keeps the last one's); a reload of a
+    /// provider already loaded runs none, so the daemon's watcher calls
+    /// this. Only listed ids are said: an id `llm.toml` itself names, in
+    /// `[orchestrator]` or a `[models]` row, is not (*Rev 105*, closed as
+    /// no change).
+    ///
+    /// [`RETIRED_IDS`]: crate::routing::model_registry::RETIRED_IDS
+    pub fn warn_retired_listed(&self) -> Vec<String> {
+        let mut listed: Vec<(String, ProviderType)> = self
+            .retired_listed
+            .iter()
+            .flat_map(|entry| {
+                let provider = entry.key().clone();
+                entry
+                    .value()
+                    .iter()
+                    .map(move |id| (id.clone(), provider.clone()))
+                    .collect::<Vec<_>>()
+            })
+            .collect();
+        listed.sort_by_key(|(id, provider)| (id.clone(), provider.to_string()));
+        for (id, provider) in &listed {
+            warn_retired(id, provider);
+        }
+        listed.into_iter().map(|(id, _)| id).collect()
+    }
+
+    /// Where a provider's list could not be read, or was empty, take its
+    /// catalogue as served: every row, for a provider that calls its
+    /// vendor's own API; for one built to call another server
+    /// (COMPAT-SERVER), its declared rows but the compiled ones, which that
+    /// server does not serve.
+    fn mark_unlisted_served(&self, provider_type: &ProviderType, entry: &ProviderEntry) -> usize {
+        if entry.provider.serves_compiled_rows() {
+            self.model_registry
+                .mark_defaults_discovered_for_provider(provider_type)
+        } else {
+            self.model_registry
+                .mark_declared_discovered_for_provider(provider_type)
+        }
     }
 
     fn record_discovery(
@@ -245,6 +309,23 @@ impl LlmRouter {
             .ok_or(LlmError::NotConfigured)?;
         entry.value().provider.list_models_with_key(key).await
     }
+}
+
+/// The one line that says a provider lists `id`, which the catalogue
+/// retired: not an error — the id is offered as any id the catalogue
+/// lacks, with none of a built-in row's price, window or request rules
+/// (an Ollama listing still reads its window and flags, a local server's
+/// still costs 0); a person's own `[models."<id>"]` row can give it a
+/// price and a window.
+fn warn_retired(id: &str, provider: &ProviderType) {
+    tracing::warn!(
+        model = %id,
+        provider = %provider,
+        "The provider lists a model retired in the catalogue: it stays \
+         offered as any id the catalogue lacks, with none of a built-in \
+         row's price, window or request rules; a [models.\"<id>\"] row in \
+         llm.toml can give it a price and a window."
+    );
 }
 
 /// Rough estimate of tokens in a request.

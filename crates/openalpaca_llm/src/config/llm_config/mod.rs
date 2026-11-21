@@ -15,7 +15,8 @@ pub use router_config::{
     SecurityConfig, WebSearchConfig,
 };
 pub use runtime::{
-    EndpointsConfig, EnvVarsConfig, LlmRuntimeConfig, ProviderDefaults, TimeoutsConfig,
+    DEFAULT_ORCHESTRATOR_MODEL, EndpointsConfig, EnvVarsConfig, LlmRuntimeConfig, ProviderDefaults,
+    TimeoutsConfig, is_local_url,
 };
 
 use crate::error::LlmError;
@@ -26,9 +27,6 @@ pub(crate) fn parse_provider_type(name: &str) -> Option<ProviderType> {
         "anthropic" => Some(ProviderType::Anthropic),
         "openai" => Some(ProviderType::OpenAI),
         "ollama" => Some(ProviderType::Ollama),
-        other if other.starts_with("plugin:") => {
-            Some(ProviderType::Plugin(other.strip_prefix("plugin:").unwrap().to_string()))
-        }
         _ => None,
     }
 }

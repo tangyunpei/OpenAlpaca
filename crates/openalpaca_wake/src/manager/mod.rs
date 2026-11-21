@@ -16,7 +16,7 @@ use openalpaca_api::events::WakeEvent;
 /// Orchestrates the scheduler and event watchers.
 pub struct WakeManager {
     scheduler: WakeScheduler,
-    watchers: Vec<Box<dyn EventWatcher>>,
+    watchers: Vec<EventWatcher>,
     fs_watch_handle: Option<FileWatchHandle>,
     event_tx: mpsc::Sender<WakeEvent>,
 }
@@ -43,7 +43,7 @@ impl WakeManager {
     pub fn add_filesystem_watcher(&mut self, paths: Vec<std::path::PathBuf>) {
         let watcher = FilesystemWatcher::new(paths);
         self.fs_watch_handle = Some(watcher.unwatch_handle());
-        self.watchers.push(Box::new(watcher));
+        self.watchers.push(EventWatcher::Filesystem(watcher));
     }
 
     /// Add a filesystem watcher with a custom poll interval
@@ -54,7 +54,7 @@ impl WakeManager {
     ) {
         let watcher = FilesystemWatcher::with_poll_interval(paths, poll_interval);
         self.fs_watch_handle = Some(watcher.unwatch_handle());
-        self.watchers.push(Box::new(watcher));
+        self.watchers.push(EventWatcher::Filesystem(watcher));
     }
 
     /// Start all components

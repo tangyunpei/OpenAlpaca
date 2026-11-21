@@ -94,7 +94,7 @@ pub(crate) fn build_request_body(
     let model = request.model.as_deref().unwrap_or(default_model);
     let max_tokens = request.max_tokens.unwrap_or(default_max_tokens);
 
-    let mut messages: Vec<serde_json::Value> = request
+    let messages: Vec<serde_json::Value> = request
         .messages
         .iter()
         .map(|msg| {
@@ -140,14 +140,6 @@ pub(crate) fn build_request_body(
         })
         .collect();
 
-    // Ephemeral system notice: append as tail system-role message (spec P0).
-    if let Some(ref notice) = request.ephemeral_system_notice {
-        messages.push(serde_json::json!({
-            "role": "system",
-            "content": notice,
-        }));
-    }
-
     let mut body = serde_json::json!({
         "model": model,
         "max_tokens": max_tokens,
@@ -166,7 +158,7 @@ pub(crate) fn build_request_body(
                 body["reasoning_effort"] = serde_json::json!("high");
                 body.as_object_mut().unwrap().remove("temperature");
             }
-            ThinkingConfig::Adaptive => {
+            ThinkingConfig::Adaptive { .. } => {
                 body["reasoning_effort"] = serde_json::json!("medium");
                 body.as_object_mut().unwrap().remove("temperature");
             }

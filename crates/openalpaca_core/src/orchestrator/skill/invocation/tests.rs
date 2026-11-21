@@ -6,10 +6,10 @@ use crate::middleware::skill::SkillFrontmatter;
 use crate::security::capabilities::CapabilityManager;
 use crate::tools::ToolRegistry;
 use crate::tools::registry::{BuiltInTool, RegisteredTool, ToolBackend};
+use openalpaca_api::plugin_traits::ToolCallbackExecutor;
 
 struct NoopTool;
 
-#[async_trait::async_trait]
 impl BuiltInTool for NoopTool {
     async fn execute(&self, _arguments: &serde_json::Value) -> Result<String, String> {
         Ok(String::new())
@@ -26,7 +26,7 @@ fn register(registry: &ToolRegistry, name: &str, provides: Vec<String>) {
                 strict: None,
                 input_examples: None,
             },
-            backend: ToolBackend::BuiltIn(Arc::new(NoopTool)),
+            backend: ToolBackend::built_in(NoopTool),
             provides_capabilities: provides,
             exempt_from_timeout: false,
             annotations: None,
@@ -132,13 +132,12 @@ struct StubPluginSkill {
     outcome: Arc<Mutex<Option<Result<String, String>>>>,
 }
 
-#[async_trait::async_trait]
 impl openalpaca_api::plugin_traits::PluginSkillExecutor for StubPluginSkill {
     async fn invoke(
         &self,
         _query: &str,
         _context: &serde_json::Value,
-        tool_executor: &dyn openalpaca_api::plugin_traits::ToolCallbackExecutor,
+        tool_executor: &openalpaca_api::plugin_traits::DynToolCallbackExecutor<'_>,
     ) -> Result<String, String> {
         self.invoked.store(true, Ordering::SeqCst);
         let outcome = tool_executor
@@ -212,7 +211,7 @@ async fn run_plugin_skill_as(
         "cli",
         "acme-search",
         "acme",
-        stub,
+        openalpaca_api::plugin_traits::DynPluginSkillExecutor::from_arc(stub),
         "go",
         "test:cli",
         None,
@@ -472,7 +471,6 @@ async fn an_attended_skill_turn_keeps_the_fail_closed_refusal() {
 /// Keeps the context the one call it served was handed.
 struct RecordsCtx(Arc<Mutex<Option<crate::tools::registry::ToolContext>>>);
 
-#[async_trait::async_trait]
 impl BuiltInTool for RecordsCtx {
     async fn execute(&self, _arguments: &serde_json::Value) -> Result<String, String> {
         Err("needs context".to_string())
@@ -505,7 +503,7 @@ async fn a_plugin_skills_tool_calls_carry_the_turns_conversation() {
                 strict: None,
                 input_examples: None,
             },
-            backend: ToolBackend::BuiltIn(Arc::new(RecordsCtx(seen.clone()))),
+            backend: ToolBackend::built_in(RecordsCtx(seen.clone())),
             provides_capabilities: vec![],
             exempt_from_timeout: false,
             annotations: None,
@@ -536,4 +534,179 @@ async fn a_plugin_skills_tool_calls_carry_the_turns_conversation() {
     );
     let ctx = seen.lock().unwrap().clone().expect("the tool ran");
     assert_eq!(ctx.conversation_id.as_deref(), Some(session.id.as_str()));
+}
+
+// ── N-TOOL-1b (B-11): a plugin skill's per-tool bound ───────────────────
+
+/// A plugin skill's proxied tool calls are cut at `[execution.agent_defaults]
+/// max_tool_runtime_secs` (1 s here), the bound every loop reads.
+#[tokio::test]
+async fn a_plugin_skills_tool_call_is_cut_at_the_daemons_per_tool_bound() {
+    let registry = registry(true);
+    registry
+        .register(RegisteredTool {
+            definition: openalpaca_llm::ToolDefinition {
+                name: "slow_tool".to_string(),
+                description: "slow_tool".to_string(),
+                parameters: serde_json::json!({"type": "object"}),
+                strict: None,
+                input_examples: None,
+            },
+            backend: ToolBackend::built_in(crate::test_util::Sleeps),
+            provides_capabilities: vec![],
+            exempt_from_timeout: false,
+            annotations: None,
+            version: "test-0.0.0".into(),
+            author: "test".into(),
+            created_at: Utc::now(),
+        })
+        .unwrap();
+    let registry = Arc::new(registry);
+    let bus = EventBus::default();
+    let sandbox = Arc::new(SandboxManager::with_defaults(registry.clone(), bus.clone()));
+    let orch = Orchestrator::new(
+        Arc::new(SharedContext::new()),
+        Arc::new(LaneManager::new()),
+        bus,
+        crate::middleware::prompt::SystemPersona::default(),
+        None,
+        LoopConfig::default(),
+        Arc::new(SecurityGate::new(sandbox)),
+        registry,
+        None,
+        Arc::new(skill_catalog::SkillCatalog::new()),
+        Arc::new(skill_router::SkillRouter::new(0.65, 0.45)),
+        Arc::new(ArcSwap::from_pointee(
+            crate::test_util::daemon_config_with_agent_defaults("max_tool_runtime_secs = 1"),
+        )),
+    );
+    let stub = Arc::new(StubPluginSkill {
+        tool: "slow_tool".to_string(),
+        invoked: Arc::new(AtomicBool::new(false)),
+        outcome: Arc::new(Mutex::new(None)),
+    });
+    let mut fm = SkillFrontmatter {
+        name: "acme-search".to_string(),
+        ..Default::default()
+    };
+    fm.tools.allow = vec!["slow_tool".to_string()];
+
+    run_plugin_skill(&orch, fm, stub.clone())
+        .await
+        .expect("the skill runs");
+
+    let outcome = stub.outcome.lock().unwrap().clone();
+    match outcome {
+        Some(Err(err)) => assert!(err.contains("Tool 'slow_tool' timed out after 1s"), "{err}"),
+        other => panic!("the plugin skill's call ran past the daemon's bound: {other:?}"),
+    }
+}
+
+// ── N-TOOL-8: a plugin skill's JSON-string tool call ────────────────────
+
+/// A plugin skill that sends one tool call with `arguments` exactly as given.
+struct SendsArguments {
+    tool: String,
+    arguments: serde_json::Value,
+    outcome: Arc<Mutex<Option<Result<String, String>>>>,
+}
+
+impl openalpaca_api::plugin_traits::PluginSkillExecutor for SendsArguments {
+    async fn invoke(
+        &self,
+        _query: &str,
+        _context: &serde_json::Value,
+        tool_executor: &openalpaca_api::plugin_traits::DynToolCallbackExecutor<'_>,
+    ) -> Result<String, String> {
+        let outcome = tool_executor
+            .execute_tool(&self.tool, &self.arguments)
+            .await;
+        *self.outcome.lock().unwrap() = Some(outcome);
+        Ok("stub finished".to_string())
+    }
+    fn plugin_id(&self) -> &str {
+        "acme"
+    }
+    fn skill_id(&self) -> &str {
+        "acme-search"
+    }
+}
+
+/// A builtin that keeps the arguments it ran on.
+struct KeepsArguments(Arc<Mutex<Vec<serde_json::Value>>>);
+
+impl BuiltInTool for KeepsArguments {
+    async fn execute(&self, arguments: &serde_json::Value) -> Result<String, String> {
+        self.0.lock().unwrap().push(arguments.clone());
+        Ok("kept".to_string())
+    }
+}
+
+/// A second producer of a JSON-string call beside a plugin agent's proxy:
+/// a plugin skill's tool callback (`SandboxToolCallback`). Its JSON string of
+/// an object is read as that object at the sandbox's entry, and the tool runs
+/// on the object.
+#[tokio::test]
+async fn a_plugin_skills_json_string_tool_call_reaches_the_tool_as_its_object() {
+    let kept = Arc::new(Mutex::new(Vec::new()));
+    let registry = registry(true);
+    registry
+        .register(RegisteredTool {
+            definition: openalpaca_llm::ToolDefinition {
+                name: "keep_args".to_string(),
+                description: "keep_args".to_string(),
+                parameters: serde_json::json!({
+                    "type": "object",
+                    "properties": {"q": {"type": "string"}},
+                    "required": ["q"]
+                }),
+                strict: None,
+                input_examples: None,
+            },
+            backend: ToolBackend::built_in(KeepsArguments(kept.clone())),
+            provides_capabilities: vec![],
+            exempt_from_timeout: false,
+            annotations: None,
+            version: "test-0.0.0".into(),
+            author: "test".into(),
+            created_at: Utc::now(),
+        })
+        .unwrap();
+    let orch = orchestrator_for(Arc::new(registry));
+    let object = serde_json::json!({"q": "hi"});
+    let stub = Arc::new(SendsArguments {
+        tool: "keep_args".to_string(),
+        arguments: serde_json::Value::String(object.to_string()),
+        outcome: Arc::new(Mutex::new(None)),
+    });
+    let mut fm = SkillFrontmatter {
+        name: "acme-search".to_string(),
+        ..Default::default()
+    };
+    fm.tools.allow = vec!["keep_args".to_string()];
+    let doc = skill_doc(fm);
+
+    orch.invoke_plugin_skill(
+        Uuid::new_v4(),
+        "cli",
+        "acme-search",
+        "acme",
+        openalpaca_api::plugin_traits::DynPluginSkillExecutor::from_arc(stub.clone()),
+        "go",
+        "test:cli",
+        None,
+        None,
+        &MemoryScopeContext::new(None),
+        None,
+        &doc,
+        false,
+    )
+    .await
+    .expect("the skill runs");
+
+    assert_eq!(
+        stub.outcome.lock().unwrap().clone(),
+        Some(Ok("kept".to_string()))
+    );
+    assert_eq!(*kept.lock().unwrap(), vec![object]);
 }

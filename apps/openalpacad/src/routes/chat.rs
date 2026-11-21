@@ -460,24 +460,20 @@ pub async fn chat_stream_handler(
     Query(params): Query<HashMap<String, String>>,
     State(state): State<Arc<AppState>>,
 ) -> impl IntoResponse {
-    // Inline auth (same pattern as WebSocket events)
-    let token = params.get("token").map(|s| s.as_str()).unwrap_or("");
-    if token != state.token {
-        return (StatusCode::UNAUTHORIZED, "Invalid token").into_response();
+    // Inline auth (the same check as the WebSocket events route)
+    if let Some(refusal) = super::query_token_refusal(&params, &*state.tokens) {
+        return refusal;
     }
 
     let chat_service = &state.chat_service;
 
-    let rx = match chat_service.stream_manager().get_receiver(&stream_id) {
-        Some(rx) => rx,
-        None => {
-            return error_response(
-                StatusCode::NOT_FOUND,
-                "STREAM_NOT_FOUND",
-                "Stream not found or expired",
-            )
-            .into_response();
-        }
+    let Some(rx) = chat_service.stream_manager().get_receiver(&stream_id) else {
+        return error_response(
+            StatusCode::NOT_FOUND,
+            "STREAM_NOT_FOUND",
+            "Stream not found or expired",
+        )
+        .into_response();
     };
 
     let stream = make_sse_stream(rx, state.cancel_token.clone());
@@ -960,7 +956,7 @@ pub async fn confirm_tool(
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
 
     /// **M6.** The declaration is opt-in and absent by default: an existing
@@ -1630,7 +1626,7 @@ mod tests {
             Arc::new(openalpaca_llm::CostTracker::new(
                 openalpaca_llm::ModelRegistry::with_defaults(),
             )),
-            "claude-sonnet-4-6".to_string(),
+            "claude-sonnet-5-5".to_string(),
         )
     }
 
@@ -1638,7 +1634,6 @@ mod tests {
     /// *routable*, which is what the effective default depends on.
     struct StubLlm;
 
-    #[async_trait::async_trait]
     impl openalpaca_llm::LlmProvider for StubLlm {
         fn name(&self) -> &str {
             "stub"
@@ -1668,10 +1663,10 @@ mod tests {
     /// and the response says which that is.
     #[tokio::test]
     async fn a_turn_that_names_no_model_reports_the_daemon_default() {
-        let router = router_serving("claude-sonnet-4-6");
+        let router = router_serving("claude-sonnet-5-5");
         assert_eq!(
             resolve_turn_model(Some(&router), None).expect("accepted"),
-            Some("claude-sonnet-4-6".to_string())
+            Some("claude-sonnet-5-5".to_string())
         );
     }
 
@@ -1684,11 +1679,11 @@ mod tests {
     async fn a_turn_reports_the_model_it_will_actually_reach() {
         // Anthropic is the loaded provider; the configured default belongs to
         // OpenAI, which is not loaded.
-        let router = router_serving("gpt-5.2");
+        let router = router_serving("gpt-6.1-sol");
         let reported = resolve_turn_model(Some(&router), None).expect("accepted");
         assert_ne!(
             reported.as_deref(),
-            Some("gpt-5.2"),
+            Some("gpt-6.1-sol"),
             "an unroutable configured default must not be echoed as the turn's model"
         );
         assert_eq!(
@@ -1715,8 +1710,8 @@ mod tests {
     async fn a_registered_model_is_accepted_and_echoed() {
         let router = router_with(&[]);
         assert_eq!(
-            resolve_turn_model(Some(&router), Some("claude-opus-4-6")).expect("accepted"),
-            Some("claude-opus-4-6".to_string())
+            resolve_turn_model(Some(&router), Some("claude-opus-5-5")).expect("accepted"),
+            Some("claude-opus-5-5".to_string())
         );
     }
 
@@ -1747,9 +1742,9 @@ mod tests {
     async fn a_disabled_providers_model_is_refused_too() {
         let router = router_with(&[openalpaca_llm::ProviderType::OpenAI]);
         // Sanity: the same id is fine while its provider is on.
-        assert!(resolve_turn_model(Some(&router_with(&[])), Some("gpt-5.2")).is_ok());
+        assert!(resolve_turn_model(Some(&router_with(&[])), Some("gpt-6.1-sol")).is_ok());
 
-        let err = resolve_turn_model(Some(&router), Some("gpt-5.2")).expect_err("refused");
+        let err = resolve_turn_model(Some(&router), Some("gpt-6.1-sol")).expect_err("refused");
         let (status, body) = refusal(err).await;
         assert_eq!(status, StatusCode::BAD_REQUEST);
         assert_eq!(body["error"]["code"], "UNKNOWN_MODEL");
@@ -1761,7 +1756,7 @@ mod tests {
             "the refusal must say why an id that used to work no longer does"
         );
         // The provider that is still on keeps its models.
-        assert!(resolve_turn_model(Some(&router), Some("claude-opus-4-6")).is_ok());
+        assert!(resolve_turn_model(Some(&router), Some("claude-opus-5-5")).is_ok());
     }
 
     /// No router at all: naming a model is refused rather than accepted and
@@ -1770,7 +1765,7 @@ mod tests {
     async fn naming_a_model_without_an_llm_router_is_503() {
         assert_eq!(resolve_turn_model(None, None).expect("accepted"), None);
 
-        let err = resolve_turn_model(None, Some("claude-opus-4-6")).expect_err("refused");
+        let err = resolve_turn_model(None, Some("claude-opus-5-5")).expect_err("refused");
         let (status, body) = refusal(err).await;
         assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE);
         assert_eq!(body["error"]["code"], "LLM_NOT_CONFIGURED");
@@ -2192,5 +2187,208 @@ mod tests {
     #[test]
     fn no_broker_means_nothing_is_pending() {
         assert!(pending_confirmations(None).confirmations.is_empty());
+    }
+
+    // ── The API contract's samples (API-CONTRACT) ─────────────────────
+
+    /// `/v1/chat/history`, `/v1/chat/confirmations` and the feedback
+    /// routes' JSON bodies for the API contract's folder: one message with
+    /// a linked artifact and its feedback, one pending prompt. The history,
+    /// clear and feedback answers are their handlers' own response types,
+    /// built here over the rows the handlers read: the handlers read them
+    /// through the `ChatService` and `AppState` a unit test cannot build.
+    pub(crate) async fn contract_samples(out: &mut crate::contract::Samples) {
+        use openalpaca_core::security::confirmation::{ConfirmationBroker, ConfirmationRequest};
+        use openalpaca_storage::store::StoreScope;
+        use openalpaca_storage::{
+            ArtifactKind, ArtifactStore, ConversationMessage, ConversationRepository, Database,
+            FileAssetRepository, MessageFeedbackRepository, NewArtifact,
+        };
+        let home = tempfile::tempdir().expect("home store");
+        let _env = crate::test_util::HomeStoreGuard::set(&home.path().join(".openalpaca"));
+        let dir = tempfile::tempdir().expect("tempdir");
+        let db = Database::open(&dir.path().join("test.db")).expect("open db");
+        let lane = "owner-1:gui";
+        let repo = ConversationRepository::new(&db);
+        let session = repo
+            .get_or_create_active_session(lane, "gui", None)
+            .expect("session");
+        let message = repo
+            .insert(&ConversationMessage {
+                lane_key: lane.to_string(),
+                role: "assistant".to_string(),
+                content: "Here it is.".to_string(),
+                ..Default::default()
+            })
+            .expect("insert");
+        let artifact = ArtifactStore::new(&db)
+            .put(NewArtifact::new(
+                "owner-1",
+                &StoreScope::Home,
+                ArtifactKind::Markdown,
+                "report",
+                b"body\n",
+            ))
+            .expect("put")
+            .0;
+        FileAssetRepository::new(&db)
+            .link_to_message_with_role(
+                message,
+                &artifact.id,
+                0,
+                None,
+                openalpaca_storage::repository::file_asset::ARTIFACT_ROLE,
+            )
+            .expect("link");
+        let messages = repo.list_by_session(&session.id, 50, 0).expect("messages");
+        let history = ChatHistoryResponse {
+            messages: with_artifacts(&db, messages),
+            total: 1,
+            lane_key: lane.to_string(),
+            session_id: Some(session.id.clone()),
+        };
+        out.response("get-chat-history", serde_json::to_value(history).unwrap());
+        out.response(
+            "delete-chat-history",
+            serde_json::to_value(ChatDeleteResponse { deleted: 1 }).unwrap(),
+        );
+        let feedback = MessageFeedbackRepository::new(&db);
+        feedback
+            .upsert(message, "positive", Some("good"))
+            .expect("feedback");
+        let row = feedback
+            .get_by_message(message)
+            .expect("read")
+            .expect("a row");
+        let answer = FeedbackResponse {
+            message_id: row.message_id,
+            feedback: row.feedback,
+            comment: row.comment,
+        };
+        let answer = serde_json::to_value(answer).unwrap();
+        out.response("put-chat-messages-id-feedback", answer.clone());
+        out.response("get-chat-messages-id-feedback", answer);
+
+        let broker = ConfirmationBroker::new();
+        let _pending = broker.request(&ConfirmationRequest {
+            request_id: "req-1".to_string(),
+            agent_id: "orchestrator".to_string(),
+            tool_name: "file_write".to_string(),
+            tool_arguments: serde_json::json!({ "path": "notes.md" }),
+            stream_id: Some("stream-1".to_string()),
+            lane_key: Some(lane.to_string()),
+            task_id: Some("task-1".to_string()),
+            agent_instance_id: None,
+            preview: Some("+ a line".to_string()),
+            per_call: true,
+            timestamp: Utc::now(),
+        });
+        let pending = pending_confirmations(Some(&broker));
+        out.response(
+            "get-chat-confirmations",
+            serde_json::to_value(pending).unwrap(),
+        );
+
+        // CONTRACT-SAMPLES-2 (*Rev 107*'s chat-stream item, (b)): the send's
+        // answer, the handler's own type, and each frame the stream sends,
+        // through `sse_frame`, the one place a frame is named and written.
+        let sent = ChatSendResponseBody {
+            stream_id: "stream-1".to_string(),
+            lane_key: lane.to_string(),
+            model_used: Some("model-a".to_string()),
+        };
+        out.response("post-chat", serde_json::to_value(sent).unwrap());
+        let examples = stream_examples();
+        let mut seen = [false; STREAM_VARIANTS];
+        for event in &examples {
+            seen[stream_index(event)] = true;
+            let (name, data) = sse_frame(event);
+            let data: serde_json::Value = serde_json::from_str(&data).expect("a frame is JSON");
+            out.stream(name, data);
+        }
+        assert!(
+            seen.iter().all(|s| *s),
+            "every ChatStreamEvent variant has its example in stream_examples"
+        );
+    }
+
+    /// How many variants `ChatStreamEvent` has: [`stream_index`]'s range.
+    const STREAM_VARIANTS: usize = 7;
+
+    /// An exhaustive match with no catch-all: a new variant does not compile
+    /// until it has an index, and the producer fails until
+    /// [`stream_examples`] carries one of it.
+    fn stream_index(event: &openalpaca_core::chat::ChatStreamEvent) -> usize {
+        use openalpaca_core::chat::ChatStreamEvent as E;
+        match event {
+            E::Thinking => 0,
+            E::Reasoning { .. } => 1,
+            E::Delta { .. } => 2,
+            E::Done { .. } => 3,
+            E::Error { .. } => 4,
+            E::ConfirmationRequested { .. } => 5,
+            E::ConfirmationResolved { .. } => 6,
+        }
+    }
+
+    /// One of each frame, every optional value filled, so each sample
+    /// carries every key its frame can.
+    fn stream_examples() -> Vec<openalpaca_core::chat::ChatStreamEvent> {
+        use openalpaca_core::chat::ChatStreamEvent as E;
+        use openalpaca_core::gateway::{
+            ContinuedFrom, DelegationInfo, MemoryUsed, SkippedAttachment,
+        };
+        let note =
+            openalpaca_storage::memory_files::NoteId::parse("00000021-0000-4000-8000-000000000001")
+                .unwrap();
+        vec![
+            E::Thinking,
+            E::Reasoning {
+                text: "Looking.".to_string(),
+            },
+            E::Delta {
+                content: "Here".to_string(),
+            },
+            E::Done {
+                content: "Here it is.".to_string(),
+                model: "model-a".to_string(),
+                tokens_in: 10,
+                tokens_out: 5,
+                duration_ms: 90,
+                attachments_used: Some(vec!["file-1".to_string()]),
+                attachments_skipped: Some(vec![SkippedAttachment {
+                    id: "img-1".to_string(),
+                    reason: "the answering model does not support image input".to_string(),
+                }]),
+                memory_used: Some(vec![MemoryUsed {
+                    id: note,
+                    revision: "a".repeat(64),
+                    reason: openalpaca_core::memory::service::UsedReason::Recall,
+                }]),
+                delegation: Some(DelegationInfo {
+                    task_id: "task-1".to_string(),
+                    title: "Write the report".to_string(),
+                }),
+                working_state_updated: true,
+                continued_from: Some(ContinuedFrom {
+                    session_id: "session-0".to_string(),
+                    topic: "Trip".to_string(),
+                }),
+            },
+            E::Error {
+                message: "The model refused the request.".to_string(),
+            },
+            E::ConfirmationRequested {
+                request_id: "req-1".to_string(),
+                tool_name: "file_write".to_string(),
+                tool_arguments: serde_json::json!({ "path": "notes.md" }),
+                preview: Some("+ a line".to_string()),
+                per_call: true,
+            },
+            E::ConfirmationResolved {
+                request_id: "req-1".to_string(),
+                outcome: openalpaca_core::events::ConfirmationOutcome::Approved,
+            },
+        ]
     }
 }

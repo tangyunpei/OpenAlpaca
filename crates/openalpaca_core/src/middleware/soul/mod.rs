@@ -1,6 +1,5 @@
 use super::persona_frontmatter;
 use super::prompt::SystemPersona;
-use std::fmt;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SoulFrontmatter {
@@ -18,28 +17,19 @@ pub struct SoulDocument {
     pub continuity: Vec<String>,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
 pub enum SoulParseError {
+    #[error("Missing YAML frontmatter")]
     MissingFrontmatter,
+    #[error("Unterminated YAML frontmatter")]
     UnterminatedFrontmatter,
+    #[error("Missing frontmatter field '{0}'")]
     MissingField(&'static str),
+    #[error("Missing required section '{0}'")]
     MissingSection(&'static str),
+    #[error("Section '{0}' is empty")]
     EmptySection(&'static str),
 }
-
-impl fmt::Display for SoulParseError {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            Self::MissingFrontmatter => write!(f, "Missing YAML frontmatter"),
-            Self::UnterminatedFrontmatter => write!(f, "Unterminated YAML frontmatter"),
-            Self::MissingField(field) => write!(f, "Missing frontmatter field '{}'", field),
-            Self::MissingSection(section) => write!(f, "Missing required section '{}'", section),
-            Self::EmptySection(section) => write!(f, "Section '{}' is empty", section),
-        }
-    }
-}
-
-impl std::error::Error for SoulParseError {}
 
 fn normalize_text(value: &str) -> String {
     value

@@ -61,6 +61,7 @@ use anyhow::{Context, Result, bail};
 use chrono::{DateTime, Utc};
 use clap::{Args, Subcommand};
 use colored::Colorize;
+use openalpaca_app_support::{discovery, paths};
 use openalpaca_core::memory::service::{WorkspaceHint, resolve_project_root, wire};
 use openalpaca_core::utils::text::{
     escape_hidden, escape_hidden_line, hidden_notice, is_hidden, one_line,
@@ -69,7 +70,7 @@ use openalpaca_storage::memory_files::{
     self as files, Note, NoteId, NoteKind, NoteSource, NoteStatus, Partition, SourceType,
 };
 use openalpaca_storage::store::StoreScope;
-use openalpaca_storage::{ConfigRepository, discovery, store};
+use openalpaca_storage::{ConfigRepository, store};
 use reqwest::Method;
 use serde_json::{Value, json};
 use std::io::{IsTerminal, Read};
@@ -86,7 +87,9 @@ pub struct MemoryArgs {
     pub command: MemoryCommands,
 }
 
-/// Which project a daemon-backed verb addresses (design §7a, the CLI row).
+// Which project a daemon-backed verb addresses (design §7a, the CLI row).
+// A plain comment: a doc comment here would be clap's about text, and on a
+// deferred variant (M61) it would replace the verb's own on its --help page.
 #[derive(Args, Clone, Debug, Default)]
 pub struct ScopeArgs {
     /// Address the global partition only: send no project
@@ -179,6 +182,7 @@ fn is_recorded_root(path: &Path) -> bool {
 }
 
 #[derive(Subcommand, Debug)]
+#[command(defer = true)]
 pub enum MemoryCommands {
     /// List notes (active by default)
     List {
@@ -383,25 +387,16 @@ pub async fn run(args: MemoryArgs) -> Result<()> {
             format,
             at,
         } => {
-            let api = Api::connect(&at)?;
-            let mut query = vec![format!("limit={limit}")];
-            if let Some(k) = kind {
-                query.push(format!("kind={}", urlencoding::encode(&k)));
-            }
-            if let Some(s) = status {
-                query.push(format!("status={}", urlencoding::encode(&s)));
-            }
-            if let Some(s) = scope {
-                query.push(format!("scope={}", urlencoding::encode(&s)));
-            }
-            if history {
-                query.push("include_history=true".into());
-            }
-            if candidates {
-                query.push("include_candidates=true".into());
-            }
+            let api = Api::connect(&at).await?;
             let page = api
-                .get(&format!("/v1/memories?{}", query.join("&")))
+                .get(&list_path(&ListFilters {
+                    limit,
+                    kind: kind.as_deref(),
+                    status: status.as_deref(),
+                    scope: scope.as_deref(),
+                    history,
+                    candidates,
+                }))
                 .await?;
             match format {
                 OutputFormat::Json => println!("{}", serde_json::to_string_pretty(&page)?),
@@ -422,7 +417,7 @@ pub async fn run(args: MemoryArgs) -> Result<()> {
             format,
             at,
         } => {
-            let api = Api::connect(&at)?;
+            let api = Api::connect(&at).await?;
             let path = search_path(&SearchFilters {
                 query: &query,
                 kind: kind.as_deref(),
@@ -450,7 +445,7 @@ pub async fn run(args: MemoryArgs) -> Result<()> {
             format,
             at,
         } => {
-            let api = Api::connect(&at)?;
+            let api = Api::connect(&at).await?;
             let found = timeline(
                 &api,
                 id.as_deref(),
@@ -472,13 +467,9 @@ pub async fn run(args: MemoryArgs) -> Result<()> {
             raw,
             at,
         } => {
-            let api = Api::connect(&at)?;
+            let api = Api::connect(&at).await?;
             let id = api.resolve_id(&id).await?;
-            let path = match &revision {
-                Some(rev) => format!("/v1/memories/{id}?revision={}", urlencoding::encode(rev)),
-                None => format!("/v1/memories/{id}"),
-            };
-            let note = api.get(&path).await?;
+            let note = api.get(&note_path(id, revision.as_deref())).await?;
             if raw {
                 print!("{}", note_from_read(&note)?.serialize());
             } else {
@@ -497,7 +488,7 @@ pub async fn run(args: MemoryArgs) -> Result<()> {
             body,
             at,
         } => {
-            let api = Api::connect(&at)?;
+            let api = Api::connect(&at).await?;
             let body = match body.as_deref() {
                 Some("-") => {
                     let mut text = String::new();
@@ -512,28 +503,25 @@ pub async fn run(args: MemoryArgs) -> Result<()> {
             if body.trim().is_empty() {
                 bail!("the body is empty; nothing was saved");
             }
-            let mut request = json!({
-                "title": title,
-                "body": body,
-                "kind": kind,
-                "aliases": aliases,
-                "tags": tags,
-            });
-            if let Some(s) = scope {
-                request["scope"] = Value::String(s);
-            }
-            if let Some(k) = fact_key {
-                request["fact_key"] = Value::String(k);
-            }
-            if let Some(target) = supersedes {
+            let supersedes = match supersedes {
                 // The target's current revision, so a race is a visible 409.
-                let target = api.resolve_id(&target).await?;
-                let current = api.get(&format!("/v1/memories/{target}")).await?;
-                request["supersedes"] = json!({
-                    "id": target.to_string(),
-                    "expected_revision": current["revision"],
-                });
-            }
+                Some(target) => {
+                    let target = api.resolve_id(&target).await?;
+                    let current = api.get(&format!("/v1/memories/{target}")).await?;
+                    Some((target.to_string(), current["revision"].clone()))
+                }
+                None => None,
+            };
+            let request = create_body(NewNote {
+                title: &title,
+                body: &body,
+                kind: &kind,
+                aliases: &aliases,
+                tags: &tags,
+                scope,
+                fact_key,
+                supersedes,
+            });
             let response = api
                 .send(Method::POST, "/v1/memories", None, Some(&request))
                 .await?;
@@ -569,7 +557,7 @@ pub async fn run(args: MemoryArgs) -> Result<()> {
             Ok(())
         }
         MemoryCommands::Edit { id, at } => {
-            let api = Api::connect(&at)?;
+            let api = Api::connect(&at).await?;
             let id = api.resolve_id(&id).await?;
             match edit_note(&api, id, &open_in_editor).await? {
                 EditOutcome::Unchanged => {
@@ -616,10 +604,8 @@ pub async fn run(args: MemoryArgs) -> Result<()> {
             }
         }
         MemoryCommands::Suggestions { limit, format, at } => {
-            let api = Api::connect(&at)?;
-            let page = api
-                .get(&format!("/v1/memories/suggestions?limit={limit}"))
-                .await?;
+            let api = Api::connect(&at).await?;
+            let page = api.get(&suggestions_path(limit)).await?;
             print!(
                 "{}",
                 suggestions_text(&page, format, std::io::stdout().is_terminal())
@@ -627,7 +613,7 @@ pub async fn run(args: MemoryArgs) -> Result<()> {
             Ok(())
         }
         MemoryCommands::Confirm { id, at } => {
-            let api = Api::connect(&at)?;
+            let api = Api::connect(&at).await?;
             let id = api.resolve_id(&id).await?;
             let confirmed = confirm_note(&api, id).await?;
             for line in confirmed.lines(id) {
@@ -636,7 +622,7 @@ pub async fn run(args: MemoryArgs) -> Result<()> {
             Ok(())
         }
         MemoryCommands::Undo { id, at } => {
-            let api = Api::connect(&at)?;
+            let api = Api::connect(&at).await?;
             let id = api.resolve_id(&id).await?;
             let current = api.get(&format!("/v1/memories/{id}")).await?;
             let revision = revision_of(&current)?;
@@ -656,11 +642,11 @@ pub async fn run(args: MemoryArgs) -> Result<()> {
             Ok(())
         }
         MemoryCommands::Forget { ids, yes, at } => {
-            let api = Api::connect(&at)?;
+            let api = Api::connect(&at).await?;
             forget_verb(&api, &ids, yes, &mut |line| println!("{line}")).await
         }
         MemoryCommands::Sync { at } => {
-            let api = Api::connect(&at)?;
+            let api = Api::connect(&at).await?;
             let response = api
                 .send::<Value>(Method::POST, "/v1/memories/sync", None, None)
                 .await?;
@@ -691,7 +677,7 @@ pub async fn run(args: MemoryArgs) -> Result<()> {
                 return repair_locally(&at);
             }
             let report = if crate::manager::is_daemon_running() {
-                Api::connect(&at)?.get("/v1/memories/doctor").await?
+                Api::connect(&at).await?.get("/v1/memories/doctor").await?
             } else {
                 println!("{}", "No daemon is running; scanning locally.".dimmed());
                 let (_db, owner_id) = open_owner_database()?;
@@ -714,9 +700,9 @@ pub(crate) struct Api {
 }
 
 impl Api {
-    fn connect(at: &ScopeArgs) -> Result<Self> {
+    async fn connect(at: &ScopeArgs) -> Result<Self> {
         Ok(Self {
-            client: DaemonClient::connect()?,
+            client: DaemonClient::connect().await?,
             headers: at.headers()?,
         })
     }
@@ -774,13 +760,9 @@ impl Api {
         for status in ["active", "candidate", "archived"] {
             let mut cursor: Option<String> = None;
             loop {
-                let mut path = format!(
-                    "/v1/memories?limit=100&status={status}&include_history=true&include_candidates=true"
-                );
-                if let Some(c) = &cursor {
-                    path.push_str(&format!("&cursor={}", urlencoding::encode(c)));
-                }
-                let page = self.get(&path).await?;
+                let page = self
+                    .get(&prefix_page_path(status, cursor.as_deref()))
+                    .await?;
                 for item in page["items"].as_array().into_iter().flatten() {
                     let id = item["id"].as_str().unwrap_or("");
                     if id.starts_with(&prefix) && !matches.iter().any(|(m, _)| m == id) {
@@ -809,6 +791,67 @@ impl Api {
             }
         }
     }
+}
+
+// ── the query strings (CONTRACT-SAMPLES-3) ──────────────────────
+
+/// What `memory list` asks for.
+pub(crate) struct ListFilters<'a> {
+    pub limit: usize,
+    pub kind: Option<&'a str>,
+    pub status: Option<&'a str>,
+    pub scope: Option<&'a str>,
+    pub history: bool,
+    pub candidates: bool,
+}
+
+/// `GET /v1/memories`'s path for `memory list`: each filter sent only when
+/// given. This and the paths below are held to the routes' query samples
+/// by `contract_queries` (CONTRACT-SAMPLES-3).
+pub(crate) fn list_path(f: &ListFilters<'_>) -> String {
+    let mut query = vec![format!("limit={}", f.limit)];
+    if let Some(k) = f.kind {
+        query.push(format!("kind={}", urlencoding::encode(k)));
+    }
+    if let Some(s) = f.status {
+        query.push(format!("status={}", urlencoding::encode(s)));
+    }
+    if let Some(s) = f.scope {
+        query.push(format!("scope={}", urlencoding::encode(s)));
+    }
+    if f.history {
+        query.push("include_history=true".into());
+    }
+    if f.candidates {
+        query.push("include_candidates=true".into());
+    }
+    format!("/v1/memories?{}", query.join("&"))
+}
+
+/// One page of every note of one status, for [`Api::resolve_id`]'s prefix
+/// match: superseded notes and candidates included.
+pub(crate) fn prefix_page_path(status: &str, cursor: Option<&str>) -> String {
+    let mut path = format!(
+        "/v1/memories?limit=100&status={status}&include_history=true&include_candidates=true"
+    );
+    if let Some(c) = cursor {
+        path.push_str(&format!("&cursor={}", urlencoding::encode(c)));
+    }
+    path
+}
+
+/// `GET /v1/memories/{id}`'s path for `memory show`: a past revision's text
+/// when one is named.
+pub(crate) fn note_path(id: NoteId, revision: Option<&str>) -> String {
+    match revision {
+        Some(rev) => format!("/v1/memories/{id}?revision={}", urlencoding::encode(rev)),
+        None => format!("/v1/memories/{id}"),
+    }
+}
+
+/// `GET /v1/memories/suggestions`'s path for `memory suggestions`.
+pub(crate) fn suggestions_path(limit: usize) -> String {
+    format!("/v1/memories/suggestions?limit={limit}")
 }
 
 // ── search and timeline (design 09 §13.1) ───────────────────────
@@ -865,20 +908,31 @@ pub(crate) async fn timeline(
     before: usize,
     after: usize,
 ) -> Result<Value> {
-    let mut q = Vec::new();
-    match (id, query, date) {
-        (Some(id), None, None) => {
-            let id = api.resolve_id(id).await?;
-            q.push(format!("anchor={id}"));
-        }
-        (None, Some(text), None) => q.push(format!("q={}", urlencoding::encode(text))),
-        (None, None, Some(at)) => q.push(format!("date={}", urlencoding::encode(at))),
+    let around = match (id, query, date) {
+        (Some(id), None, None) => Around::Note(api.resolve_id(id).await?),
+        (None, Some(text), None) => Around::Query(text),
+        (None, None, Some(at)) => Around::Date(at),
         _ => bail!("draw a timeline around exactly one of a note id, --query or --date"),
-    }
-    q.push(format!("before={before}"));
-    q.push(format!("after={after}"));
-    api.get(&format!("/v1/memories/timeline?{}", q.join("&")))
-        .await
+    };
+    api.get(&timeline_path(&around, before, after)).await
+}
+
+/// What a timeline is drawn around: a note, a search's first hit, a date.
+pub(crate) enum Around<'a> {
+    Note(NoteId),
+    Query(&'a str),
+    Date(&'a str),
+}
+
+/// `GET /v1/memories/timeline`'s path for `memory timeline`; held to the
+/// route's query sample by `contract_queries` (CONTRACT-SAMPLES-3).
+pub(crate) fn timeline_path(around: &Around<'_>, before: usize, after: usize) -> String {
+    let anchor = match around {
+        Around::Note(id) => format!("anchor={id}"),
+        Around::Query(text) => format!("q={}", urlencoding::encode(text)),
+        Around::Date(at) => format!("date={}", urlencoding::encode(at)),
+    };
+    format!("/v1/memories/timeline?{anchor}&before={before}&after={after}")
 }
 
 // ── suggestions, confirm, undo ───────────────────────────────────
@@ -1126,6 +1180,68 @@ impl Confirmed {
     }
 }
 
+/// A note `memory add` saves, as `POST /v1/memories` reads it.
+pub(crate) struct NewNote<'a> {
+    pub(crate) title: &'a str,
+    pub(crate) body: &'a str,
+    pub(crate) kind: &'a str,
+    pub(crate) aliases: &'a [String],
+    pub(crate) tags: &'a [String],
+    pub(crate) scope: Option<String>,
+    pub(crate) fact_key: Option<String>,
+    /// The note it replaces: its id and the revision read just before.
+    pub(crate) supersedes: Option<(String, Value)>,
+}
+
+/// `POST /v1/memories`'s body, from `memory add`.
+pub(crate) fn create_body(note: NewNote<'_>) -> Value {
+    let mut request = json!({
+        "title": note.title,
+        "body": note.body,
+        "kind": note.kind,
+        "aliases": note.aliases,
+        "tags": note.tags,
+    });
+    if let Some(s) = note.scope {
+        request["scope"] = Value::String(s);
+    }
+    if let Some(k) = note.fact_key {
+        request["fact_key"] = Value::String(k);
+    }
+    if let Some((id, revision)) = note.supersedes {
+        request["supersedes"] = json!({
+            "id": id,
+            "expected_revision": revision,
+        });
+    }
+    request
+}
+
+/// `POST /v1/memories/{id}`'s confirm body, from `memory confirm`: the
+/// replaced note's revision when the note replaces one.
+pub(crate) fn confirm_body(target_revision: Option<String>) -> Value {
+    let mut body = json!({ "action": "confirm" });
+    if let Some(revision) = target_revision {
+        body["target_revision"] = Value::String(revision);
+    }
+    body
+}
+
+/// `POST /v1/memories/{id}`'s edit body, from `memory edit`.
+pub(crate) fn edit_body(patch: Value) -> Value {
+    json!({ "action": "edit", "patch": patch })
+}
+
+/// `POST /v1/memories/forget`'s body, from `memory forget`: one batch.
+pub(crate) fn forget_body(batch: &[(NoteId, String)]) -> Value {
+    json!({
+        "targets": batch
+            .iter()
+            .map(|(id, revision)| json!({ "id": id.to_string(), "expected_revision": revision }))
+            .collect::<Vec<_>>(),
+    })
+}
+
 /// `confirm` (design 09 §3.5, S5): the candidate's revision as `If-Match`
 /// and, when it names a note it would replace, that note's current revision
 /// as `target_revision` — fetched now, right before the confirm, so what is
@@ -1137,7 +1253,7 @@ impl Confirmed {
 pub(crate) async fn confirm_note(api: &Api, id: NoteId) -> Result<Confirmed> {
     let current = api.get(&format!("/v1/memories/{id}")).await?;
     let revision = revision_of(&current)?;
-    let mut body = json!({ "action": "confirm" });
+    let mut target_revision = None;
     let mut replaced_title = None;
     if let Some(target) = current["supersedes"]
         .as_array()
@@ -1145,9 +1261,10 @@ pub(crate) async fn confirm_note(api: &Api, id: NoteId) -> Result<Confirmed> {
         .and_then(Value::as_str)
     {
         let target = api.get(&format!("/v1/memories/{target}")).await?;
-        body["target_revision"] = Value::String(revision_of(&target)?);
+        target_revision = Some(revision_of(&target)?);
         replaced_title = target["title"].as_str().map(str::to_string);
     }
+    let body = confirm_body(target_revision);
     let response = api
         .send(
             Method::POST,
@@ -1317,7 +1434,7 @@ pub(crate) async fn edit_note(
             Method::POST,
             &format!("/v1/memories/{id}"),
             Some(&revision),
-            Some(&json!({ "action": "edit", "patch": patch })),
+            Some(&edit_body(patch)),
         )
         .await?;
     match response.status().as_u16() {
@@ -1575,12 +1692,7 @@ pub(crate) async fn forget_notes(
 ) -> Result<()> {
     let mut sent = 0;
     for batch in targets.chunks(20) {
-        let body = json!({
-            "targets": batch
-                .iter()
-                .map(|(id, revision)| json!({ "id": id.to_string(), "expected_revision": revision }))
-                .collect::<Vec<_>>(),
-        });
+        let body = forget_body(batch);
         let response = api
             .send(Method::POST, "/v1/memories/forget", None, Some(&body))
             .await?;
@@ -1699,11 +1811,11 @@ running daemon instead.)";
 /// two can hold the store. The lock decides; the liveness check only
 /// chooses the words.
 fn claim_store() -> Result<impl Sized> {
-    discovery::acquire_single_instance_lock(false).map_err(|e| {
+    discovery::acquire_single_instance_lock().map_err(|e| {
         if crate::manager::is_daemon_running() {
             e.context(DAEMON_RUNNING_REFUSAL)
         } else {
-            let lock = store::lock_path()
+            let lock = paths::lock_path()
                 .map(|p| p.display().to_string())
                 .unwrap_or_else(|_| "state/openalpacad.lock".to_string());
             e.context(format!(
@@ -1719,7 +1831,7 @@ fn claim_store() -> Result<impl Sized> {
 /// the row the daemon mints at its first start). No database means no
 /// owner yet, and nothing to repair or adopt *for*.
 fn open_owner_database() -> Result<(openalpaca_storage::Database, String)> {
-    let path = store::database_path()?;
+    let path = paths::database_path()?;
     if !path.exists() {
         bail!(
             "no database at {}: start the daemon once so it creates the store and mints an owner id, then try again",

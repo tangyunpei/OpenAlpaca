@@ -1,0 +1,123 @@
+# The workspace's internal crate edges (B-25), checked by scripts/crate_edges.py
+# against `cargo metadata --locked --format-version 1 --no-deps`: run
+# `python3.11 -I scripts/crate_edges.py` from the root. One table per member, a leaf
+# too, under its package name; the three kinds kept apart, each an array of the
+# workspace crates that member's manifest names under that kind. An edge changes
+# by changing this table in the same commit as the manifest. CLAUDE.md's
+# Dependency Graph block shows the `dependencies` arrays and is kept to them by hand.
+# Recorded as the tree stands after Q06 (the shell names openalpaca_app_support only).
+
+[openalpaca]
+dependencies = [
+    "openalpaca_app_support",
+    "openalpaca_core",
+    "openalpaca_llm",
+    "openalpaca_storage",
+]
+build-dependencies = []
+dev-dependencies = [
+    "openalpaca_llm",
+    "openalpaca_storage",
+]
+
+[openalpaca_api]
+dependencies = []
+build-dependencies = []
+dev-dependencies = []
+
+[openalpaca_app_support]
+dependencies = []
+build-dependencies = []
+dev-dependencies = []
+
+[openalpaca_connectors]
+dependencies = [
+    "openalpaca_api",
+    "openalpaca_app_support",
+    "openalpaca_core",
+    "openalpaca_storage",
+]
+build-dependencies = []
+dev-dependencies = [
+    "openalpaca_storage",
+]
+
+[openalpaca_core]
+dependencies = [
+    "openalpaca_api",
+    "openalpaca_app_support",
+    "openalpaca_llm",
+    "openalpaca_mcp",
+    "openalpaca_storage",
+]
+build-dependencies = []
+dev-dependencies = [
+    "openalpaca_llm",
+    "openalpaca_mcp",
+    "openalpaca_storage",
+]
+
+[openalpaca_gui]
+dependencies = [
+    "openalpaca_app_support",
+]
+build-dependencies = []
+dev-dependencies = []
+
+[openalpaca_llm]
+dependencies = []
+build-dependencies = []
+dev-dependencies = []
+
+[openalpaca_mcp]
+dependencies = []
+build-dependencies = []
+dev-dependencies = []
+
+[openalpaca_plugins]
+dependencies = [
+    "openalpaca_api",
+    "openalpaca_app_support",
+    "openalpaca_connectors",
+    "openalpaca_core",
+    "openalpaca_llm",
+    "openalpaca_storage",
+]
+build-dependencies = []
+dev-dependencies = [
+    "openalpaca_llm",
+    "openalpaca_storage",
+]
+
+[openalpaca_storage]
+dependencies = [
+    "openalpaca_app_support",
+]
+build-dependencies = []
+dev-dependencies = []
+
+[openalpaca_wake]
+dependencies = [
+    "openalpaca_api",
+]
+build-dependencies = []
+dev-dependencies = []
+
+[openalpacad]
+dependencies = [
+    "openalpaca_api",
+    "openalpaca_app_support",
+    "openalpaca_connectors",
+    "openalpaca_core",
+    "openalpaca_llm",
+    "openalpaca_mcp",
+    "openalpaca_plugins",
+    "openalpaca_storage",
+    "openalpaca_wake",
+]
+build-dependencies = []
+dev-dependencies = [
+    "openalpaca_llm",
+    "openalpaca_mcp",
+    "openalpaca_storage",
+]

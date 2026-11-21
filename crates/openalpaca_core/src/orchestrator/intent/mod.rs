@@ -21,7 +21,9 @@ pub enum Intent {
     TaskQuery { task_id: Option<String> },
     /// A task control command (cancel, pause, resume). A bare command
     /// (no id) carries `task_id: None` and is resolved against the lane's
-    /// active workflows by the handler (Routing V2 Phase 3).
+    /// active workflows by the handler (Routing V2 Phase 3). The handler
+    /// answers `pause` and `resume` with one sentence, changing nothing
+    /// (N-ROUTE-1).
     TaskControl {
         task_id: Option<String>,
         action: String,
@@ -33,18 +35,6 @@ pub enum Intent {
     /// verbatim — never lower-cased — because the text `/remember` saves is
     /// exactly what the person typed.
     MemoryCommand { verb: MemoryVerb, args: String },
-}
-
-impl Intent {
-    pub fn intent_type(&self) -> &'static str {
-        match self {
-            Intent::SimpleQuery { .. } => "simple_query",
-            Intent::TaskQuery { .. } => "task_query",
-            Intent::TaskControl { .. } => "task_control",
-            Intent::SkillInvocation { .. } => "skill_invocation",
-            Intent::MemoryCommand { .. } => "memory_command",
-        }
-    }
 }
 
 /// The three chat memory commands (design 09 §12.1).

@@ -10,7 +10,9 @@
 #                 the skill's id and name to the plugin's own)
 #   provider/info → the contents of ./provider-info.json when the plugin
 #                 directory holds one (a provider_name and a models list),
-#                 otherwise an empty result
+#                 otherwise an empty result. The daemon no longer asks (the
+#                 plugin provider type is removed, M86): a test drops the file
+#                 to show that an answering plugin is still no provider
 #   agent/info  → the contents of ./agent-info.json when the plugin directory
 #                 holds one (an agent template id, say), otherwise an empty
 #                 result (the daemon then defaults the id to the plugin's own)
@@ -75,8 +77,9 @@ elif method == 'skill/info' and os.path.exists('skill-info.json'):
     with open('skill-info.json') as f:
         resp = {'jsonrpc': '2.0', 'id': mid, 'result': json.load(f)}
 elif method == 'provider/info' and os.path.exists('provider-info.json'):
-    # Same shape for the provider probe: a test that needs the supervisor to
-    # record models drops a {"provider_name": …, "models": [{"id": …}]} here.
+    # Same shape for the provider probe, which the daemon no longer sends
+    # (M86): a test drops a {"provider_name": …, "models": [{"id": …}]} here
+    # to show nothing is taken from it.
     with open('provider-info.json') as f:
         resp = {'jsonrpc': '2.0', 'id': mid, 'result': json.load(f)}
 elif method == 'agent/info' and os.path.exists('agent-info.json'):

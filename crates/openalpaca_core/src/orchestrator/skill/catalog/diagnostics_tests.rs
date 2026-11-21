@@ -651,11 +651,15 @@ fn a_linked_skill_md_is_followed() {
     );
 }
 
-/// The skills a stock install seeds raise nothing — no key of theirs is
-/// unknown, no slash collides.
+/// The skills a stock install runs — the bundle — raise nothing: no key of
+/// theirs is unknown, no slash collides.
 #[test]
 fn the_shipped_skills_scan_clean() {
-    let shipped = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../config/skills");
+    // The bundle, as the daemon writes it (subagent design §2.6 K-2).
+    let dir = tempfile::tempdir().unwrap();
+    let _guard = crate::test_util::HomeStoreGuard::set(&dir.path().join("home"));
+    let shipped = dir.path().join("bundled-skills");
+    crate::bundled::write_skill_pack(&shipped).unwrap();
     let catalog = SkillCatalog::new();
     assert_eq!(catalog.scan_directory(&shipped, SkillScope::Project), 4);
     assert!(

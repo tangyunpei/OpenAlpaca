@@ -422,9 +422,8 @@ impl ChatService {
             let repo = FileAssetRepository::new(&db);
             let mut out = Vec::with_capacity(attachment_refs.len());
             for att_ref in &attachment_refs {
-                let asset = match repo.get_by_id(&att_ref.file_id)? {
-                    Some(a) => a,
-                    None => anyhow::bail!("Attachment not found: {}", att_ref.file_id),
+                let Some(asset) = repo.get_by_id(&att_ref.file_id)? else {
+                    anyhow::bail!("Attachment not found: {}", att_ref.file_id);
                 };
                 if asset.owner_id != principal {
                     anyhow::bail!("Access denied to attachment: {}", att_ref.file_id);
@@ -626,7 +625,6 @@ mod tests {
         release: AsyncMutex<Option<oneshot::Receiver<()>>>,
     }
 
-    #[async_trait::async_trait]
     impl MessageHandler for ParkedStreamingHandler {
         async fn handle(&self, request: HandleRequest) -> Result<HandleResult, String> {
             let sink = request
@@ -651,7 +649,6 @@ mod tests {
     /// provider with no streaming whose answer arrives whole.
     struct SilentHandler;
 
-    #[async_trait::async_trait]
     impl MessageHandler for SilentHandler {
         async fn handle(&self, _request: HandleRequest) -> Result<HandleResult, String> {
             Ok(HandleResult::text("the whole answer".to_string()))
@@ -662,7 +659,6 @@ mod tests {
     /// conversation (design 11 §5).
     struct ContinuingHandler;
 
-    #[async_trait::async_trait]
     impl MessageHandler for ContinuingHandler {
         async fn handle(&self, _request: HandleRequest) -> Result<HandleResult, String> {
             Ok(HandleResult {
@@ -678,7 +674,9 @@ mod tests {
         }
     }
 
-    fn service_with(handler: Arc<dyn MessageHandler>) -> (ChatService, Arc<ChatStreamManager>) {
+    fn service_with(
+        handler: Arc<impl MessageHandler + 'static>,
+    ) -> (ChatService, Arc<ChatStreamManager>) {
         let bus = EventBus::default();
         let gateway = Arc::new(crate::gateway::Gateway::new(
             Arc::new(SharedContext::new()),

@@ -1,6 +1,6 @@
 //! Interactive TUI for `openalpaca config` (no subcommand).
 
-use anyhow::{Context, Result};
+use anyhow::Result;
 use console::style;
 use dialoguer::{Confirm, Input, Password, Select, theme::ColorfulTheme};
 use openalpaca_llm::{ClaudeCodeCliProvider, CodexCliProvider};
@@ -321,9 +321,7 @@ fn sync_ai_config_map(config: &mut HashMap<String, String>) {
     // Remove stale AI keys first
     config.retain(|k, _| {
         !k.starts_with("ai.") || {
-            config_schema::lookup(k)
-                .map(|d| d.backend != ConfigBackend::LlmToml)
-                .unwrap_or(true)
+            config_schema::lookup(k).is_none_or(|d| d.backend != ConfigBackend::LlmToml)
         }
     });
     // Re-read from disk
@@ -373,10 +371,7 @@ fn interactive_provider_keys(
 
         // Enabled toggle
         let enabled_key = format!("ai.{}.enabled", provider);
-        let is_enabled = config
-            .get(&enabled_key)
-            .map(|v| v == "true")
-            .unwrap_or(false);
+        let is_enabled = config.get(&enabled_key).is_some_and(|v| v == "true");
         let toggle_label = if is_enabled {
             format!(
                 "{}  {}",
@@ -620,11 +615,7 @@ fn interactive_add_key(
 
     // Auto-enable if this is the first key
     let enabled_key = format!("ai.{}.enabled", provider);
-    if !config.contains_key(&enabled_key)
-        || config
-            .get(&enabled_key)
-            .map(|v| v == "false")
-            .unwrap_or(false)
+    if !config.contains_key(&enabled_key) || config.get(&enabled_key).is_some_and(|v| v == "false")
     {
         config.insert(enabled_key, "true".to_string());
     }
@@ -982,23 +973,38 @@ fn interactive_daemon(
 
 // ── Agent management structs (local deserialization) ────────────────────
 //
-// These mirror the structs in agents.rs but are kept local to avoid coupling.
+// The screen's own read types; an agent row is read through agents.rs's
+// `AgentRow`, and the bodies it sends are agents.rs's.
 
+/// A stored agent as `GET /v1/agents` sends it, read through the row type
+/// `agent list` reads (its `skills_json` and `llm_config_json`, *Rev 123*'s
+/// 123-6, (b)), so the menu's model and skills are the row's.
 #[derive(Debug, Deserialize)]
-struct TuiAgentItem {
+#[serde(from = "super::agents::AgentRow")]
+pub(crate) struct TuiAgentItem {
     id: String,
     name: String,
     status: String,
-    #[serde(default)]
     model: Option<String>,
-    #[serde(default)]
     description: Option<String>,
-    #[serde(default)]
     skills: Option<Vec<String>>,
 }
 
+impl From<super::agents::AgentRow> for TuiAgentItem {
+    fn from(row: super::agents::AgentRow) -> Self {
+        Self {
+            model: super::agents::row_model(row.llm_config_json.as_deref()),
+            skills: super::agents::row_skills(row.skills_json.as_deref()),
+            id: row.id,
+            name: row.name,
+            status: row.status,
+            description: row.description,
+        }
+    }
+}
+
 #[derive(Debug, Deserialize)]
-struct TuiAgentConfigResponse {
+pub(crate) struct TuiAgentConfigResponse {
     config: serde_json::Value,
     config_version: u64,
 }
@@ -1014,16 +1020,20 @@ fn block_on<F: std::future::Future>(f: F) -> F::Output {
 
 /// Fetch agents from the daemon. Returns empty vec on connection failure.
 fn fetch_agents() -> Vec<TuiAgentItem> {
-    let client = match DaemonClient::connect() {
-        Ok(c) => c,
-        Err(_) => return Vec::new(),
-    };
-    block_on(async {
+    fetch_agents_or_why().unwrap_or_default()
+}
+
+/// The daemon's agents, or why the daemon could not be asked — the
+/// connect's own sentence (not running, a mismatch, still starting). A
+/// failed read of a daemon that was reached is an empty list, as before.
+fn fetch_agents_or_why() -> Result<Vec<TuiAgentItem>> {
+    let client = block_on(DaemonClient::connect())?;
+    Ok(block_on(async {
         client
-            .get::<Vec<TuiAgentItem>>("/v1/agents?limit=50")
+            .get::<Vec<TuiAgentItem>>(&super::agents::list_path(None))
             .await
             .unwrap_or_default()
-    })
+    }))
 }
 
 /// Format an agent as a menu item line.
@@ -1058,15 +1068,12 @@ fn interactive_manage_agents(
 ) -> Result<bool> {
     loop {
         // Fetch fresh agent list every iteration
-        let agents = fetch_agents();
+        let (agents, daemon_hint) = match fetch_agents_or_why() {
+            Ok(agents) => (agents, String::new()),
+            Err(why) => (Vec::new(), format!(" ({why})")),
+        };
 
         if agents.is_empty() {
-            let daemon_hint = if DaemonClient::connect().is_err() {
-                " (daemon is not running)"
-            } else {
-                ""
-            };
-
             println!(
                 "\n{}{}",
                 style("No agents found.").yellow(),
@@ -1176,7 +1183,7 @@ fn interactive_agent_detail(agent: &TuiAgentItem) -> Result<()> {
 
 /// Show full agent config as pretty-printed JSON.
 fn view_agent_config_json(agent_id: &str) -> Result<()> {
-    let client = DaemonClient::connect().context("Daemon is not running")?;
+    let client = block_on(DaemonClient::connect())?;
     let config: TuiAgentConfigResponse =
         block_on(async { client.get(&format!("/v1/agents/{}/config", agent_id)).await })?;
 
@@ -1203,7 +1210,7 @@ fn view_agent_config_json(agent_id: &str) -> Result<()> {
 
 /// Interactive editor for an agent's config (key-by-key editing).
 fn interactive_edit_agent_config(agent_id: &str, agent_name: &str) -> Result<()> {
-    let client = DaemonClient::connect().context("Daemon is not running")?;
+    let client = block_on(DaemonClient::connect())?;
     let resp: TuiAgentConfigResponse =
         block_on(async { client.get(&format!("/v1/agents/{}/config", agent_id)).await })?;
 
@@ -1265,10 +1272,7 @@ fn interactive_edit_agent_config(agent_id: &str, agent_name: &str) -> Result<()>
             set_nested_value(&mut config, path, json_val);
         } else if sel == fields.len() {
             // Save
-            let body = serde_json::json!({
-                "config": config,
-                "config_version": version,
-            });
+            let body = super::agents::config_body(config.clone(), version);
             let save_result: Result<serde_json::Value> = block_on(async {
                 client
                     .put(&format!("/v1/agents/{}/config", agent_id), &body)
@@ -1403,8 +1407,8 @@ fn parse_json_value(s: &str) -> serde_json::Value {
 
 /// Perform a pause/resume action on an agent.
 fn agent_action_tui(agent_id: &str, action: &str) -> Result<()> {
-    let client = DaemonClient::connect().context("Daemon is not running")?;
-    let body = serde_json::json!({ "action": action });
+    let client = block_on(DaemonClient::connect())?;
+    let body = super::agents::action_body(action);
     let result: serde_json::Value = block_on(async {
         client
             .post(&format!("/v1/agents/{}/action", agent_id), &body)
@@ -1441,7 +1445,7 @@ fn remove_agent_tui(agent_id: &str, agent_name: &str) -> Result<bool> {
         return Ok(false);
     }
 
-    let client = DaemonClient::connect().context("Daemon is not running")?;
+    let client = block_on(DaemonClient::connect())?;
     let result: serde_json::Value =
         block_on(async { client.delete_req(&format!("/v1/agents/{}", agent_id)).await })?;
 
@@ -1454,6 +1458,10 @@ fn remove_agent_tui(agent_id: &str, agent_name: &str) -> Result<bool> {
     );
     Ok(true)
 }
+
+// The `POST /v1/agents` body the creation screen sends is the one `agent
+// create` sends (AGENT-CREATE-CLI).
+use super::agents::{CAPABILITIES_PROMPT, ask_agent_id, create_agent_body};
 
 /// Interactive agent creation wizard (mirrors agents.rs create_interactive).
 fn interactive_create_agent() -> Result<()> {
@@ -1472,6 +1480,9 @@ fn interactive_create_agent() -> Result<()> {
         println!("{}", style("Cancelled.").dim());
         return Ok(());
     }
+
+    // 1a. The id, derived from the name and the person's to change
+    let id = ask_agent_id(&theme, &name)?;
 
     // 2. Description
     let description: String = Input::with_theme(&theme)
@@ -1498,7 +1509,7 @@ fn interactive_create_agent() -> Result<()> {
             }
         }
         _ => Input::<String>::with_theme(&theme)
-            .with_prompt("Model (e.g., claude-sonnet-4-5-20250929)")
+            .with_prompt("Model (e.g., claude-sonnet-5-5)")
             .interact_text()?,
     };
 
@@ -1510,7 +1521,7 @@ fn interactive_create_agent() -> Result<()> {
 
     // 5. Skills
     let skills_input: String = Input::with_theme(&theme)
-        .with_prompt("Skills (comma-separated, e.g., research,code_review)")
+        .with_prompt(CAPABILITIES_PROMPT)
         .allow_empty(true)
         .interact_text()?;
     let skills: Vec<String> = skills_input
@@ -1526,46 +1537,21 @@ fn interactive_create_agent() -> Result<()> {
         .interact_text()?;
     let max_cost: f64 = max_cost_input.parse().unwrap_or(0.0);
 
-    // 7. Temperature
-    let temp_input: String = Input::with_theme(&theme)
-        .with_prompt("Temperature (0.0-1.0)")
-        .default("0.5".to_string())
-        .interact_text()?;
-    let temperature: f64 = temp_input.parse().unwrap_or(0.5);
-
-    // Build the config JSON
-    let mut agent_config = serde_json::json!({
-        "name": name,
-        "description": description,
-        "llm": {
-            "model": model,
-        },
-        "skills": skills,
-        "persona": persona,
-        "preset": {
-            "temperature": temperature,
-        }
-    });
-
-    if max_cost > 0.0 {
-        agent_config["constraints"] = serde_json::json!({
-            "max_cost_per_task": max_cost,
-        });
-    }
+    let body = create_agent_body(
+        &id,
+        &name,
+        &description,
+        &model,
+        &persona,
+        &skills,
+        max_cost,
+    );
 
     // Confirm
     println!();
     println!("{}", style("Agent summary:").bold());
-    println!("  {} {}", style("Name:").dim(), name);
-    if !description.is_empty() {
-        println!("  {} {}", style("Desc:").dim(), description);
-    }
-    println!("  {} {}", style("Model:").dim(), model);
-    if !skills.is_empty() {
-        println!("  {} {}", style("Skills:").dim(), skills.join(", "));
-    }
-    if max_cost > 0.0 {
-        println!("  {} ${:.2}", style("Max cost:").dim(), max_cost);
+    for line in creation_summary_lines(&name, &description, &model, &skills, max_cost) {
+        println!("{line}");
     }
     println!();
 
@@ -1579,8 +1565,7 @@ fn interactive_create_agent() -> Result<()> {
         return Ok(());
     }
 
-    let client = DaemonClient::connect().context("Daemon is not running")?;
-    let body = serde_json::json!({ "config": agent_config });
+    let client = block_on(DaemonClient::connect())?;
     let result: Result<serde_json::Value> =
         block_on(async { client.post("/v1/agents", &body).await });
 
@@ -1601,9 +1586,37 @@ fn interactive_create_agent() -> Result<()> {
     Ok(())
 }
 
+/// The creation screen's summary before it asks to create, line by line.
+/// The capabilities asked for are shown under "Capabilities:" (*Rev 142*'s
+/// item 14, (a)).
+fn creation_summary_lines(
+    name: &str,
+    description: &str,
+    model: &str,
+    skills: &[String],
+    max_cost: f64,
+) -> Vec<String> {
+    let mut out = vec![format!("  {} {}", style("Name:").dim(), name)];
+    if !description.is_empty() {
+        out.push(format!("  {} {}", style("Desc:").dim(), description));
+    }
+    out.push(format!("  {} {}", style("Model:").dim(), model));
+    if !skills.is_empty() {
+        out.push(format!(
+            "  {} {}",
+            style("Capabilities:").dim(),
+            skills.join(", ")
+        ));
+    }
+    if max_cost > 0.0 {
+        out.push(format!("  {} ${:.2}", style("Max cost:").dim(), max_cost));
+    }
+    out
+}
+
 /// Try to fetch the list of available models from the daemon.
 fn fetch_model_list() -> Result<Vec<String>> {
-    let client = DaemonClient::connect()?;
+    let client = block_on(DaemonClient::connect())?;
     let models: Vec<serde_json::Value> = block_on(async { client.get("/v1/models").await })?;
     let names: Vec<String> = models
         .iter()
@@ -1743,11 +1756,20 @@ fn resolve_cli_path(
     }
 }
 
-/// Check if a credential file exists for the given provider.
+/// Check if a credential file exists for the given provider, under the
+/// user's home (`paths::user_home`).
 fn check_credential_file(provider: &str) -> bool {
-    let home = match std::env::var("HOME") {
-        Ok(h) => std::path::PathBuf::from(h),
-        Err(_) => return false,
+    credential_file_present(
+        openalpaca_app_support::paths::user_home().as_deref(),
+        provider,
+    )
+}
+
+/// Whether `provider`'s credential file is under `home`; with no usable
+/// home (unset, empty or relative) none is looked for.
+fn credential_file_present(home: Option<&Path>, provider: &str) -> bool {
+    let Some(home) = home else {
+        return false;
     };
     let cred_path = match provider {
         "claude_code" => home.join(".claude").join(".credentials.json"),
@@ -1762,8 +1784,7 @@ fn effective_bool(config: &HashMap<String, String>, key: &str) -> bool {
     config.get(key).map(|v| v == "true").unwrap_or_else(|| {
         config_schema::lookup(key)
             .and_then(|d| d.default)
-            .map(|d| d == "true")
-            .unwrap_or(false)
+            .is_some_and(|d| d == "true")
     })
 }
 
@@ -1861,8 +1882,7 @@ fn format_provider_status(
     if !api_key_key.is_empty() {
         let has_key = config
             .get(api_key_key)
-            .map(|v| !v.trim().is_empty())
-            .unwrap_or(false);
+            .is_some_and(|v| !v.trim().is_empty());
         if has_key {
             lines.push(format!(
                 "  {} {} is set",
@@ -1896,9 +1916,8 @@ fn apply_auto_enable(
 
     // Derive the corresponding .enabled key from the credential key
     // e.g. "ai.anthropic.api_key" → "ai.anthropic.enabled"
-    let prefix = match def.key.rsplit_once('.') {
-        Some((p, _)) => p,
-        None => return,
+    let Some((prefix, _)) = def.key.rsplit_once('.') else {
+        return;
     };
     let enabled_key = format!("{}.enabled", prefix);
 
@@ -2022,3 +2041,6 @@ fn save_and_exit(repo: &ConfigRepository, config_map: &HashMap<String, String>) 
     println!("{}", style("Configuration saved!").bold().green());
     Ok(())
 }
+
+#[cfg(test)]
+mod tests;

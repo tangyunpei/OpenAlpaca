@@ -1,0 +1,32 @@
+{
+  "attachments_skipped": [
+    {
+      "id": "",
+      "reason": ""
+    }
+  ],
+  "attachments_used": [
+    ""
+  ],
+  "content": "",
+  "continued_from": {
+    "session_id": "",
+    "topic": ""
+  },
+  "delegation": {
+    "task_id": "",
+    "title": ""
+  },
+  "duration_ms": 0,
+  "memory_used": [
+    {
+      "id": "",
+      "reason": "",
+      "revision": ""
+    }
+  ],
+  "model": "",
+  "tokens_in": 0,
+  "tokens_out": 0,
+  "working_state_updated": false
+}

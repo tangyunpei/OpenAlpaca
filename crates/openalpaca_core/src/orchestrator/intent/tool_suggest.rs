@@ -1,23 +1,15 @@
 //! Tool suggestion heuristics: detect file/URL/shell/persona signals in user messages.
 
 use regex::Regex;
-use std::sync::OnceLock;
+use std::sync::LazyLock;
 
-static REL_PATH_WITH_EXT_RE: OnceLock<Regex> = OnceLock::new();
-static FILE_NAMED_RE: OnceLock<Regex> = OnceLock::new();
+static REL_PATH_WITH_EXT_RE: LazyLock<Regex> = LazyLock::new(|| {
+    Regex::new(r"(?i)(?:^|[^A-Za-z0-9._/\-])((?:\./)?(?:[A-Za-z0-9._\-]+/)*[A-Za-z0-9._\-]+\.[A-Za-z]{2,10})(?:$|[^A-Za-z0-9._/\-])").unwrap()
+});
 
-fn rel_path_regex() -> &'static Regex {
-    REL_PATH_WITH_EXT_RE.get_or_init(|| {
-        Regex::new(r"(?i)(?:^|[^A-Za-z0-9._/\-])((?:\./)?(?:[A-Za-z0-9._\-]+/)*[A-Za-z0-9._\-]+\.[A-Za-z]{2,10})(?:$|[^A-Za-z0-9._/\-])").unwrap()
-    })
-}
-
-fn file_named_regex() -> &'static Regex {
-    FILE_NAMED_RE.get_or_init(|| {
-        Regex::new(r"(?i)\bfile\s+(?:named|called)\s+([A-Za-z0-9][A-Za-z0-9._/\-]{0,200})\b")
-            .unwrap()
-    })
-}
+static FILE_NAMED_RE: LazyLock<Regex> = LazyLock::new(|| {
+    Regex::new(r"(?i)\bfile\s+(?:named|called)\s+([A-Za-z0-9][A-Za-z0-9._/\-]{0,200})\b").unwrap()
+});
 
 #[derive(Default)]
 struct ToolFlags {
@@ -187,6 +179,6 @@ impl super::IntentParser {
     }
 
     pub(super) fn mentions_filename(content: &str) -> bool {
-        rel_path_regex().is_match(content) || file_named_regex().is_match(content)
+        REL_PATH_WITH_EXT_RE.is_match(content) || FILE_NAMED_RE.is_match(content)
     }
 }

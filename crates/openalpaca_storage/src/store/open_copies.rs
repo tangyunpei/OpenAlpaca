@@ -19,7 +19,7 @@ use anyhow::{Context, Result, bail};
 use std::fs;
 use std::path::{Component, Path, PathBuf};
 
-use super::{CACHE_DIR, create_private_dir, state_dir, state_dir_path};
+use openalpaca_app_support::paths::{CACHE_DIR, create_private_dir, state_dir, state_dir_path};
 
 /// The folder's name under `state/cache/`.
 const OPEN_DIR: &str = "open";

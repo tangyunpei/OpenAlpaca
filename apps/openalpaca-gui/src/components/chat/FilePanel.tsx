@@ -12,7 +12,7 @@
  * daemon cannot serve.
  *
  * Beside the pin: `Open` (the file in its default app, through the daemon) and
- * `Reveal in Finder` (the file in its folder, through the Tauri shell — drawn
+ * `Reveal in Finder` (the file in its folder, through the daemon too — drawn
  * only inside the app's window, `canReveal`), each only when the caller gives
  * it a handler.
  *

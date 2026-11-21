@@ -35,8 +35,14 @@ pub(super) async fn build_tool_registry(
     // the bus here, together with the `ExtensionCapabilityWithheld` variant it
     // exists to publish. The other 100 `new()`/`default()` sites are tests: a
     // ledger with no bus logs and returns.
-    let tool_registry = openalpaca_core::tools::ToolRegistry::with_event_bus(bus.clone())
+    let mut tool_registry = openalpaca_core::tools::ToolRegistry::with_event_bus(bus.clone())
         .map_err(|e| anyhow::anyhow!(e))?;
+    // M85: an MCP tool's images, audio and embedded blobs are kept as
+    // by-products in the store `artifact_write` writes, within its caps.
+    tool_registry.set_by_product_sink(openalpaca_core::tools::builtins::ByProductSink::new(
+        db.clone(),
+        Some(daemon_config.clone()),
+    ));
 
     // Register built-in tools (including update_persona)
     let persona_ctx = PersonaToolContext {

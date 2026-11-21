@@ -1,5 +1,6 @@
 use super::guard::AgentBusyGuard;
 use super::tracker::{SubagentStatus, SubagentTracker};
+use crate::agent::registry::TemplateState;
 use crate::agent::template::{AgentSource, AgentTemplate};
 use crate::bus::EventBus;
 use crate::compose::{
@@ -14,18 +15,19 @@ use crate::memory::scope_context::MemoryScopeContext;
 use crate::middleware::prompt::{format_tool_guidance, SystemPersona};
 use crate::prompt_ctx::ContextManager;
 use crate::prompt_ctx::section::ContextBundle;
-use crate::prompt_ctx::{ExecutionPath, SectionPriority};
+use crate::prompt_ctx::{ExecutionPath, PackageSectionKind, SectionPriority};
 use crate::runner::plugin_agent::{PluginLoopOutcome, PluginRunScope, run_plugin_agent_loop};
 use crate::runner::steering::SteeringInbox;
 use crate::runner::{LoopConfig, run_agentic_loop_routed};
+use crate::security::capabilities::CapabilityManager;
 use crate::security::sandbox::{SandboxManager, SandboxPolicy};
 use crate::tools::extensions::ExtensionId;
 use crate::tools::registry::{BuiltInTool, RegisteredTool, ToolBackend, ToolContext};
 use crate::tools::ToolRegistry;
 use arc_swap::ArcSwap;
-use async_trait::async_trait;
 use chrono::Utc;
-use openalpaca_llm::{ChatMessage, LlmRouter, ToolDefinition};
+use openalpaca_api::plugin_traits::PluginAgentExecutor;
+use openalpaca_llm::{ChatMessage, LlmRouter, ModelChoice, ToolDefinition};
 use openalpaca_storage::Database;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
@@ -93,9 +95,10 @@ pub const SUBAGENT_DAEMON_STOP_DETAIL: &str = "interrupted by the daemon's stop"
 
 /// How long a lead's run end waits for the subagents it cancelled to close
 /// their lanes themselves. An LLM subagent's loop races its model call and
-/// its tool calls against the token and ends at once; a plugin agent's RPC is
-/// not raced (it is bounded by the plugin channel's own timeout), so one in
-/// the middle of a call is aborted when this runs out.
+/// its tool calls against the token and ends at once; a plugin agent races
+/// its spawn and step RPCs against the token too and then sends `stop()`, so
+/// only one whose `stop()` does not answer in time is aborted when this runs
+/// out.
 const SUBAGENT_STOP_GRACE: Duration = Duration::from_secs(5);
 
 /// How long the run end then waits for the tasks it aborted to be dropped —
@@ -207,6 +210,15 @@ impl Drop for SubagentLane {
 /// Depth 0 = top-level lead agent, depth 1 = its direct subagents, etc.
 const MAX_SUBAGENT_DEPTH: u32 = 3;
 
+/// The template a spawn with no `agent_id` runs (SA-1, subagent design §3.1
+/// A-1): the default subagent, as Claude Code's `general-purpose` is when
+/// `subagent_type` is left out. Absent, `null` or empty reads as this.
+pub const DEFAULT_SUBAGENT_TEMPLATE: &str = "general_agent";
+
+/// `spawn_subagent`'s `agent_id` parameter, on both spawn tools (A-1).
+const AGENT_ID_DESCRIPTION: &str =
+    "The agent template to spawn. Omit it for general_agent, the default.";
+
 // ── SpawnSubagentTool ────────────────────────────────────────────────
 
 /// Built-in tool that allows the Lead Agent to spawn a subagent.
@@ -223,8 +235,20 @@ pub struct SpawnSubagentTool {
     created_by: String,
     lead_template_id: String,
     daemon_config: Arc<ArcSwap<DaemonConfig>>,
-    /// Tracks how many subagents have been spawned (for observability).
+    /// How many subagents this tool has spawned (the run's report), and the
+    /// slots it holds against `max_subagents_per_run`: a spawn reserves its
+    /// slot here before it registers anything, and gives it back if the
+    /// spawn then fails (N-LEAD-6).
     spawn_count: AtomicUsize,
+    /// N-LEAD-6: the most subagents this run may spawn in all —
+    /// `[execution.lead_agent_defaults] max_subagents_per_run`, read once
+    /// when the run starts, the figure its prompt names.
+    max_subagents_per_run: usize,
+    /// N-LEAD-6: the subagents a resumed run's tracker already holds
+    /// (N-LEAD-4) — this run's, spawned before the daemon stopped, those its
+    /// session log still records — which count toward the bound beside
+    /// `spawn_count`.
+    restored_subagents: usize,
     /// The turn's workspace identity: `workspace_id` scopes memory,
     /// `request_workspace_root` alone places artifacts (R22).
     workspace: MemoryScopeContext,
@@ -270,6 +294,13 @@ pub struct SpawnSubagentTool {
     /// subagent's tool context — it names the scratch folder a run with no
     /// project works in. `None` for a run with no conversation.
     conversation_id: Option<String>,
+    /// C8, M-1: the model that answered the lead's last round, which a
+    /// subagent on `inherit` runs on. `None` outside a lead's run.
+    answering_model: Option<crate::runner::model_choice::AnsweringModel>,
+    /// C8, M-6e: the model the lead's own choice resolved to — a child's
+    /// parent while the slot is empty, and the model the spawn's reply says
+    /// the lead stays on.
+    lead_model: Option<String>,
 }
 
 impl SpawnSubagentTool {
@@ -306,6 +337,12 @@ impl SpawnSubagentTool {
         unattended: bool,
         conversation_id: Option<String>,
     ) -> Self {
+        let max_subagents_per_run = daemon_config
+            .load()
+            .execution
+            .lead_agent_defaults
+            .max_subagents_per_run;
+        let (queued, running, completed, failed) = tracker.status_counts();
         Self {
             router,
             tool_registry,
@@ -317,6 +354,8 @@ impl SpawnSubagentTool {
             lead_template_id,
             daemon_config,
             spawn_count: AtomicUsize::new(0),
+            max_subagents_per_run,
+            restored_subagents: queued + running + completed + failed,
             subagents_token: cancel_token
                 .as_ref()
                 .map_or_else(CancellationToken::new, CancellationToken::child_token),
@@ -333,11 +372,120 @@ impl SpawnSubagentTool {
             compose_engine,
             unattended,
             conversation_id,
+            answering_model: None,
+            lead_model: None,
         }
+    }
+
+    /// C8: the lead's answering-model slot and its own resolved model, which
+    /// a subagent's `inherit`, an alias and a per-call model resolve against
+    /// (M-1, M-4, M-7).
+    pub fn with_lead_models(
+        mut self,
+        answering_model: crate::runner::model_choice::AnsweringModel,
+        lead_model: Option<String>,
+    ) -> Self {
+        self.answering_model = Some(answering_model);
+        self.lead_model = lead_model;
+        self
+    }
+
+    /// The model a child's `inherit` and aliases resolve against now.
+    fn parent_model(&self) -> Option<String> {
+        crate::runner::model_choice::parent_of_child(
+            &self.router,
+            self.answering_model.as_ref(),
+            self.lead_model.as_deref(),
+        )
     }
 
     pub fn spawn_count(&self) -> usize {
         self.spawn_count.load(Ordering::SeqCst)
+    }
+
+    /// The most subagents this run may spawn in all (N-LEAD-6): what the
+    /// lead's prompt names, so the figure it is told is the one enforced.
+    pub fn max_subagents_per_run(&self) -> usize {
+        self.max_subagents_per_run
+    }
+
+    /// N-LEAD-6: take one of the run's slots, or refuse the spawn naming the
+    /// bound. One atomic step, so the count stays exact however spawns are
+    /// scheduled. Today a round's spawns cannot interleave: `spawn_subagent`
+    /// runs alone, and two `spawn_subagents_batch` calls of one group
+    /// (N-TOOL-3) run under one `join_all` on one task, with no await between
+    /// this reservation and the spawn. A spawn on another task, or an await
+    /// added to the path, would race for the last slot; this keeps it exact.
+    fn reserve_spawn(&self) -> Result<(), String> {
+        let room = self
+            .max_subagents_per_run
+            .saturating_sub(self.restored_subagents);
+        self.spawn_count
+            .try_update(Ordering::SeqCst, Ordering::SeqCst, |spawned| {
+                (spawned < room).then_some(spawned + 1)
+            })
+            .map(|_| ())
+            .map_err(|_| {
+                let bound = self.max_subagents_per_run;
+                format!(
+                    "Maximum subagents per run ({bound}) reached — this run has spawned \
+                     {bound}, so no more can be spawned. Collect their results with \
+                     wait_for_subagents, then complete what is left directly or report it \
+                     as not done."
+                )
+            })
+    }
+
+    /// SA-1 (subagent design §3.1 A-4): whether a spawn with no `agent_id`
+    /// can run the default, [`DEFAULT_SUBAGENT_TEMPLATE`]. It cannot when it
+    /// is this run's lead (a borrowed lead: G-1 tries `general_agent` last,
+    /// so only when no other template could lead), or when no template of
+    /// the id resolves — a file withholds it (L-4) or switches it off
+    /// (L-4a), or nothing holds it. Each is refused naming why, with the
+    /// agents this lead can name, sorted by id, so the lead can retry with
+    /// one; never a silent pick of another template.
+    fn check_default_spawnable(&self) -> Result<(), String> {
+        let registry = &self.shared_context.agent_registry;
+        let available = || {
+            let ids: Vec<String> = registry
+                .list_templates()
+                .into_iter()
+                .map(|t| t.frontmatter.id)
+                .filter(|id| *id != self.lead_template_id)
+                .collect();
+            if ids.is_empty() {
+                "none".to_string()
+            } else {
+                ids.join(", ")
+            }
+        };
+        if self.lead_template_id == DEFAULT_SUBAGENT_TEMPLATE {
+            return Err(format!(
+                "agent_id is required here: the default agent '{DEFAULT_SUBAGENT_TEMPLATE}' is \
+                 this run's lead. Available agents: {}.",
+                available()
+            ));
+        }
+        if registry.get_template(DEFAULT_SUBAGENT_TEMPLATE).is_some() {
+            return Ok(());
+        }
+        let why = match registry
+            .provenance(DEFAULT_SUBAGENT_TEMPLATE)
+            .map(|p| p.state)
+        {
+            Some(TemplateState::Withheld { path, reason }) => {
+                format!("withheld: {} {reason}", path.display())
+            }
+            Some(TemplateState::Disabled { path }) => {
+                format!("switched off by {}", path.display())
+            }
+            Some(TemplateState::Ready) | None => "not installed".to_string(),
+        };
+        Err(format!(
+            "No agent_id was given and the default, {DEFAULT_SUBAGENT_TEMPLATE}, is {why}. \
+             Available agents: {}.",
+            available()
+        ))
     }
 
     /// N-LEAD-1: stop every subagent this run left queued or running, once
@@ -385,18 +533,43 @@ async fn join_every_run(runs: &mut tokio::task::JoinSet<()>) {
     while runs.join_next().await.is_some() {}
 }
 
-#[async_trait]
 impl BuiltInTool for SpawnSubagentTool {
     async fn execute(&self, arguments: &serde_json::Value) -> Result<String, String> {
-        // 1. Parse arguments
-        let agent_id = arguments
-            .get("agent_id")
-            .and_then(|v| v.as_str())
-            .ok_or_else(|| "Missing required parameter: agent_id".to_string())?;
+        // 1. Parse arguments. An absent, `null` or empty `agent_id` is the
+        // default subagent (SA-1, A-1); every guard below runs on the id it
+        // resolved to, and the records name that id (A-3).
+        let (agent_id, defaulted) = match arguments.get("agent_id") {
+            None | Some(serde_json::Value::Null) => (DEFAULT_SUBAGENT_TEMPLATE, true),
+            Some(serde_json::Value::String(id)) if id.trim().is_empty() => {
+                (DEFAULT_SUBAGENT_TEMPLATE, true)
+            }
+            Some(serde_json::Value::String(id)) => (id.as_str(), false),
+            Some(_) => {
+                return Err(
+                    "agent_id must be a string naming an agent template, or left out for \
+                     general_agent"
+                        .to_string(),
+                );
+            }
+        };
         let objective = arguments
             .get("objective")
             .and_then(|v| v.as_str())
             .ok_or_else(|| "Missing required parameter: objective".to_string())?;
+        // C8, M-7: a per-call model — `inherit`, an alias or a model id — or
+        // none (absent, `null`, empty), the template's.
+        let per_call_model = match arguments.get("model") {
+            None | Some(serde_json::Value::Null) => None,
+            Some(serde_json::Value::String(model)) if model.trim().is_empty() => None,
+            Some(serde_json::Value::String(model)) => Some(model.clone()),
+            Some(_) => {
+                return Err(
+                    "model must be a string — inherit, fast, balanced, strong or a model id — \
+                     or left out for the template's model"
+                        .to_string(),
+                );
+            }
+        };
 
         tracing::info!(
             target_agent = agent_id,
@@ -410,6 +583,12 @@ impl BuiltInTool for SpawnSubagentTool {
             task_id = %self.task_id,
             "Lead agent spawning subagent"
         );
+
+        // A-4: a default that cannot be used is refused with the agents this
+        // lead can name — never a silent pick of another template.
+        if defaulted {
+            self.check_default_spawnable()?;
+        }
 
         // 2. Prevent recursion: direct self-spawning and depth limit
         if agent_id == self.lead_template_id {
@@ -427,13 +606,44 @@ impl BuiltInTool for SpawnSubagentTool {
             ));
         }
 
+        // C8: a per-call model is checked before anything is reserved or
+        // registered — refused, with what can be chosen, when it names
+        // nothing routable (M-7), and refused for a plugin-backed template,
+        // which runs out of process on its plugin's own model (M-7d).
+        let plugin_backed = matches!(
+            self.shared_context
+                .agent_registry
+                .get_template(agent_id)
+                .map(|t| t.source),
+            Some(AgentSource::Plugin { .. })
+        );
+        let per_call = match per_call_model {
+            None => None,
+            Some(_) if plugin_backed => {
+                return Err(format!(
+                    "'{agent_id}' runs out of process on its plugin's own model; leave model out."
+                ));
+            }
+            Some(value) => Some(crate::runner::model_choice::per_call(
+                &self.router,
+                &value,
+                self.parent_model().as_deref(),
+            )?),
+        };
+
+        // N-LEAD-6: the run's lifetime bound, before anything is registered —
+        // a refused spawn leaves no instance, lane or task behind.
+        self.reserve_spawn()?;
+
         // 3. Spawn a new instance from the agent template
         //    (agent_id is really a template_id — the LLM picks from the template catalog)
-        let agent = self
+        let mut agent = self
             .shared_context
             .agent_registry
             .spawn_instance(agent_id, self.task_id.clone())
             .map_err(|e| {
+                // Nothing was spawned: the slot goes back (N-LEAD-6).
+                self.spawn_count.fetch_sub(1, Ordering::SeqCst);
                 // A template a **disabled plugin** used to contribute is
                 // attributed to that plugin rather than reading as an unknown
                 // name (extension design §10 case 5(a)).
@@ -450,6 +660,81 @@ impl BuiltInTool for SpawnSubagentTool {
                     None => format!("Cannot spawn agent '{}': {}", agent_id, e),
                 }
             })?;
+        // C8 (M-6e): the child's model resolves here, before its loop config,
+        // its window and its records read it — the call's choice first, else
+        // its template's word (`inherit` for none, M-1b) against the model
+        // that answered the lead (M-1). An alias or `inherit` names a
+        // routable model, so the template's `fallback_models` are no chain
+        // for it; an explicit id keeps them, and walks the ladder at the call
+        // if it is not routable, as it always has (M-6d). Never written back:
+        // the template and the registry's instance keep the word (M-7b).
+        let (choice, chosen_per_call) = match &per_call {
+            Some((choice, _)) => (choice.clone(), true),
+            None => (
+                crate::runner::model_choice::template_choice(agent.llm_config.model.as_deref()),
+                false,
+            ),
+        };
+        let child_model = match &per_call {
+            Some((_, model)) => Some(model.clone()),
+            None => crate::runner::model_choice::resolve(
+                &self.router,
+                &choice,
+                self.parent_model().as_deref(),
+            ),
+        };
+        if !plugin_backed {
+            agent.llm_config.model = child_model.clone();
+            if chosen_per_call || crate::runner::model_choice::is_word(&choice) {
+                agent.llm_config.fallback_models.clear();
+            }
+        }
+        // C8-2 (c), the advisor's pick the owner took on 2026-11-17: a model
+        // the agent's own model constraints deny is still accepted — the
+        // refusal is the owner's and not taken — and its loop config drops
+        // it to the router default, by this same check
+        // (`LoopConfig::from_defaults`). The reply and the lane's
+        // `subagent_open` name the model the child will run on, then, and
+        // that it replaced the one chosen, never the denied one as used.
+        // C8-2-REPLY (the advisor's pick (b) on Rev 127's item 12, taken
+        // 2026-11-17): where the constraints deny the default the loop
+        // reaches too (it is the denied model, or outside an
+        // `allowed_models` list) the loop refuses the child's first answer
+        // ("Model access denied"), and where nothing is routable its first
+        // call fails; the reply and the record say so, and no refusal is
+        // added here.
+        let denies = |model: &str| {
+            CapabilityManager::check_model_access(&agent.id, model, &agent.constraints).is_err()
+        };
+        let denied = match (&child_model, plugin_backed) {
+            (Some(model), false) if denies(model) => Some(DeniedModel {
+                chosen: model.clone(),
+                reached: self.router.would_answer(
+                    &self.router.default_model(),
+                    &agent.llm_config.fallback_models,
+                ),
+            }),
+            _ => None,
+        };
+        let refused = denied
+            .as_ref()
+            .is_some_and(|d| d.reached.as_deref().is_none_or(denies));
+        // The model the child is sent to, and the denied one it took the
+        // place of where the two differ (`model_replaced`).
+        let (replaced, used_model) = match &denied {
+            Some(d) => (
+                Some(d.chosen.clone()).filter(|chosen| d.reached.as_ref() != Some(chosen)),
+                d.reached.clone(),
+            ),
+            None => (None, child_model.clone()),
+        };
+        // C8-2-REPLY (Rev 127's item 15, (b)): a denied child's window is
+        // the model's it is sent to, never the denied one's.
+        let window_model = if denied.is_some() {
+            used_model.clone()
+        } else {
+            agent.llm_config.model.clone()
+        };
         let instance_id = agent.id.clone();
         // The id the lead knows this subagent by — returned below, and named
         // on the lane's open and close records so a resumed run can rebuild
@@ -500,33 +785,57 @@ impl BuiltInTool for SpawnSubagentTool {
         // is a pure filter over one globally ordered log (P-20).
         let session_log = self.session_log();
         if let Some(ref log) = session_log {
+            let mut open = serde_json::json!({
+                "span_id": node_id,
+                "template": agent_id,
+                // A-3: whether the lead left `agent_id` out, so the
+                // record tells "chose it" from "left it to the
+                // default".
+                "agent_id_defaulted": defaulted,
+                "label": span_label,
+                "role": "subagent",
+                "run_id": run_id,
+                "objective": objective.chars().take(500).collect::<String>(),
+                // C8 (M-10): what chose the child's model — its
+                // template's word or the lead's call — and the id it
+                // resolved to before the call; the model that
+                // answered is the lane's rounds'.
+                "model_choice": {
+                    "choice": crate::runner::model_choice::choice_word(&choice),
+                    "per_call": chosen_per_call,
+                },
+                // C8-2 (c): the model the child will run on — the
+                // router default where its constraints deny the one
+                // chosen, which `model_replaced` then names (null where
+                // nothing is routable).
+                "model": if plugin_backed { None } else { used_model.clone() },
+                // P-17: a plugin-backed template says so, so a reader
+                // never has to guess which extension ran the lane.
+                "plugin_id": self
+                    .shared_context
+                    .agent_registry
+                    .get_template(agent_id)
+                    .and_then(|t| match t.source {
+                        AgentSource::Plugin { plugin_id, .. } => Some(plugin_id),
+                        AgentSource::Internal => None,
+                    }),
+            });
+            if let Some(ref denied) = replaced {
+                open["model_replaced"] = serde_json::json!(denied);
+            }
+            // C8-2-REPLY: the constraints deny the model it is sent to as
+            // well (or none is routable): its first round is refused.
+            if refused {
+                open["model_refused"] = serde_json::json!(true);
+            }
             log.emit(
                 crate::session_log::Record::new(crate::session_log::RecordType::SubagentOpen)
                     .task(Some(&self.task_id))
                     .span(Some(&node_id))
                     .agent(Some(&instance_id))
-                    .with_data(serde_json::json!({
-                        "span_id": node_id,
-                        "template": agent_id,
-                        "label": span_label,
-                        "role": "subagent",
-                        "run_id": run_id,
-                        "objective": objective.chars().take(500).collect::<String>(),
-                        // P-17: a plugin-backed template says so, so a reader
-                        // never has to guess which extension ran the lane.
-                        "plugin_id": self
-                            .shared_context
-                            .agent_registry
-                            .get_template(agent_id)
-                            .and_then(|t| match t.source {
-                                AgentSource::Plugin { plugin_id, .. } => Some(plugin_id),
-                                AgentSource::Internal => None,
-                            }),
-                    })),
+                    .with_data(open),
             );
         }
-
-        self.spawn_count.fetch_add(1, Ordering::SeqCst);
 
         // 5. Build SandboxManager for subagent
         let subagent_tool_ctx = ToolContext {
@@ -567,10 +876,7 @@ impl BuiltInTool for SpawnSubagentTool {
         // 7. Build LoopConfig from daemon defaults + agent constraints
         let mut loop_config =
             LoopConfig::from_agent(&self.daemon_config.load().execution.agent_defaults, &agent)
-                .with_context_window(
-                    self.router.model_registry(),
-                    agent.llm_config.model.as_deref(),
-                );
+                .with_context_window(self.router.model_registry(), window_model.as_deref());
         loop_config.event_bus = Some(self.bus.clone());
         // Design 11, CQ-3: compaction's writer runs on `summary_model`.
         loop_config.writer = crate::orchestrator::working_state::WriterConfig::new(
@@ -600,20 +906,36 @@ impl BuiltInTool for SpawnSubagentTool {
         // local model's window, not against 200 000 it will never get. A
         // registry with no window for it — and a window of 0 — keeps the
         // default below.
-        let model_window = crate::runner::routed_context_window(
-            self.router.as_ref(),
-            agent.llm_config.model.as_deref(),
-        )
-        .unwrap_or(200_000);
+        let model_window =
+            crate::runner::routed_context_window(self.router.as_ref(), window_model.as_deref())
+                .unwrap_or(200_000);
 
         // Distill parent context for this sub-agent
-        let context_package = self.context_manager.distill(
+        let mut context_package = self.context_manager.distill(
             &self.parent_bundle,
             &agent.constraints,
             model_window,
             objective,
             None, // no predecessor handoff for lead agent spawns
         );
+        // SA-2b: the objective reaches the subagent once, as its user turn
+        // (`current_user_turn` below). `distill` always adds it as the task
+        // description, which Layer 3 would route to a second system message —
+        // so it leaves the package here, as `build_subagent_minimal`'s doc
+        // asks; the other sections were fitted beside it all the same, and
+        // a plugin-backed template is handed the objective by its own path.
+        let task_description_tokens: usize = context_package
+            .sections
+            .iter()
+            .filter(|s| s.kind == PackageSectionKind::TaskDescription)
+            .map(|s| s.token_estimate)
+            .sum();
+        context_package
+            .sections
+            .retain(|s| s.kind != PackageSectionKind::TaskDescription);
+        context_package.total_tokens = context_package
+            .total_tokens
+            .saturating_sub(task_description_tokens);
         let bundle = context_package.to_bundle();
         // Design §5: a distilled memory section reaches a subagent the way
         // it reaches every other loop — outside Layer 3, which leaves
@@ -758,6 +1080,11 @@ impl BuiltInTool for SpawnSubagentTool {
             let insert_at = messages.len().saturating_sub(1);
             messages.insert(insert_at, ChatMessage::user(&note));
         }
+        // SA-2b: every compaction keeps what the subagent was handed — the
+        // system prompt, any memory block or working-folder line, and its
+        // objective last — where the default head (the system prompt and
+        // one message) would leave the objective among the rows it folds.
+        loop_config.kept_head = messages.len();
 
         // **S3 — a subagent's rounds carry a budget too.** The lead's loop is
         // handed a `ContextBudgetManager` and the main loop's is; a subagent's
@@ -776,7 +1103,13 @@ impl BuiltInTool for SpawnSubagentTool {
             + memory_turn.as_ref().map_or(0, |m| m.token_estimate());
         let budget_tools_tokens = crate::runner::estimate_tools_tokens(&tools);
 
-        let mut sandbox_policy = SandboxPolicy::from_constraints(&instance_id, &agent.constraints);
+        // N-TOOL-1b: the per-tool bound is the daemon's, not the template's
+        // `timeout_seconds`.
+        let mut sandbox_policy = SandboxPolicy::from_constraints(
+            &instance_id,
+            &agent.constraints,
+            &self.daemon_config.load().execution.agent_defaults,
+        );
         // The template grants capabilities; the sandbox is asked about tool
         // names. `tools` is what those capabilities resolved to (step 6), so
         // the allow list admits exactly that surface — otherwise a researcher
@@ -1149,12 +1482,100 @@ impl BuiltInTool for SpawnSubagentTool {
         } else {
             "starting now".to_string()
         };
+        let default_note = if defaulted {
+            " (the default: no agent_id given)"
+        } else {
+            ""
+        };
+        // M-10: the model the child runs on, what chose it, and that the
+        // lead's own stays — without it a lead reads a child's model as its
+        // own switch.
+        let model_note = if plugin_backed {
+            String::new()
+        } else {
+            let stay = self
+                .answering_model
+                .as_ref()
+                .and_then(crate::runner::model_choice::read_answering)
+                .or_else(|| self.lead_model.clone())
+                .map(|lead| format!("; you stay on {lead}"))
+                .unwrap_or_default();
+            let word = crate::runner::model_choice::choice_word(&choice);
+            // What chose a model the constraints deny.
+            let source = || {
+                if chosen_per_call {
+                    "as you asked".to_string()
+                } else {
+                    match &choice {
+                        ModelChoice::Inherit => "your model".to_string(),
+                        ModelChoice::Alias(_) => format!("its template's {word}"),
+                        ModelChoice::Id(_) => "its template's model".to_string(),
+                    }
+                }
+            };
+            match (&denied, &used_model) {
+                // C8-2-REPLY (b): no model the constraints allow is
+                // reachable; the child is spawned all the same, and its
+                // loop refuses its first answer (or its first call finds
+                // nothing routable). No refusal is added here.
+                (Some(d), _) if refused => {
+                    let chosen = &d.chosen;
+                    let source = source();
+                    let deny = "is a model this agent's model constraints deny";
+                    match &d.reached {
+                        Some(reached) if reached == chosen => format!(
+                            " to be refused at its first round ({chosen}, {source} and the \
+                             router default, {deny}{stay})"
+                        ),
+                        Some(reached) => format!(
+                            " to be refused at its first round ({chosen}, {source}, {deny}, \
+                             and so is {reached}, the router default it would run on in its \
+                             place{stay})"
+                        ),
+                        None => format!(
+                            " to fail at its first round ({chosen}, {source}, {deny}, and no \
+                             model is routable in its place{stay})"
+                        ),
+                    }
+                }
+                // C8-2 (c): what chose the denied model, and that the
+                // child runs on the router default in its place.
+                (Some(d), Some(model)) => format!(
+                    " on {model} (it replaced {}, {}, which this agent's model constraints \
+                     deny{stay})",
+                    d.chosen,
+                    source()
+                ),
+                (None, Some(model)) => {
+                    let why = if chosen_per_call {
+                        format!("as you asked: {word}{stay}")
+                    } else {
+                        match &choice {
+                            ModelChoice::Inherit => "your model".to_string(),
+                            ModelChoice::Alias(_) => format!("its template's {word}{stay}"),
+                            ModelChoice::Id(_) => format!("its template's model{stay}"),
+                        }
+                    };
+                    format!(" on {model} ({why})")
+                }
+                _ => String::new(),
+            }
+        };
         Ok(format!(
-            "Subagent '{agent_id}' spawned (run_id: '{run_id}'), {start}. Spawn more subagents \
-             if needed, then call `wait_for_subagents` to collect all results, or \
-             `check_subagent_status` with this run_id to check individually."
+            "Subagent '{agent_id}'{default_note} spawned (run_id: '{run_id}'){model_note}, \
+             {start}. Spawn more subagents if needed, then call `wait_for_subagents` to \
+             collect all results, or `check_subagent_status` with this run_id to check \
+             individually."
         ))
     }
+}
+
+/// A model chosen for a child that its agent's model constraints deny
+/// (C8-2): the child's loop is sent to the router default in its place,
+/// `reached` as the loop reaches it (`None`: nothing is routable).
+struct DeniedModel {
+    chosen: String,
+    reached: Option<String>,
 }
 
 // ── SpawnSubagentsBatchTool ──────────────────────────────────────────
@@ -1171,7 +1592,6 @@ impl SpawnSubagentsBatchTool {
     }
 }
 
-#[async_trait]
 impl BuiltInTool for SpawnSubagentsBatchTool {
     async fn execute(&self, arguments: &serde_json::Value) -> Result<String, String> {
         let subagents = arguments
@@ -1194,22 +1614,23 @@ impl BuiltInTool for SpawnSubagentsBatchTool {
         let mut results = Vec::with_capacity(subagents.len());
         let mut success_count = 0usize;
 
+        // SA-1 (subagent design §3.1 A-2): each item goes to
+        // `spawn_subagent` whole, which reads it as it reads its own
+        // arguments, and an item that cannot spawn — a missing objective
+        // among them — is that item's FAILED line while the batch goes on, so
+        // the run ids of the items around it still reach the lead. The
+        // line names the agent_id as sent: a non-string one, which
+        // `spawn_subagent` refuses, by its JSON text, never as the default.
         for (i, entry) in subagents.iter().enumerate() {
-            let agent_id = entry
-                .get("agent_id")
-                .and_then(|v| v.as_str())
-                .ok_or_else(|| format!("subagents[{}]: missing agent_id", i))?;
-            let objective = entry
-                .get("objective")
-                .and_then(|v| v.as_str())
-                .ok_or_else(|| format!("subagents[{}]: missing objective", i))?;
+            let agent_id = match entry.get("agent_id") {
+                Some(serde_json::Value::String(id)) if !id.trim().is_empty() => id.clone(),
+                None | Some(serde_json::Value::Null | serde_json::Value::String(_)) => {
+                    DEFAULT_SUBAGENT_TEMPLATE.to_string()
+                }
+                Some(other) => other.to_string(),
+            };
 
-            let single_args = serde_json::json!({
-                "agent_id": agent_id,
-                "objective": objective,
-            });
-
-            match self.inner.execute(&single_args).await {
+            match self.inner.execute(entry).await {
                 Ok(msg) => {
                     success_count += 1;
                     results.push(format!("[{}] OK: {}", i + 1, msg));
@@ -1230,8 +1651,36 @@ impl BuiltInTool for SpawnSubagentsBatchTool {
     }
 }
 
-/// Tool definition for `spawn_subagents_batch`.
+/// The `objective` parameter's description on both spawn tools (SA-2): an
+/// objective is the subagent's brief — the user turn it answers — so the
+/// parameter says what a brief holds. It names no length: since SA-2b
+/// nothing cuts or drops a brief, but one past the subagent's window, a
+/// figure the lead is not told, fails at the provider.
+const OBJECTIVE_DESCRIPTION: &str = "A self-contained brief for the subagent: the goal (what to \
+     achieve, and why); the inputs it needs (facts, file paths, workspace keys, earlier \
+     results); the constraints (scope, limits, what not to do); and what to return and where \
+     (what its answer must hold, and any file or workspace key it is to write). The subagent \
+     is given neither the user's request nor this conversation, only this brief.";
+
+/// Tool definition for `spawn_subagents_batch`, with the `model`
+/// parameter's description of no install ([`ModelMenu::default`]); a lead's
+/// run builds it with its own menu
+/// ([`spawn_subagents_batch_tool_definition_with_models`]).
+///
+/// [`ModelMenu::default`]: crate::runner::model_choice::ModelMenu
 pub fn spawn_subagents_batch_tool_definition(templates: &[AgentTemplate]) -> ToolDefinition {
+    spawn_subagents_batch_tool_definition_with_models(
+        templates,
+        &crate::runner::model_choice::ModelMenu::default(),
+    )
+}
+
+/// Tool definition for `spawn_subagents_batch`, its items' `model`
+/// parameter describing `menu` (M-8).
+pub fn spawn_subagents_batch_tool_definition_with_models(
+    templates: &[AgentTemplate],
+    menu: &crate::runner::model_choice::ModelMenu,
+) -> ToolDefinition {
     let agent_descriptions: Vec<String> = templates
         .iter()
         .map(|t| {
@@ -1254,10 +1703,13 @@ pub fn spawn_subagents_batch_tool_definition(templates: &[AgentTemplate]) -> Too
         name: "spawn_subagents_batch".to_string(),
         description: format!(
             "Spawn multiple subagents in a single call (1-8). More efficient than calling \
-             spawn_subagent repeatedly. Each entry specifies an agent_id and objective. \
-             Every entry returns its run_id at once; up to this run's concurrency bound they \
-             run in parallel, and the rest are queued and start as slots free. Use \
-             wait_for_subagents to collect results.\n\nAvailable agents:\n{}",
+             spawn_subagent repeatedly. Each entry gives an objective, written as a \
+             self-contained brief: the goal, the inputs it needs, the constraints, and what to \
+             return and where; its agent_id may be left out for general_agent, the default. An \
+             entry that cannot be spawned fails alone. Every entry returns its run_id at once; \
+             up to this run's concurrency bound they run in parallel, and the rest are queued \
+             and start as slots free. Use wait_for_subagents to collect results.\n\n\
+             Available agents:\n{}",
             agents_list
         ),
         parameters: serde_json::json!({
@@ -1270,14 +1722,18 @@ pub fn spawn_subagents_batch_tool_definition(templates: &[AgentTemplate]) -> Too
                         "properties": {
                             "agent_id": {
                                 "type": "string",
-                                "description": "The ID of the agent template to spawn"
+                                "description": AGENT_ID_DESCRIPTION
                             },
                             "objective": {
                                 "type": "string",
-                                "description": "A clear, specific objective for this subagent"
+                                "description": OBJECTIVE_DESCRIPTION
+                            },
+                            "model": {
+                                "type": "string",
+                                "description": menu.description()
                             }
                         },
-                        "required": ["agent_id", "objective"]
+                        "required": ["objective"]
                     },
                     "minItems": 1,
                     "maxItems": 8,
@@ -1298,7 +1754,6 @@ pub struct CheckSubagentStatusTool {
     pub(super) tracker: Arc<SubagentTracker>,
 }
 
-#[async_trait]
 impl BuiltInTool for CheckSubagentStatusTool {
     async fn execute(&self, arguments: &serde_json::Value) -> Result<String, String> {
         let run_id = arguments
@@ -1410,10 +1865,9 @@ pub struct WaitForSubagentsTool {
     pub(super) steering: Option<Arc<SteeringInbox>>,
 }
 
-#[async_trait]
 impl BuiltInTool for WaitForSubagentsTool {
     async fn execute(&self, _arguments: &serde_json::Value) -> Result<String, String> {
-        let max_wait = Duration::from_secs(600); // 10 minutes safety cap
+        let max_wait = Duration::from_mins(10); // 10 minutes safety cap
         let deadline = tokio::time::Instant::now() + max_wait;
 
         loop {
@@ -1440,8 +1894,7 @@ impl BuiltInTool for WaitForSubagentsTool {
             // tracker wakes with `notify_waiters`, which keeps no permit, so
             // a completion landing between the check and a later
             // registration would be lost and the wait would run to the cap.
-            let subagent_change = self.tracker.notify.notified();
-            tokio::pin!(subagent_change);
+            let mut subagent_change = std::pin::pin!(self.tracker.notify.notified());
             subagent_change.as_mut().enable();
             if self.tracker.all_done() {
                 break;
@@ -1547,7 +2000,6 @@ impl PostUpdateTool {
     }
 }
 
-#[async_trait]
 impl BuiltInTool for PostUpdateTool {
     async fn execute(&self, arguments: &serde_json::Value) -> Result<String, String> {
         let message = arguments
@@ -1734,7 +2186,6 @@ impl QueueFollowupTool {
     }
 }
 
-#[async_trait]
 impl BuiltInTool for QueueFollowupTool {
     async fn execute(&self, arguments: &serde_json::Value) -> Result<String, String> {
         self.queue(arguments, self.constructed_principal(), None)
@@ -1796,7 +2247,7 @@ pub fn register_workflow_tools(
     registry
         .register(RegisteredTool {
             definition: post_update_tool_definition(),
-            backend: ToolBackend::BuiltIn(post_update_tool),
+            backend: ToolBackend::built_in_arc(post_update_tool),
             provides_capabilities: vec!["orchestration".to_string()],
             exempt_from_timeout: false,
             annotations: None,
@@ -1808,7 +2259,7 @@ pub fn register_workflow_tools(
     registry
         .register(RegisteredTool {
             definition: queue_followup_tool_definition(),
-            backend: ToolBackend::BuiltIn(queue_followup_tool),
+            backend: ToolBackend::built_in_arc(queue_followup_tool),
             provides_capabilities: vec!["orchestration".to_string()],
             exempt_from_timeout: false,
             annotations: None,
@@ -1827,6 +2278,20 @@ pub fn register_workflow_tools(
 /// and `spawn_instance()` creates a fresh instance for each invocation.
 pub fn spawn_subagent_tool_definition_from_templates(
     templates: &[AgentTemplate],
+) -> ToolDefinition {
+    spawn_subagent_tool_definition_with_models(
+        templates,
+        &crate::runner::model_choice::ModelMenu::default(),
+    )
+}
+
+/// [`spawn_subagent_tool_definition_from_templates`] with the `model`
+/// parameter describing `menu` (M-8): what each alias is here, the routable
+/// ids and the lead's own model, read when the lead's run starts. The
+/// choices are in the parameter and nowhere else (§7 O-8 (a)).
+pub fn spawn_subagent_tool_definition_with_models(
+    templates: &[AgentTemplate],
+    menu: &crate::runner::model_choice::ModelMenu,
 ) -> ToolDefinition {
     let agent_descriptions: Vec<String> = templates
         .iter()
@@ -1849,10 +2314,13 @@ pub fn spawn_subagent_tool_definition_from_templates(
     ToolDefinition {
         name: "spawn_subagent".to_string(),
         description: format!(
-            "Spawn a subagent to work on a specific objective. Spawning is always immediate — \
-             the system automatically queues execution if LLM capacity is limited. Spawn all \
-             independent objectives in a single round, then use wait_for_subagents to collect \
-             results. Multiple instances of the same agent can run concurrently.\n\n\
+            "Spawn a subagent to work on a specific objective, written as a self-contained \
+             brief: the goal, the inputs it needs, the constraints, and what to return and \
+             where. Spawning is always immediate — it returns a run_id at once, and a subagent \
+             spawned past this run's concurrency bound is queued and starts when a slot frees, \
+             as the reply says. Spawn all independent objectives in a single round, then use \
+             wait_for_subagents to collect results. Multiple instances of the same agent can \
+             run concurrently.\n\n\
              Available agents:\n{}",
             agents_list
         ),
@@ -1861,14 +2329,18 @@ pub fn spawn_subagent_tool_definition_from_templates(
             "properties": {
                 "agent_id": {
                     "type": "string",
-                    "description": "The ID of the agent template to spawn (must be from the available agents list)"
+                    "description": AGENT_ID_DESCRIPTION
                 },
                 "objective": {
                     "type": "string",
-                    "description": "A clear, specific objective for the subagent to accomplish"
+                    "description": OBJECTIVE_DESCRIPTION
+                },
+                "model": {
+                    "type": "string",
+                    "description": menu.description()
                 }
             },
-            "required": ["agent_id", "objective"]
+            "required": ["objective"]
         }),
         strict: None,
         input_examples: None,
@@ -1896,7 +2368,7 @@ pub fn register_coordination_tools(
     // These are known-good builtin tool definitions — unwrap is safe.
     registry.register(RegisteredTool {
         definition: spawn_def,
-        backend: ToolBackend::BuiltIn(spawn_tool),
+        backend: ToolBackend::built_in_arc(spawn_tool),
         provides_capabilities: vec!["orchestration".to_string()],
         exempt_from_timeout: false,
         annotations: None,
@@ -1907,7 +2379,7 @@ pub fn register_coordination_tools(
     if let (Some(batch), Some(def)) = (batch_spawn_tool, batch_def) {
         registry.register(RegisteredTool {
             definition: def,
-            backend: ToolBackend::BuiltIn(batch),
+            backend: ToolBackend::built_in_arc(batch),
             provides_capabilities: vec!["orchestration".to_string()],
             exempt_from_timeout: false,
             annotations: None,
@@ -1918,7 +2390,7 @@ pub fn register_coordination_tools(
     }
     registry.register(RegisteredTool {
         definition: check_def,
-        backend: ToolBackend::BuiltIn(check_status_tool),
+        backend: ToolBackend::built_in_arc(check_status_tool),
         provides_capabilities: vec!["orchestration".to_string()],
         exempt_from_timeout: true,
         annotations: None,
@@ -1928,7 +2400,7 @@ pub fn register_coordination_tools(
     }).unwrap();
     registry.register(RegisteredTool {
         definition: wait_def,
-        backend: ToolBackend::BuiltIn(wait_tool),
+        backend: ToolBackend::built_in_arc(wait_tool),
         provides_capabilities: vec!["orchestration".to_string()],
         exempt_from_timeout: true,
         annotations: None,

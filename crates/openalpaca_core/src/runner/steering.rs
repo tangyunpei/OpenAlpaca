@@ -387,8 +387,7 @@ impl SteeringInbox {
     /// still wakes the caller (no lost wakeup). Spurious returns are
     /// possible — callers loop and re-check `is_empty()`.
     pub async fn notified(&self) {
-        let fut = self.notify.notified();
-        tokio::pin!(fut);
+        let mut fut = std::pin::pin!(self.notify.notified());
         // Register this waiter so a subsequent `notify_waiters` wakes it.
         fut.as_mut().enable();
         if !self.is_empty() || self.is_closed() {

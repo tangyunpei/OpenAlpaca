@@ -18,14 +18,12 @@ pub(crate) use outcome::persist_completion_report;
 use crate::bus::EventBus;
 use crate::context::SharedContext;
 use crate::daemon_config::DaemonConfig;
-use crate::events::SystemEvent;
 use crate::lane::LaneManager;
 use crate::middleware::user::UserDocument;
 use crate::orchestrator::ConnectorStatusProvider;
 use crate::prompt_ctx::ContextManager;
 use crate::security::gate::SecurityGate;
 use arc_swap::ArcSwap;
-use chrono::Utc;
 use openalpaca_llm::LlmRouter;
 use openalpaca_storage::Database;
 use std::sync::Arc;
@@ -242,18 +240,6 @@ impl TaskDispatcher {
             task_id = %task_id,
             "DispatchDecision (tool path)"
         );
-
-        self.bus.publish(SystemEvent::DispatchDecision {
-            request_id: request_id.to_string(),
-            task_id: Some(task_id.to_string()),
-            mode: mode.clone(),
-            reason: reason.clone(),
-            agent_count: 0,
-            dag_node_count: None,
-            predictability_score: None,
-            error_message: None,
-            timestamp: Utc::now(),
-        });
 
         if let Some(ref db) = self.db {
             let repo = DispatchDecisionRepository::new(db);

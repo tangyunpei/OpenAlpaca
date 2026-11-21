@@ -2148,6 +2148,40 @@ describe("ChatView — a confirmation whose tool reported first (G6)", () => {
   });
 
   /**
+   * TIMEOUT-ONE-CLOCK: a call the sandbox's clock cut is a failed tool run
+   * with the reason `timeout`, so the approved row settles, saying so —
+   * where a cut used to leave it "waiting for the tool to run…" for good.
+   */
+  it("settles a card whose tool the sandbox cut, saying it timed out", async () => {
+    renderChat();
+    const source = await sendMessage("write the notes");
+    await raiseMainLoopCard(source);
+
+    fireEvent.click(screen.getByRole("button", { name: /Approve/ }));
+    expect(
+      await screen.findByText(/artifact_write approved · waiting/),
+    ).toBeInTheDocument();
+
+    await act(async () => {
+      emitServerEvent({
+        type: "tool_executed",
+        agent_id: "orchestrator",
+        tool_name: "artifact_write",
+        success: false,
+        duration_ms: 120000,
+        task_id: null,
+        reason: "timeout",
+      });
+    });
+
+    expect(
+      await screen.findByText(
+        "artifact_write approved · timed out after 2m 00s, the agent continued without it.",
+      ),
+    ).toBeInTheDocument();
+  });
+
+  /**
    * F5 — chat runs alongside workflows, so a background subagent's own call of
    * the same tool arrives on the same socket. It is not this row's outcome,
    * and taking it was permanent: the real frame, 40 s later, found no row
@@ -4911,7 +4945,7 @@ describe("ChatView — a written file's Reveal in Finder (Round G, G4)", () => {
     vi.unstubAllGlobals();
   });
 
-  it("asks the shell for the path the artifact_written frame carried", async () => {
+  it("asks the daemon to reveal the file id the artifact_written frame carried", async () => {
     vi.stubGlobal("isTauri", true);
     const path =
       "/Users/dev/.openalpaca/artifacts/loose/2026-10-02/01-pasta-night.md";
@@ -4932,8 +4966,14 @@ describe("ChatView — a written file's Reveal in Finder (Round G, G4)", () => {
     fireEvent.click(await screen.findByRole("button", { name: revealLabel() }));
 
     await waitFor(() =>
-      expect(invoke).toHaveBeenCalledWith("reveal_path", { path }),
+      expect(
+        requests.some(
+          (r) =>
+            r.method === "POST" && r.url.endsWith("/v1/files/art-9/reveal"),
+        ),
+      ).toBe(true),
     );
+    expect(invoke).not.toHaveBeenCalledWith("reveal_path", expect.anything());
   });
 });
 

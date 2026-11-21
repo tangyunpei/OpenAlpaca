@@ -19,6 +19,9 @@ describe("connection status mapping (§3.6)", () => {
     expect(connectionTone("connecting", false)).toBe("pending");
     expect(connectionTone("disconnected", false)).toBe("down");
     expect(connectionTone("error", false)).toBe("down");
+    // Q04: a daemon still starting is a wait; one this app cannot use, not.
+    expect(connectionTone("starting", false)).toBe("pending");
+    expect(connectionTone("mismatch", false)).toBe("down");
   });
 
   it("labels every socket state", () => {
@@ -27,6 +30,8 @@ describe("connection status mapping (§3.6)", () => {
     expect(connectionLabel("idle")).toBe("starting");
     expect(connectionLabel("disconnected")).toBe("disconnected");
     expect(connectionLabel("error")).toBe("connection error");
+    expect(connectionLabel("starting")).toBe("daemon is starting");
+    expect(connectionLabel("mismatch")).toBe("version mismatch");
   });
 
   /**

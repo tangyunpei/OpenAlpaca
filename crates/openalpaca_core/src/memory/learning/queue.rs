@@ -613,20 +613,6 @@ pub(super) fn lane_owner(lane_key: &str) -> &str {
     lane_key.rsplit_once(':').map_or(lane_key, |(user, _)| user)
 }
 
-/// Whether a base URL names this machine: `localhost`, `127.0.0.0/8` or
-/// `::1` (ruling LR7's second clause).
-fn is_loopback_url(base_url: &str) -> bool {
-    let Ok(url) = url::Url::parse(base_url) else {
-        return false;
-    };
-    match url.host() {
-        Some(url::Host::Domain(d)) => d.eq_ignore_ascii_case("localhost"),
-        Some(url::Host::Ipv4(ip)) => ip.is_loopback(),
-        Some(url::Host::Ipv6(ip)) => ip.is_loopback(),
-        None => false,
-    }
-}
-
 /// How the reason of an answer cut at its output ceiling begins — what the
 /// retry reads back from the cursor (owner decision LQ20 (e)).
 const CUT_REASON: &str = "cut at max_tokens";
@@ -1278,9 +1264,12 @@ impl LearningQueue {
         report
     }
 
-    /// Whether the model a flush calls runs on this machine (ruling LR7): a
-    /// provider that needs no key, or one whose base URL is loopback — a
-    /// llama.cpp or LM Studio server behind the `openai` provider.
+    /// Whether the model a flush calls runs on a machine of the person's
+    /// own (ruling LR7): a provider that needs no key, or one whose base URL
+    /// is local — a llama.cpp or LM Studio server behind the `openai`
+    /// provider, on loopback or, since item 17's widening, the home network.
+    /// The test is `openalpaca_llm::is_local_url`, the one the cost
+    /// tracker's exemption reads too.
     fn is_local_model(&self, model: &str) -> bool {
         let router = &self.deps.router;
         let Some(provider) = router.model_registry().resolve_provider(model) else {
@@ -1289,12 +1278,7 @@ impl LearningQueue {
         if router.provider_requires_key(&provider) == Some(false) {
             return true;
         }
-        router
-            .runtime_config()
-            .provider_defaults
-            .get(&provider.to_string())
-            .and_then(|d| d.base_url.as_deref())
-            .is_some_and(is_loopback_url)
+        router.runtime_config().is_on_local_server(&provider)
     }
 
     async fn flush_chunks(&self, session_id: &str, policy: FlushPolicy) -> FlushReport {
@@ -2831,30 +2815,5 @@ impl TurnGuard {
 impl Drop for TurnGuard {
     fn drop(&mut self) {
         self.queue.turn_finished(self.request_id);
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::is_loopback_url;
-
-    #[test]
-    fn loopback_urls_are_local() {
-        for url in [
-            "http://localhost:1234/v1",
-            "http://LOCALHOST/v1",
-            "http://127.0.0.1:8080/v1",
-            "http://127.1.2.3/v1",
-            "http://[::1]:11434/v1",
-        ] {
-            assert!(is_loopback_url(url), "{url}");
-        }
-        for url in [
-            "https://api.openai.com/v1",
-            "http://10.0.0.5/v1",
-            "not a url",
-        ] {
-            assert!(!is_loopback_url(url), "{url}");
-        }
     }
 }

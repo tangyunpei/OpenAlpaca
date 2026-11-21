@@ -3,9 +3,7 @@
 
 use super::attachment_adapt::{self, AnsweringModel, Fate};
 use super::{ConversationContext, Orchestrator};
-use crate::events::SystemEvent;
 use crate::memory::scope_context::MemoryScopeContext;
-use chrono::Utc;
 use openalpaca_llm::ContentPart;
 use uuid::Uuid;
 
@@ -76,7 +74,7 @@ impl Orchestrator {
             })
     }
 
-    /// Invoke a skill with route-telemetry capture and IntentClassified emission.
+    /// Invoke a skill with route-telemetry capture.
     ///
     /// Used by the deterministic skill tier in `handle_message_internal`.
     #[allow(clippy::too_many_arguments)]
@@ -105,12 +103,6 @@ impl Orchestrator {
         // caller that is not a chat turn with files on it.
         attachments: Option<&super::handler_attachments::TurnAttachments>,
     ) -> Result<String, String> {
-        self.bus.publish(SystemEvent::IntentClassified {
-            request_id,
-            intent_type: "skill_invocation".to_string(),
-            timestamp: Utc::now(),
-        });
-
         // **The explicit-invocation refusal** (extension design §7.5, §6.2
         // #12). The user named this skill, so the withdrawal changes what they
         // asked for and the answer is chat: refuse, naming skill, requirement,

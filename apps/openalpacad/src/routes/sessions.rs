@@ -916,4 +916,4 @@ pub(crate) fn remove_scratch_folder(id: &str) {
 }
 
 #[cfg(test)]
-mod tests;
+pub(crate) mod tests;

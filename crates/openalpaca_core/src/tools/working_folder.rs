@@ -9,10 +9,10 @@
 //! canonical form when that differs) and creates nothing, so asking where a
 //! call would act, as the card does, never makes a folder.
 
-use std::fmt;
 use std::path::{Path, PathBuf};
 
-use openalpaca_storage::store::{self, ContentKind, projects};
+use openalpaca_app_support::paths;
+use openalpaca_storage::store::{ContentKind, projects};
 
 use crate::session_log::session_dir_name;
 use crate::tools::registry::ToolContext;
@@ -92,55 +92,48 @@ impl WorkingFolder {
 
 /// Why a call has no working folder. `Display` is the one sentence the model,
 /// the card and the report read.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
 pub enum WorkingFolderRefusal {
     /// A tool reached through `execute` (no context) — R26.
+    #[error(
+        "This tool acts in the conversation's working folder, and this call carries no \
+         conversation to name one."
+    )]
     NoContext,
     /// R27: the project is registered and missing — its root is not a
     /// directory, or no longer leads to itself (ST-7, ST-23; `Project::missing`).
+    #[error(
+        "The project folder {root} is missing — its folder is gone or has moved: re-point \
+         the project to where its folder is now (Settings → Connection → Projects → \
+         Re-point…, or openalpaca store rebase {root} <new path>), or delete its data \
+         (Delete data…, or openalpaca store purge {root}). No file tool or command runs \
+         until then."
+    )]
     ProjectMissing { root: String },
     /// The turn's root names no folder under `projects/` any more — re-pointed
     /// or deleted while the conversation ran.
+    #[error("{}", not_a_project(.root))]
     NotAProject { root: String },
     /// R44: neither a project nor a conversation id.
+    #[error(
+        "This call has neither a project nor a conversation, so it has no working \
+         folder: file tools and commands run only inside a conversation or a project."
+    )]
     NoConversation,
     /// `projects/` or the home root could not be read, or the scratch folder
     /// could not be made.
+    #[error("The working folder could not be read: {reason}")]
     Unavailable { reason: String },
 }
 
-impl fmt::Display for WorkingFolderRefusal {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            Self::NoContext => f.write_str(
-                "This tool acts in the conversation's working folder, and this call carries no \
-                 conversation to name one.",
-            ),
-            Self::ProjectMissing { root } => write!(
-                f,
-                "The project folder {root} is missing — its folder is gone or has moved: re-point \
-                 the project to where its folder is now (Settings → Connection → Projects → \
-                 Re-point…, or openalpaca store rebase {root} <new path>), or delete its data \
-                 (Delete data…, or openalpaca store purge {root}). No file tool or command runs \
-                 until then."
-            ),
-            Self::NotAProject { root } => write!(
-                f,
-                "{}",
-                projects::ProjectError::NotRegistered { root: root.clone() }
-            ),
-            Self::NoConversation => f.write_str(
-                "This call has neither a project nor a conversation, so it has no working \
-                 folder: file tools and commands run only inside a conversation or a project.",
-            ),
-            Self::Unavailable { reason } => {
-                write!(f, "The working folder could not be read: {reason}")
-            }
-        }
+/// [`WorkingFolderRefusal::NotAProject`]'s sentence is
+/// [`projects::ProjectError::NotRegistered`]'s, so the one sentence a model
+/// reads for an unregistered root has one source.
+fn not_a_project(root: &str) -> projects::ProjectError {
+    projects::ProjectError::NotRegistered {
+        root: root.to_owned(),
     }
 }
-
-impl std::error::Error for WorkingFolderRefusal {}
 
 /// The working folder of the call `ctx` describes (design §10). Pure: reads
 /// four small files at most (`projects::lookup`, S0.2) and creates nothing.
@@ -183,7 +176,7 @@ pub fn working_folder(ctx: &ToolContext) -> Result<WorkingFolder, WorkingFolderR
 /// nothing is created. `session_dir_name` makes the id one safe path segment,
 /// the mapping `sessions/<id>/` uses.
 pub fn scratch_dir(conversation_id: &str) -> anyhow::Result<PathBuf> {
-    Ok(store::home_root()?
+    Ok(paths::home_root()?
         .join(ContentKind::Scratch.dir_name())
         .join(session_dir_name(conversation_id)))
 }
@@ -1069,5 +1062,49 @@ mod tests {
                  store.</working_folder>"
             ))
         );
+    }
+
+    /// Step 9's golden (M31): each variant's sentence byte for byte, under
+    /// `{}` and `{:#}`, with no `source()` — written against the hand-written
+    /// `Display` and kept on the derive. `NotAProject` reads `ProjectError`'s
+    /// own sentence. The `match` has no `_` arm, so a new variant does not
+    /// compile without its row.
+    #[test]
+    fn every_working_folder_refusal_prints_its_sentence_whole_and_has_no_source() {
+        let rows = [
+            WorkingFolderRefusal::NoContext,
+            WorkingFolderRefusal::ProjectMissing {
+                root: "/w/\u{202e}app".to_string(),
+            },
+            WorkingFolderRefusal::NotAProject {
+                root: "/w/app\u{200b}".to_string(),
+            },
+            WorkingFolderRefusal::NoConversation,
+            WorkingFolderRefusal::Unavailable {
+                reason: "projects/ unreadable".to_string(),
+            },
+        ];
+        for refusal in rows {
+            let want = match &refusal {
+                WorkingFolderRefusal::NoContext => {
+                    "This tool acts in the conversation's working folder, and this call carries no conversation to name one."
+                }
+                WorkingFolderRefusal::ProjectMissing { .. } => {
+                    "The project folder /w/\u{202e}app is missing — its folder is gone or has moved: re-point the project to where its folder is now (Settings → Connection → Projects → Re-point…, or openalpaca store rebase /w/\u{202e}app <new path>), or delete its data (Delete data…, or openalpaca store purge /w/\u{202e}app). No file tool or command runs until then."
+                }
+                WorkingFolderRefusal::NotAProject { .. } => {
+                    "/w/app\u{200b} is not a project OpenAlpaca knows: no folder under projects/ records it"
+                }
+                WorkingFolderRefusal::NoConversation => {
+                    "This call has neither a project nor a conversation, so it has no working folder: file tools and commands run only inside a conversation or a project."
+                }
+                WorkingFolderRefusal::Unavailable { .. } => {
+                    "The working folder could not be read: projects/ unreadable"
+                }
+            };
+            assert_eq!(refusal.to_string(), want);
+            assert_eq!(format!("{refusal:#}"), want);
+            assert!(std::error::Error::source(&refusal).is_none(), "{want}");
+        }
     }
 }

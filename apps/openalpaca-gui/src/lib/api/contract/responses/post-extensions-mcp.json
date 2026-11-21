@@ -1,0 +1,31 @@
+{
+  "extension": {
+    "actionable": false,
+    "added_capabilities": [],
+    "agents": [],
+    "connect_ms": null,
+    "connector": null,
+    "consent": null,
+    "declared": null,
+    "detail": null,
+    "enabled": false,
+    "hint": null,
+    "id": "",
+    "kind": "",
+    "list_ms": null,
+    "missing_config_keys": [],
+    "protocol_version": null,
+    "provider": null,
+    "reason": null,
+    "since": "",
+    "skills": [],
+    "skipped_tools": [],
+    "state": "",
+    "tools": [],
+    "tools_changed_at": null,
+    "transport": "",
+    "version": null,
+    "withdrawn_by_server": []
+  },
+  "manifest": null
+}

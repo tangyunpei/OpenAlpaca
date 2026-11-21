@@ -50,8 +50,26 @@ fn db_status_from_entry(status: TaskEntryStatus) -> TaskStatus {
     }
 }
 
+/// What the chat's `/pause` and `/resume` answer, bare or with a task id and
+/// whatever the lane holds (N-ROUTE-1); no status, lane or event moves.
+/// `POST /v1/tasks/{id}/action`'s `pause` (a `409` with this sentence) and
+/// `openalpaca tasks pause` (before any request) answer it too (PAUSE-OFF),
+/// so no surface pauses until a later design.
+///
+/// A pause never stopped anything: a `paused` row's run kept going and
+/// spending, and its completion wrote over `paused`. There is no pause until
+/// a cancelled run can be resumed — then `/pause` can become a cancel as
+/// interrupted plus a resume; `/cancel` is the stop. Claude Code has none
+/// either (Esc interrupts a turn, `TaskStop` stops background work). The
+/// route still takes `resume` through [`apply_task_action`], so a row an
+/// earlier build left `paused` is not stuck.
+pub const PAUSE_UNSUPPORTED: &str =
+    "Pause and resume are not supported — a workflow runs until it finishes or /cancel stops it.";
+
 /// Apply a task-control action (`cancel` / `pause` / `resume`), shared by the
-/// orchestrator chat handler and the daemon HTTP route.
+/// daemon HTTP route and the orchestrator chat handler. Neither hands it
+/// `pause` any more ([`PAUSE_UNSUPPORTED`] is answered first): the chat
+/// reaches it only with `cancel`, the route with `cancel` and `resume`.
 ///
 /// The task is resolved from the in-memory registry first, falling back to the
 /// database, so tasks that only exist in SQLite (e.g. after a daemon restart)
@@ -322,10 +340,11 @@ impl Orchestrator {
         .to_string())
     }
 
-    /// Handle a bare `/cancel` | `/pause` | `/resume` (no task id) by
-    /// resolving the target from the lane's active workflows (Routing V2
-    /// Phase 3): exactly one running workflow → apply the action to it;
-    /// zero → say so; multiple → list the ids and ask which (no action).
+    /// Handle a bare `/cancel` (no task id) by resolving the target from the
+    /// lane's active workflows (Routing V2 Phase 3): exactly one running
+    /// workflow → apply the action to it; zero → say so; multiple → list the
+    /// ids and ask which (no action). A bare `/pause` or `/resume` never gets
+    /// here: it is answered [`PAUSE_UNSUPPORTED`] first.
     pub(super) fn handle_bare_task_control(
         &self,
         action: &str,

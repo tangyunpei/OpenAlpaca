@@ -270,15 +270,6 @@ fn create_test_skill_dir(
     dir
 }
 
-#[test]
-fn test_skill_invocation_intent_type() {
-    let intent = Intent::SkillInvocation {
-        skill_name: "Test".to_string(),
-        query: "test query".to_string(),
-    };
-    assert_eq!(intent.intent_type(), "skill_invocation");
-}
-
 // --- parse_with_skills_and_router tests ---
 
 fn make_router_test_catalog() -> (TempDir, SkillCatalog) {
@@ -832,14 +823,6 @@ fn task_commands_still_parse_beside_the_memory_commands() {
     );
 }
 
-#[test]
-fn memory_command_intent_type() {
-    assert_eq!(
-        memory(MemoryVerb::Forget, "x").intent_type(),
-        "memory_command"
-    );
-}
-
 /// The reserved names are exactly the three command words.
 #[test]
 fn the_reserved_slash_names_are_the_three_memory_commands() {
@@ -917,4 +900,34 @@ Echo.
         parser().parse_with_skills_and_router("/jot hello", &catalog, &router),
         Intent::SkillInvocation { .. }
     ));
+}
+
+#[test]
+fn test_router_slash_command_splits_at_the_first_space_and_trims_the_query() {
+    let (_tmp, catalog) = make_router_test_catalog();
+    let router = SkillRouter::new(0.65, 0.45);
+
+    // The query is everything after the first space, trimmed.
+    let intent = parser().parse_with_skills_and_router(
+        "/explain-code    main.rs  lib.rs  ",
+        &catalog,
+        &router,
+    );
+    match intent {
+        Intent::SkillInvocation { skill_name, query } => {
+            assert_eq!(skill_name, "Explain Code");
+            assert_eq!(query, "main.rs  lib.rs");
+        }
+        other => panic!("Expected SkillInvocation, got {:?}", other),
+    }
+
+    // No space: the whole text is the command and the query is the message.
+    let intent = parser().parse_with_skills_and_router("/explain-code", &catalog, &router);
+    match intent {
+        Intent::SkillInvocation { skill_name, query } => {
+            assert_eq!(skill_name, "Explain Code");
+            assert_eq!(query, "/explain-code");
+        }
+        other => panic!("Expected SkillInvocation, got {:?}", other),
+    }
 }

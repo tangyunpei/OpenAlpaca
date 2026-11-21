@@ -13,7 +13,7 @@
 
 use anyhow::{Context, Result};
 use dialoguer::{Input, theme::ColorfulTheme};
-use openalpaca_storage::{discovery, store};
+use openalpaca_app_support::{discovery, paths};
 use std::path::Path;
 
 use super::ai_config;
@@ -56,8 +56,8 @@ fn store_locked_refusal(lock: &Path) -> String {
 pub(super) fn run(env: &dyn ConfigEnv) -> Result<()> {
     // Pure path queries: neither creates `state/`, so a reset against a store
     // that is not there leaves nothing behind.
-    let root = std::path::absolute(store::home_root()?)?;
-    let db_path = store::database_path()?;
+    let root = std::path::absolute(paths::home_root()?)?;
+    let db_path = paths::database_path()?;
     let state_dir = db_path
         .parent()
         .context("the database path has no parent directory")?;
@@ -137,14 +137,14 @@ fn claim_store(env: &dyn ConfigEnv, state_dir: &Path) -> Result<Option<impl Size
     if !state_dir.is_dir() {
         return Ok(None);
     }
-    discovery::acquire_single_instance_lock(false)
+    discovery::acquire_single_instance_lock()
         .map(Some)
         .map_err(|e| {
             if env.daemon_is_running() {
                 e.context(DAEMON_RUNNING_REFUSAL)
             } else {
                 let lock =
-                    store::lock_path().unwrap_or_else(|_| state_dir.join("openalpacad.lock"));
+                    paths::lock_path().unwrap_or_else(|_| state_dir.join("openalpacad.lock"));
                 e.context(store_locked_refusal(&lock))
             }
         })

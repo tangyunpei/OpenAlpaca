@@ -27,6 +27,7 @@ fn mcp_tool(server: &str, name: &str) -> RegisteredTool {
             remote_name: "echo".to_string(),
             server_name: server.to_string(),
             generation: 1,
+            output_schema: None,
         },
         provides_capabilities: vec![name.to_string()],
         exempt_from_timeout: false,
@@ -37,9 +38,24 @@ fn mcp_tool(server: &str, name: &str) -> RegisteredTool {
     }
 }
 
+/// An MCP tool whose server declared an `outputSchema`.
+fn mcp_tool_with_output_schema(
+    server: &str,
+    name: &str,
+    schema: serde_json::Value,
+) -> RegisteredTool {
+    let mut tool = mcp_tool(server, name);
+    let serde_json::Value::Object(schema) = schema else {
+        panic!("an output schema is a JSON object");
+    };
+    if let ToolBackend::Mcp { output_schema, .. } = &mut tool.backend {
+        *output_schema = Some(Arc::new(schema));
+    }
+    tool
+}
+
 struct Noop;
 
-#[async_trait::async_trait]
 impl openalpaca_core::tools::registry::BuiltInTool for Noop {
     async fn execute(&self, _arguments: &serde_json::Value) -> Result<String, String> {
         Ok(String::new())
@@ -49,7 +65,7 @@ impl openalpaca_core::tools::registry::BuiltInTool for Noop {
 fn builtin_tool(name: &str) -> RegisteredTool {
     RegisteredTool {
         definition: definition(name),
-        backend: ToolBackend::BuiltIn(Arc::new(Noop)),
+        backend: ToolBackend::built_in(Noop),
         provides_capabilities: vec![name.to_string()],
         exempt_from_timeout: false,
         annotations: None,
@@ -79,7 +95,6 @@ fn config_tool(name: &str) -> RegisteredTool {
 
 struct PluginExec(&'static str);
 
-#[async_trait::async_trait]
 impl openalpaca_api::plugin_traits::PluginToolExecutor for PluginExec {
     async fn execute(&self, _tool: &str, _arguments: &serde_json::Value) -> Result<String, String> {
         Ok(String::new())
@@ -92,7 +107,9 @@ impl openalpaca_api::plugin_traits::PluginToolExecutor for PluginExec {
 fn plugin_tool(plugin: &'static str, name: &str) -> RegisteredTool {
     RegisteredTool {
         definition: definition(name),
-        backend: ToolBackend::Plugin(Arc::new(PluginExec(plugin))),
+        backend: ToolBackend::Plugin(
+            openalpaca_api::plugin_traits::DynPluginToolExecutor::new_arc(PluginExec(plugin)),
+        ),
         provides_capabilities: vec![name.to_string()],
         exempt_from_timeout: false,
         annotations: None,
@@ -139,6 +156,7 @@ fn a_builtin_row_carries_no_enable_field() {
         "invocations_today",
         "version",
         "author",
+        "output_schema",
     ] {
         assert!(
             builtin.get(field).is_some(),
@@ -286,12 +304,13 @@ fn a_plugin_row_carries_its_plugins_origin() {
     assert_eq!(row["version"], "2.0.0");
 }
 
-/// **The §8 shape, exactly** — nine keys per row and no tenth, on every one of
-/// the four sources. The two fields this contract supersedes (`denied`, the
-/// ADR-029 boolean) and folds away (`provider`, into `origin.id`) are covered
-/// by the same assertion: any key not in §8 fails it.
+/// **The §8 shape, exactly** — ten keys per row (§8's nine and M14's
+/// `output_schema`) and no eleventh, on every one of the four sources. The
+/// two fields this contract supersedes (`denied`, the ADR-029 boolean) and
+/// folds away (`provider`, into `origin.id`) are covered by the same
+/// assertion: any key not in §8 fails it.
 #[test]
-fn every_row_carries_the_nine_section_8_keys_and_no_others() {
+fn every_row_carries_the_ten_catalog_keys_and_no_others() {
     let registry = ToolRegistry::new().expect("registry");
     registry.register(builtin_tool("remember")).expect("builtin");
     registry.register(config_tool("weather")).expect("config");
@@ -312,6 +331,7 @@ fn every_row_carries_the_nine_section_8_keys_and_no_others() {
         "invocations_today",
         "version",
         "author",
+        "output_schema",
     ];
     let rows = tools_json(&registry, registry.extensions(), &HashMap::new());
     assert_eq!(rows.len(), 4);
@@ -334,6 +354,8 @@ fn every_row_carries_the_nine_section_8_keys_and_no_others() {
             ["builtin", "mcp", "plugin", "config"].contains(&row["source"].as_str().unwrap()),
             "unknown source: {row}"
         );
+        // No fixture here declares an output schema, so it is null on all four.
+        assert!(row["output_schema"].is_null(), "{row}");
         // `origin` is null exactly for the two off-axis sources.
         let off_axis = matches!(row["source"].as_str(), Some("builtin") | Some("config"));
         assert_eq!(
@@ -342,4 +364,63 @@ fn every_row_carries_the_nine_section_8_keys_and_no_others() {
             "the origin-null rule does not hold for {row}"
         );
     }
+}
+
+/// M14: an MCP tool's declared `outputSchema` is served as it was listed;
+/// a server that declared none, and every non-MCP tool, reads `null`.
+#[test]
+fn an_mcp_rows_output_schema_is_the_declared_one_and_null_elsewhere() {
+    let schema = serde_json::json!({
+        "type": "object",
+        "properties": {"number": {"type": "integer"}, "url": {"type": "string"}},
+        "required": ["number"]
+    });
+    let registry = ToolRegistry::new().expect("registry");
+    registry
+        .register(mcp_tool_with_output_schema(
+            "github",
+            "github__create_issue",
+            schema.clone(),
+        ))
+        .expect("mcp with a schema");
+    registry
+        .register(mcp_tool("github", "github__ping"))
+        .expect("mcp without one");
+    registry
+        .register(builtin_tool("remember"))
+        .expect("builtin");
+    registry.register(config_tool("weather")).expect("config");
+    registry
+        .register(plugin_tool("notion", "notion::create_page"))
+        .expect("plugin");
+
+    let rows = tools_json(&registry, registry.extensions(), &HashMap::new());
+    assert_eq!(find(&rows, "github__create_issue")["output_schema"], schema);
+    for name in ["github__ping", "remember", "weather", "notion::create_page"] {
+        let row = find(&rows, name);
+        assert!(
+            row.get("output_schema")
+                .is_some_and(serde_json::Value::is_null),
+            "'{name}' must carry output_schema: null: {row}"
+        );
+    }
+}
+
+/// `GET /v1/tools`'s sample for the API contract's folder (API-CONTRACT): a
+/// builtin, a config tool and an MCP server's tool.
+pub(crate) fn contract_samples(out: &mut crate::contract::Samples) {
+    let registry = ToolRegistry::new().expect("registry");
+    let ext = ExtensionId::mcp("github");
+    registry
+        .extensions()
+        .upsert(&ext, true, ExtensionState::Enabled);
+    for tool in [
+        builtin_tool("remember"),
+        config_tool("weather"),
+        mcp_tool("github", "github__create_issue"),
+    ] {
+        registry.register(tool).expect("register");
+    }
+    let rows = tools_json(&registry, registry.extensions(), &HashMap::new());
+    out.response("get-tools", serde_json::Value::Array(rows));
 }

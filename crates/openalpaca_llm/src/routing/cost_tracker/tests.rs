@@ -7,9 +7,9 @@ fn make_tracker() -> CostTracker {
 #[test]
 fn test_calculate_cost_known_model() {
     let tracker = make_tracker();
-    // claude-sonnet: $3/1M input, $15/1M output
-    let cost = tracker.calculate_cost("claude-sonnet-4-5-20250929", 1_000_000, 100_000);
-    let expected = 3.0 + 1.5; // 1M * $3/1M + 100K * $15/1M
+    // claude-sonnet-5-5: $2/1M input, $10/1M output (MODELS-LATEST)
+    let cost = tracker.calculate_cost("claude-sonnet-5-5", 1_000_000, 100_000);
+    let expected = 2.0 + 1.0; // 1M * $2/1M + 100K * $10/1M
     assert!(
         (cost - expected).abs() < 0.01,
         "cost={}, expected={}",
@@ -45,6 +45,9 @@ fn local_model(context_window: u32) -> ModelInfo {
         supports_reasoning: false,
         supports_tools: true,
         declared: true,
+        long_prompt: None,
+        cache_rates: None,
+        request_contract: crate::routing::model_registry::RequestContract::NONE,
     }
 }
 
@@ -295,4 +298,117 @@ async fn test_cache_stats_aggregation() {
         "ratio={}",
         stats.hit_ratio
     );
+}
+
+// ── O-17 (a): a long-prompt rate, applied per request ───────────────────────
+
+/// `gpt-6.1-sol`'s page (developers.openai.com, read 2026-11-12): "API
+/// prompts with more than 272K input tokens are priced at 2x input and cache
+/// rates and 1.5x output for the full request" — $4 / $15 against $2 / $10.
+/// At the threshold the standard rate holds; one token over, the whole
+/// request takes the long rate, its cache tokens included. Red on the
+/// parent, which has no such rate (and no row).
+#[test]
+fn the_long_prompt_rate_applies_above_its_threshold_and_not_below() {
+    let tracker = make_tracker();
+    let at = 272_000;
+    let over = 272_001;
+
+    let standard = tracker.calculate_cost("gpt-6.1-sol", at, 1_000_000);
+    let expected = at as f64 * 2.0 / 1e6 + 10.0;
+    assert!(
+        (standard - expected).abs() < 1e-9,
+        "at the threshold: {standard}"
+    );
+
+    let long = tracker.calculate_cost("gpt-6.1-sol", over, 1_000_000);
+    let expected = over as f64 * 4.0 / 1e6 + 15.0;
+    assert!((long - expected).abs() < 1e-9, "one over: {long}");
+
+    // The cache path: the prompt's length counts its cached tokens, and the
+    // long rate scales the cache rates with the input rate. The row's own
+    // read multiplier, 0.05x (CACHE-MULT; the pricing page, read 2026-11-14:
+    // cached input $0.10 at the standard rate, $0.20 at the long one).
+    let cached = 200_000;
+    let long = tracker.calculate_cost_with_cache("gpt-6.1-sol", over, 0, 0, cached);
+    let expected = (over - cached) as f64 * 4.0 / 1e6 + cached as f64 * 0.20 / 1e6;
+    assert!((long - expected).abs() < 1e-9, "cached, one over: {long}");
+    let standard = tracker.calculate_cost_with_cache("gpt-6.1-sol", at, 0, 0, cached);
+    let expected = (at - cached) as f64 * 2.0 / 1e6 + cached as f64 * 0.10 / 1e6;
+    assert!((standard - expected).abs() < 1e-9, "cached, at: {standard}");
+    // A write at the long rate: the page's long-context "30m write", $5.00.
+    let written = 100_000;
+    let long = tracker.calculate_cost_with_cache("gpt-6.1-sol", over, 0, written, 0);
+    let expected = (over - written) as f64 * 4.0 / 1e6 + written as f64 * 5.0 / 1e6;
+    assert!((long - expected).abs() < 1e-9, "written, one over: {long}");
+}
+
+/// A model with no long-prompt rate is priced the same at any length
+/// (Anthropic's 4.6 and later models carry their whole window at the
+/// standard rate, its pricing page, read 2026-11-12).
+#[test]
+fn a_model_without_a_long_prompt_rate_is_priced_the_same_at_any_length() {
+    let tracker = make_tracker();
+    let info = ModelRegistry::with_defaults()
+        .get_model_info("claude-opus-5-5")
+        .expect("catalogued");
+    assert!(info.long_prompt.is_none());
+    let cost = tracker.calculate_cost("claude-opus-5-5", 900_000, 0);
+    assert!((cost - 900_000.0 * 4.0 / 1e6).abs() < 1e-9, "cost={cost}");
+}
+
+/// The catalogue row carries the rate the page gives, and the registry
+/// hands it to the tracker with the price.
+#[test]
+fn the_catalogue_carries_gpt_6_1_sols_long_prompt_rate() {
+    let registry = ModelRegistry::with_defaults();
+    let rate = registry
+        .get_pricing("gpt-6.1-sol")
+        .and_then(|p| p.long_prompt)
+        .expect("a long-prompt rate");
+    assert_eq!(rate.above_input_tokens, 272_000);
+    assert!((rate.input_price_per_million - 4.0).abs() < 1e-9);
+    assert!((rate.output_price_per_million - 15.0).abs() < 1e-9);
+}
+
+// ── CACHE-MULT, CACHE-WRITE: a cache figure per row ─────────────────────────
+
+/// A row with no cache figure keeps the tracker's figures from before the
+/// per-row ones: reads at 0.1x and writes at 1.25x its input rate. Here an
+/// id no row names (counted at the $3 fallback) and a `[models]` row the
+/// person writes for an id no compiled row names. A `[models]` row for a
+/// compiled id keeps the compiled figures (MODEL-ROWS, *Rev 67*:
+/// `model_rows_tests`'s `a_row_naming_a_compiled_id_keeps_its_cache_figures`).
+#[test]
+fn a_row_with_no_cache_figure_keeps_0_1x_reads_and_1_25x_writes() {
+    let tracker = make_tracker();
+    let million = 1_000_000;
+    let read = tracker.calculate_cost_with_cache("never-seen", million, 0, 0, million);
+    assert!((read - 0.30).abs() < 1e-9, "fallback read: {read}");
+    let write = tracker.calculate_cost_with_cache("never-seen", million, 0, million, 0);
+    assert!((write - 3.75).abs() < 1e-9, "fallback write: {write}");
+
+    let registry = Arc::new(ModelRegistry::with_defaults());
+    let mut declared = std::collections::HashMap::new();
+    declared.insert(
+        "gw-row".to_string(),
+        crate::config::ModelConfigEntry {
+            provider: "openai".to_string(),
+            input_price: Some(2.0),
+            output_price: Some(10.0),
+            context: Some(1_050_000),
+            supports_image: None,
+            supports_audio: None,
+            supports_document: None,
+            supports_reasoning: None,
+            supports_tools: None,
+        },
+    );
+    registry.reload_from_config(&declared, &std::collections::HashSet::new());
+    let tracker = make_tracker();
+    tracker.use_registry(registry);
+    let read = tracker.calculate_cost_with_cache("gw-row", million, 0, 0, million);
+    assert!((read - 0.20).abs() < 1e-9, "[models] row read: {read}");
+    let write = tracker.calculate_cost_with_cache("gw-row", million, 0, million, 0);
+    assert!((write - 2.50).abs() < 1e-9, "[models] row write: {write}");
 }

@@ -6,7 +6,6 @@
 use crate::LlmProvider;
 use crate::error::LlmError;
 use crate::types::*;
-use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
 use std::time::Duration;
@@ -75,7 +74,6 @@ impl ClaudeCodeCliProvider {
     }
 }
 
-#[async_trait]
 impl LlmProvider for ClaudeCodeCliProvider {
     fn name(&self) -> &str {
         "claude_cli"
@@ -175,7 +173,6 @@ impl CodexCliProvider {
     }
 }
 
-#[async_trait]
 impl LlmProvider for CodexCliProvider {
     fn name(&self) -> &str {
         "codex_cli"
@@ -277,6 +274,7 @@ fn parse_claude_output(stdout: &str) -> Result<ChatResponse, LlmError> {
                 usage: Usage::default(),
                 finish_reason: FinishReason::Stop,
                 thinking: None,
+                echo: None,
                 parts: None,
             })
         }
@@ -289,6 +287,7 @@ fn parse_claude_output(stdout: &str) -> Result<ChatResponse, LlmError> {
                 usage: Usage::default(),
                 finish_reason: FinishReason::Stop,
                 thinking: None,
+                echo: None,
                 parts: None,
             })
         }
@@ -313,6 +312,7 @@ fn parse_codex_output(stdout: &str) -> Result<ChatResponse, LlmError> {
                 usage: Usage::default(),
                 finish_reason: FinishReason::Stop,
                 thinking: None,
+                echo: None,
                 parts: None,
             })
         }
@@ -325,6 +325,7 @@ fn parse_codex_output(stdout: &str) -> Result<ChatResponse, LlmError> {
                 usage: Usage::default(),
                 finish_reason: FinishReason::Stop,
                 thinking: None,
+                echo: None,
                 parts: None,
             })
         }

@@ -19,13 +19,12 @@ pub fn spawn_event_bridge(
     let mut system_rx = bus.subscribe();
     tokio::spawn(async move {
         loop {
-            let event = tokio::select! {
-                result = system_rx.recv() => match result {
-                    Ok(ev) => ev,
-                    Err(broadcast::error::RecvError::Closed) => break,
-                    Err(broadcast::error::RecvError::Lagged(_)) => continue,
-                },
-                _ = cancel.cancelled() => break,
+            // The receive is polled before the token, so an event already
+            // published when the cancel lands in the same tick is forwarded.
+            let event = match cancel.run_until_cancelled(system_rx.recv()).await {
+                Some(Ok(ev)) => ev,
+                Some(Err(broadcast::error::RecvError::Lagged(_))) => continue,
+                Some(Err(broadcast::error::RecvError::Closed)) | None => break,
             };
             match event {
                 openalpaca_core::events::SystemEvent::ConnectorStatus { id, status, .. } => {
@@ -124,6 +123,7 @@ pub fn spawn_event_bridge(
                     task_id,
                     session_id,
                     tool_use_id,
+                    reason,
                     ..
                 } => {
                     tracing::debug!(
@@ -137,6 +137,7 @@ pub fn spawn_event_bridge(
                         task_id.as_deref(),
                         session_id.as_deref(),
                         tool_use_id.as_deref(),
+                        reason,
                     );
                 }
                 openalpaca_core::events::SystemEvent::LlmCallCompleted {
@@ -277,13 +278,6 @@ pub fn spawn_event_bridge(
                         "Model access denied: agent={agent_id}, model={model_id}, reason={reason}"
                     );
                 }
-                openalpaca_core::events::SystemEvent::IntentClassified {
-                    request_id,
-                    intent_type,
-                    ..
-                } => {
-                    tracing::debug!("Intent classified: request={request_id}, type={intent_type}");
-                }
                 openalpaca_core::events::SystemEvent::UserProfileUpdated {
                     actor,
                     mode,
@@ -326,19 +320,6 @@ pub fn spawn_event_bridge(
                         "Bootstrap onboarding completed"
                     );
                 }
-                openalpaca_core::events::SystemEvent::DispatchDecision {
-                    request_id,
-                    task_id,
-                    mode,
-                    reason,
-                    agent_count,
-                    error_message,
-                    ..
-                } => {
-                    tracing::debug!(
-                        "DispatchDecision: request={request_id}, task={task_id:?}, mode={mode}, reason={reason}, agents={agent_count}, error={error_message:?}"
-                    );
-                }
                 openalpaca_core::events::SystemEvent::OrchestrationStage {
                     request_id,
                     mode,
@@ -350,22 +331,7 @@ pub fn spawn_event_bridge(
                     );
                 }
 
-                // ── Skill lifecycle events (log-only) ─────────────────────
-                openalpaca_core::events::SystemEvent::SkillDiscovered {
-                    skill_id,
-                    skill_name,
-                    scope,
-                    ..
-                } => {
-                    tracing::debug!(
-                        "Skill discovered: id={skill_id}, name={skill_name}, scope={scope}"
-                    );
-                }
-                openalpaca_core::events::SystemEvent::SkillSelected {
-                    skill_id, score, ..
-                } => {
-                    tracing::debug!("Skill auto-selected: id={skill_id}, score={score:.3}");
-                }
+                // ── Skill lifecycle events (forwarded to clients) ─────────
                 openalpaca_core::events::SystemEvent::SkillInvocationStarted {
                     request_id,
                     skill_id,
@@ -379,16 +345,6 @@ pub fn spawn_event_bridge(
                         &request_id.to_string(),
                         &skill_id,
                         &query_preview,
-                    );
-                }
-                openalpaca_core::events::SystemEvent::SkillContextInjected {
-                    request_id,
-                    skill_id,
-                    context_bytes,
-                    ..
-                } => {
-                    tracing::debug!(
-                        "Skill context injected: request={request_id}, skill={skill_id}, bytes={context_bytes}"
                     );
                 }
                 openalpaca_core::events::SystemEvent::SkillCompleted {
@@ -719,6 +675,34 @@ mod tests {
         let cancel = CancellationToken::new();
         spawn_event_bridge(eb, &bus, None, cancel.clone());
         (bus, rx, cancel)
+    }
+
+    /// M60: an event already on the bus when the shutdown token fires in the
+    /// same tick is forwarded, never dropped — `run_until_cancelled` polls
+    /// the receive first, where `select!` picked an arm at random. Repeated,
+    /// since the coin-flip it replaces passed half the time.
+    #[tokio::test(start_paused = true)]
+    async fn an_event_published_with_the_cancel_is_still_forwarded() {
+        for round in 0..64 {
+            let (bus, mut rx, cancel) = setup_bridge();
+            // Let the bridge park on its receive.
+            for _ in 0..4 {
+                tokio::task::yield_now().await;
+            }
+            bus.publish(SystemEvent::WorkflowStarted {
+                request_id: Uuid::new_v4(),
+                task_id: format!("t-{round}"),
+                lane_key: "owner:cli".into(),
+                title: "Research task".into(),
+                timestamp: chrono::Utc::now(),
+            });
+            cancel.cancel();
+            let forwarded = tokio::time::timeout(Duration::from_secs(2), rx.recv()).await;
+            assert!(
+                matches!(forwarded, Ok(Ok(ServerEvent::WorkflowStarted { .. }))),
+                "round {round}: the event published with the cancel was dropped: {forwarded:?}"
+            );
+        }
     }
 
     async fn recv_event(rx: &mut broadcast::Receiver<ServerEvent>) -> ServerEvent {
@@ -1135,6 +1119,7 @@ mod tests {
             task_id: Some("t-1".into()),
             session_id: None,
             tool_use_id: None,
+            reason: None,
             timestamp: chrono::Utc::now(),
         });
         match recv_event(&mut rx).await {
@@ -1267,6 +1252,37 @@ mod tests {
         cancel.cancel();
     }
 
+    /// TIMEOUT-ONE-CLOCK: a run the sandbox cut crosses the bridge with its
+    /// reason, so a client reads it as a failed run that timed out.
+    #[tokio::test]
+    async fn test_a_timed_out_run_bridges_its_reason() {
+        let (bus, mut rx, cancel) = setup_bridge();
+        bus.publish(SystemEvent::ToolExecuted {
+            agent_id: "orchestrator".into(),
+            tool_name: "slow_cmd".into(),
+            success: false,
+            duration_ms: 1000,
+            task_id: None,
+            session_id: None,
+            tool_use_id: None,
+            reason: Some(openalpaca_api::events::ToolFailureReason::Timeout),
+            timestamp: chrono::Utc::now(),
+        });
+        match recv_event(&mut rx).await {
+            ServerEvent::ToolExecuted {
+                success, reason, ..
+            } => {
+                assert!(!success);
+                assert_eq!(
+                    reason,
+                    Some(openalpaca_api::events::ToolFailureReason::Timeout)
+                );
+            }
+            other => panic!("Expected ToolExecuted, got {other:?}"),
+        }
+        cancel.cancel();
+    }
+
     /// A frame from outside any run bridges with `task_id: None` — the bridge
     /// never invents attribution.
     #[tokio::test]
@@ -1280,6 +1296,7 @@ mod tests {
             task_id: None,
             session_id: None,
             tool_use_id: None,
+            reason: None,
             timestamp: chrono::Utc::now(),
         });
         match recv_event(&mut rx).await {

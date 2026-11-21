@@ -858,6 +858,7 @@ async fn the_sandbox_raises_file_edits_card_and_a_deny_leaves_the_file() {
             allowed_capabilities: vec!["file_edit".to_string()],
             ..Default::default()
         },
+        &crate::daemon_config::AgentDefaults::default(),
     );
     // Fail fast rather than wait out the 300 s default should no card come.
     policy.confirmation_timeout_secs = Some(5);
@@ -1011,7 +1012,11 @@ async fn a_template_whose_confirmation_list_names_file_write_asks_before_file_ed
         names.contains(&"file_edit"),
         "the capability brings file_edit: {names:?}"
     );
-    let mut policy = SandboxPolicy::from_constraints(&agent.id, &agent.constraints);
+    let mut policy = SandboxPolicy::from_constraints(
+        &agent.id,
+        &agent.constraints,
+        &crate::daemon_config::AgentDefaults::default(),
+    );
     policy.admit_tool_surface(&surface);
     policy.confirmation_timeout_secs = Some(5);
 
@@ -1062,6 +1067,7 @@ async fn a_skill_whose_confirm_list_names_file_write_asks_before_file_edit() {
         require_confirmation_for: fm.permissions.confirm.tools.clone(),
         max_tool_calls: None,
         max_tool_runtime_secs: 60,
+        max_tool_runtime_ceiling_secs: 600,
         stream_id: None,
         lane_key: None,
         confirmation_timeout_secs: Some(5),

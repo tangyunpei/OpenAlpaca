@@ -36,6 +36,7 @@ fn mk_config(tmp: &std::path::Path) -> McpClientConfig {
         request_timeout: Duration::from_secs(30),
         max_reconnect_attempts: 1,
         reconnect_backoff_ms: 100,
+        stderr_tail: Default::default(),
     }
 }
 

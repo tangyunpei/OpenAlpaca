@@ -1,4 +1,5 @@
 use crate::runner::MAX_TOOL_RESULT_SIZE;
+use crate::runner::agentic_loop::{LAST_TOOL_ERROR, RETRY_WILL_NOT_HELP};
 use crate::utils::text::head_tail;
 use std::collections::{HashMap, HashSet};
 use std::sync::Mutex;
@@ -30,9 +31,10 @@ const SUMMARY_HEADER_RESERVE_BYTES: usize = 1024;
 /// How many bytes of run ids the earlier-reported line names before it
 /// counts the rest, so the line stays inside the header reserve.
 const REPORTED_IDS_LIST_BYTES: usize = 512;
-/// One entry's fixed cost: `- **<run_id>**: completed — `, up to two
-/// head/tail notices, ` Last output: `, the join, and a failed entry's error
-/// cut to 512 bytes.
+/// One entry's fixed cost: `- **<run_id>**: completed — `, up to three
+/// head/tail notices (the answer's, and a failed entry's error cut on both
+/// sides of the retry sentence it keeps whole, [`cut_error`]), ` Last
+/// output: `, the join, and a failed entry's error cut to 512 bytes.
 const SUMMARY_ENTRY_OVERHEAD_BYTES: usize = 768;
 /// One answer never takes more of the lead's context than this, however few
 /// subagents ran — `check_subagent_status` returns the whole answer.
@@ -390,7 +392,7 @@ fn entry_line(id: &str, status: &SubagentStatus, budget: usize) -> String {
             let mut line = format!(
                 "- **{}**: failed — {}",
                 id,
-                head_tail(error, SUMMARY_ERROR_MAX_BYTES)
+                cut_error(error, SUMMARY_ERROR_MAX_BYTES)
             );
             if !output.is_empty() {
                 line.push_str(" Last output: ");
@@ -399,6 +401,55 @@ fn entry_line(id: &str, status: &SubagentStatus, budget: usize) -> String {
             line
         }
     }
+}
+
+/// A failed entry's error within `limit` bytes, as [`head_tail`] cuts it —
+/// but a sentence telling the lead a retry will not help
+/// ([`RETRY_WILL_NOT_HELP`], to its first full stop, before the quoted
+/// tool error [`LAST_TOOL_ERROR`] opens, and at most `limit / 2` bytes) is
+/// never cut (LTM-2, the advisor's "keep the sentence whole",
+/// which the owner took on 2026-11-17). When the plain cut would split or
+/// drop it, it is kept verbatim and the text before and after it share
+/// what is left of `limit`, each cut as its head and tail: the lead's
+/// prompt retries a failure unless its line says a retry will not help,
+/// and `wait_for_subagents` is how it collects them.
+fn cut_error(error: &str, limit: usize) -> String {
+    if error.len() <= limit {
+        return error.to_string();
+    }
+    // The line's own sentence comes before any tool error it quotes; text
+    // the line did not write (a plugin's error, a provider's message) that
+    // merely holds the words, or a "sentence" with no full stop or longer
+    // than the line's own can be, is cut as any other text, so the bound
+    // holds whatever the error says.
+    let own = error.find(LAST_TOOL_ERROR).unwrap_or(error.len());
+    let Some(start) = error[..own].find(RETRY_WILL_NOT_HELP) else {
+        return head_tail(error, limit);
+    };
+    let Some(end) = error[start..own].find('.').map(|stop| start + stop + 1) else {
+        return head_tail(error, limit);
+    };
+    if end - start > limit / 2 {
+        return head_tail(error, limit);
+    }
+    // What the plain cut keeps: `limit / 2` bytes each end, on character
+    // boundaries (`head_tail`).
+    let half = limit / 2;
+    let head_end = error.floor_char_boundary(half);
+    let tail_start = error.ceil_char_boundary(error.len() - half);
+    if end <= head_end || start >= tail_start {
+        return head_tail(error, limit);
+    }
+    let (before, sentence, after) = (&error[..start], &error[start..end], &error[end..]);
+    let rest = limit.saturating_sub(sentence.len());
+    let after_budget = after.len().min(rest - rest / 2);
+    let before_budget = before.len().min(rest - after_budget);
+    let after_budget = after.len().min(rest - before_budget);
+    format!(
+        "{}{sentence}{}",
+        head_tail(before, before_budget),
+        head_tail(after, after_budget)
+    )
 }
 
 /// `ids` joined by `, `, as many as fit in [`REPORTED_IDS_LIST_BYTES`], then

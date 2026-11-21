@@ -6336,3 +6336,160 @@ fn a_write_through_a_partition_whose_project_folder_went_re_creates_nothing() {
         folder.display()
     );
 }
+
+/// Step 9's golden (M21): each variant's text byte for byte, under `{}` and
+/// `{:#}`, with no `source()` — written against the hand-written `Display`
+/// and kept on the derive. `Io` prints its chain whole. The `match` has no
+/// `_` arm, so a new variant does not compile without its row.
+#[test]
+fn every_snapshot_error_prints_its_text_whole_and_has_no_source() {
+    let rows = [
+        SnapshotError::Invalid("bad \u{202e}schema\u{200b}".to_string()),
+        SnapshotError::Io(anyhow::anyhow!("disk full").context("Failed to read x")),
+    ];
+    for error in rows {
+        let want = match &error {
+            SnapshotError::Invalid(_) => "invalid control snapshot: bad \u{202e}schema\u{200b}",
+            SnapshotError::Io(_) => "Failed to read x: disk full",
+        };
+        assert_eq!(error.to_string(), want);
+        assert_eq!(format!("{error:#}"), want);
+        assert!(std::error::Error::source(&error).is_none(), "{want}");
+    }
+}
+
+/// Step 9's golden (M22): each variant's text byte for byte, under `{}` and
+/// `{:#}`, with no `source()` — written against the hand-written `Display`
+/// and kept on the derive. `Io` prints its chain whole. The `match` has no
+/// `_` arm, so a new variant does not compile without its row.
+#[test]
+fn every_memory_files_error_prints_its_text_whole_and_has_no_source() {
+    let id = NoteId::parse("55e811b6-3220-4758-a47b-034bd1023f38").unwrap();
+    let rows = [
+        MemoryFilesError::InvalidInput("limit \u{200b}".to_string()),
+        MemoryFilesError::NotFound(id),
+        MemoryFilesError::RevisionConflict {
+            id,
+            current_revision: "sha256:ab".to_string(),
+        },
+        MemoryFilesError::AuthorityConflict {
+            id,
+            message: "a \u{202e}user note".to_string(),
+        },
+        MemoryFilesError::ConfirmRefused {
+            id,
+            message: "not a person's surface".to_string(),
+        },
+        MemoryFilesError::Quarantined {
+            partition_key: "home-k".to_string(),
+            reason: "no snapshot".to_string(),
+        },
+        MemoryFilesError::PathRefused {
+            component: PathBuf::from("/s/owners"),
+            reason: "a symlink".to_string(),
+        },
+        MemoryFilesError::DuplicateId {
+            id,
+            files: vec![PathBuf::from("/p/a.md"), PathBuf::from("/p/b.md")],
+        },
+        MemoryFilesError::AdoptCollision("home-k exists".to_string()),
+        MemoryFilesError::NotRegistered {
+            root: PathBuf::from("/w"),
+        },
+        MemoryFilesError::Crashed(CrashPoint::WriteAfter1),
+        MemoryFilesError::Io(anyhow::anyhow!("disk full").context("Failed to write y")),
+    ];
+    for error in rows {
+        let want = match &error {
+            MemoryFilesError::InvalidInput(_) => "invalid input: limit \u{200b}",
+            MemoryFilesError::NotFound(_) => "note 55e811b6-3220-4758-a47b-034bd1023f38 not found",
+            MemoryFilesError::RevisionConflict { .. } => {
+                "note 55e811b6-3220-4758-a47b-034bd1023f38 changed since it was read: current revision is sha256:ab"
+            }
+            MemoryFilesError::AuthorityConflict { .. } => "a \u{202e}user note",
+            MemoryFilesError::ConfirmRefused { .. } => "not a person's surface",
+            MemoryFilesError::Quarantined { .. } => {
+                "memory partition home-k is quarantined (no snapshot); run `openalpaca memory doctor --repair`"
+            }
+            MemoryFilesError::PathRefused { .. } => {
+                "memory partition refused: /s/owners is a symlink"
+            }
+            MemoryFilesError::DuplicateId { .. } => {
+                "two note files share the id 55e811b6-3220-4758-a47b-034bd1023f38: /p/a.md and /p/b.md; the service cannot choose, remove one by hand"
+            }
+            MemoryFilesError::AdoptCollision(_) => "adopt refused: home-k exists",
+            MemoryFilesError::NotRegistered { .. } => {
+                "the project /w is not registered; its notes read as empty"
+            }
+            MemoryFilesError::Crashed(_) => "crashed after WriteAfter1",
+            MemoryFilesError::Io(_) => "Failed to write y: disk full",
+        };
+        assert_eq!(error.to_string(), want);
+        assert_eq!(format!("{error:#}"), want);
+        assert!(std::error::Error::source(&error).is_none(), "{want}");
+    }
+}
+
+/// M22's golden for `DuplicateId`'s list with one file and with none.
+#[test]
+fn a_duplicate_id_lists_one_file_or_none_as_it_did() {
+    let id = NoteId::parse("55e811b6-3220-4758-a47b-034bd1023f38").unwrap();
+    let one = MemoryFilesError::DuplicateId {
+        id,
+        files: vec![PathBuf::from("/p/a.md")],
+    };
+    assert_eq!(
+        one.to_string(),
+        "two note files share the id 55e811b6-3220-4758-a47b-034bd1023f38: /p/a.md; the service cannot choose, remove one by hand"
+    );
+    let none = MemoryFilesError::DuplicateId { id, files: vec![] };
+    assert_eq!(
+        none.to_string(),
+        "two note files share the id 55e811b6-3220-4758-a47b-034bd1023f38: ; the service cannot choose, remove one by hand"
+    );
+}
+
+/// M22's golden over paths that are not UTF-8: each byte that is not prints
+/// as U+FFFD, as `Path::display` showed it.
+#[cfg(unix)]
+#[test]
+fn a_memory_files_error_shows_a_non_utf8_path_as_path_display_does() {
+    use std::os::unix::ffi::OsStrExt;
+    let path = PathBuf::from(std::ffi::OsStr::from_bytes(b"/s/\xff"));
+    let id = NoteId::parse("55e811b6-3220-4758-a47b-034bd1023f38").unwrap();
+    let refused = MemoryFilesError::PathRefused {
+        component: path.clone(),
+        reason: "a symlink".to_string(),
+    };
+    assert_eq!(
+        refused.to_string(),
+        "memory partition refused: /s/\u{fffd} is a symlink"
+    );
+    let duplicate = MemoryFilesError::DuplicateId {
+        id,
+        files: vec![path.clone(), PathBuf::from("/p/b.md")],
+    };
+    assert_eq!(
+        duplicate.to_string(),
+        "two note files share the id 55e811b6-3220-4758-a47b-034bd1023f38: /s/\u{fffd} and /p/b.md; the service cannot choose, remove one by hand"
+    );
+    let unregistered = MemoryFilesError::NotRegistered { root: path };
+    assert_eq!(
+        unregistered.to_string(),
+        "the project /s/\u{fffd} is not registered; its notes read as empty"
+    );
+}
+
+/// Step 9's golden (M24): the reason as it is, under `{}` and `{:#}`, with no
+/// `source()` — written against the hand-written `Display` and kept on the
+/// derive.
+#[test]
+fn a_note_parse_error_prints_its_reason_whole_and_has_no_source() {
+    let error = NoteParseError {
+        reason: "no frontmatter \u{202e}x\u{200b}".to_string(),
+    };
+    let want = "no frontmatter \u{202e}x\u{200b}";
+    assert_eq!(error.to_string(), want);
+    assert_eq!(format!("{error:#}"), want);
+    assert!(std::error::Error::source(&error).is_none());
+}

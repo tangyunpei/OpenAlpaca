@@ -1,0 +1,16 @@
+{
+  "by_provider": [
+    {
+      "calls": 0,
+      "provider": "",
+      "tokens": 0,
+      "usd": 0
+    }
+  ],
+  "caps": {
+    "agent_max_cost_usd": 0,
+    "workflow_max_cost_usd": 0
+  },
+  "date": "",
+  "total_usd": 0
+}

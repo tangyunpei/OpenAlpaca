@@ -1,8 +1,8 @@
 use super::StreamCallback;
 use crate::orchestrator::working_state::{self, TranscriptLine, WorkingState, WriterConfig};
 use openalpaca_llm::{
-    ChatMessage, ChatRequest, ChatResponse, LlmProvider, LlmRouter, LlmRouterError,
-    RequestContext, RouterRequest, ThinkingConfig, ToolChoice, ToolDefinition,
+    ChatMessage, ChatRequest, ChatResponse, DynLlmProvider, FinishReason, LlmProvider, LlmRouter,
+    LlmRouterError, RequestContext, RouterRequest, ThinkingConfig, ToolChoice, ToolDefinition,
     context_management::ContextManagement,
 };
 use std::sync::Arc;
@@ -12,7 +12,7 @@ use std::time::Duration;
 /// Keeps the unified loop generic without dynamic dispatch overhead.
 pub(super) enum LlmBackend<'a> {
     /// Direct single-provider call (legacy/test path).
-    Direct { provider: &'a dyn LlmProvider },
+    Direct { provider: &'a DynLlmProvider<'a> },
     /// Router-based call with key rotation, fallback, cost tracking.
     Router {
         router: &'a LlmRouter,
@@ -28,8 +28,24 @@ pub(super) enum LlmBackend<'a> {
 impl<'a> LlmBackend<'a> {
     /// Complete a request via the appropriate backend.
     ///
-    /// When `stream_callback` is `Some` and the backend is Router, attempts
-    /// streaming first. On streaming failure, falls back to non-streaming.
+    /// When `stream_callback` is `Some` or `stream_rounds` is set and the
+    /// backend is Router, attempts streaming first, forwarding each event to
+    /// the callback when there is one and only collecting them when there is
+    /// none (a lead's or a subagent's round, OUTPUT-BUDGET). On streaming
+    /// failure, falls back to non-streaming.
+    /// A round streamed with no callback keeps what it had asked whole: no
+    /// 90 s idle clock of its own (its round bound and the HTTP read gap
+    /// bound a silent stream), and the router's empty-completion rule (M2)
+    /// for an answer with nothing in it that was not cut at its budget — a
+    /// cut one comes back `MaxTokens`, which the loop continues.
+    /// A streamed round is bounded by `max_stream_duration`, or by
+    /// `max_keyless_stream_duration` when the provider serving it needs no
+    /// key (a local model, LOCAL-CALL-HOUR); past it, the same fallback —
+    /// but a local round that ran its whole bound, or a local streaming
+    /// request that spent its whole read gap before its stream opened, is
+    /// not asked again of that provider: the ladder's other providers may
+    /// answer, else the call ends naming it (LOCAL-HOUR-NO-RETRY,
+    /// `LlmRouter::complete_elsewhere`).
     #[allow(clippy::too_many_arguments)]
     pub(super) async fn complete(
         &self,
@@ -41,9 +57,10 @@ impl<'a> LlmBackend<'a> {
         enable_caching: bool,
         thinking: Option<ThinkingConfig>,
         stream_callback: Option<&StreamCallback>,
+        stream_rounds: bool,
         max_stream_duration: Duration,
+        max_keyless_stream_duration: Duration,
         context_management: Option<ContextManagement>,
-        ephemeral_system_notice: Option<String>,
     ) -> Result<ChatResponse, LlmRouterError> {
         match self {
             LlmBackend::Direct { provider } => {
@@ -57,13 +74,17 @@ impl<'a> LlmBackend<'a> {
                     enable_caching,
                     thinking,
                     context_management,
-                    ephemeral_system_notice,
                 };
                 provider.chat(request).await.map_err(LlmRouterError::Llm)
             }
             LlmBackend::Router { router, context, fallback_models, .. } => {
-                // Try streaming if callback is set
-                if let Some(callback) = stream_callback {
+                // A local call that used its whole timeout on the streamed
+                // attempt: not asked again of its provider (LOCAL-HOUR-NO-RETRY).
+                let mut spent: Option<LlmRouterError> = None;
+                // Stream when there is a callback to forward to, or when
+                // the loop asks every round streamed with nothing to forward
+                // to (`LoopConfig::stream_rounds`).
+                if stream_callback.is_some() || stream_rounds {
                     let stream_request = RouterRequest {
                         model: model.clone(),
                         messages: Arc::clone(&messages),
@@ -77,15 +98,14 @@ impl<'a> LlmBackend<'a> {
                         thinking: thinking.clone(),
                         context_management: context_management.clone(),
                         fallback_models: fallback_models.clone(),
-                        ephemeral_system_notice: ephemeral_system_notice.clone(),
                     };
                     match router.complete_streaming(stream_request).await {
                         Ok(routed) => {
                             // Forward events to callback while collecting
                             use futures_util::StreamExt;
-                            let callback = Arc::clone(callback);
+                            let callback = stream_callback.map(Arc::clone);
                             let forwarding_stream = routed.stream.map(move |event| {
-                                if let Ok(ref e) = event {
+                                if let (Some(callback), Ok(e)) = (&callback, &event) {
                                     callback(e);
                                 }
                                 event
@@ -98,11 +118,30 @@ impl<'a> LlmBackend<'a> {
                             // Anthropic default and priced it against that
                             // model's rates two statements below.
                             let model_str = routed.model;
+                            // The router knows which provider serves the
+                            // round; a local one may run up to an hour.
+                            let requires_key = routed.requires_key;
+                            let round_bound = if requires_key {
+                                max_stream_duration
+                            } else {
+                                max_keyless_stream_duration
+                            };
+                            // A chat turn keeps `collect_stream`'s 90 s idle
+                            // clock; a round with nothing to forward to has
+                            // none, so a model reasoning with no text to
+                            // stream is not dropped and asked again whole
+                            // under the non-streaming timeout (OUTPUT-BUDGET).
+                            let idle = if stream_callback.is_some() {
+                                Some(openalpaca_llm::streaming::STREAM_IDLE_TIMEOUT)
+                            } else {
+                                None
+                            };
                             match tokio::time::timeout(
-                                max_stream_duration,
-                                openalpaca_llm::collect_stream(
+                                round_bound,
+                                openalpaca_llm::collect_stream_idle(
                                     Box::pin(forwarding_stream),
-                                    model_str,
+                                    model_str.clone(),
+                                    idle,
                                 ),
                             )
                             .await
@@ -115,6 +154,28 @@ impl<'a> LlmBackend<'a> {
                                         &response.model,
                                         &response.usage,
                                     ).await;
+                                    // *Rev 68*'s (a), kept: asked whole, a
+                                    // round with nothing in it — thinking
+                                    // alone, not cut — is the router's
+                                    // `EmptyCompletion` (M2, `retry.rs`), and
+                                    // streamed with nothing to forward to it
+                                    // still is, counted once and not asked
+                                    // again. A cut round is `MaxTokens`, which
+                                    // the loop continues; a chat turn streamed
+                                    // to its chat completes as it always has.
+                                    if stream_callback.is_none()
+                                        && response.finish_reason != FinishReason::MaxTokens
+                                        && let Some(empty) =
+                                            openalpaca_llm::error::empty_completion_error(&response)
+                                    {
+                                        tracing::warn!(
+                                            model = %response.model,
+                                            output_tokens = response.usage.output_tokens,
+                                            finish_reason = ?response.finish_reason,
+                                            "Model returned an empty completion"
+                                        );
+                                        return Err(LlmRouterError::Llm(empty));
+                                    }
                                     return Ok(response);
                                 }
                                 Ok(Err(e)) => {
@@ -125,11 +186,24 @@ impl<'a> LlmBackend<'a> {
                                 }
                                 Err(_elapsed) => {
                                     tracing::warn!(
-                                        max_stream_duration_secs = max_stream_duration.as_secs(),
+                                        stream_round_bound_secs = round_bound.as_secs(),
+                                        requires_key,
                                         "Stream wall-clock deadline exceeded, falling back to non-streaming"
                                     );
+                                    if !requires_key {
+                                        spent = Some(
+                                            router.local_call_timed_out(&model_str, round_bound),
+                                        );
+                                    }
                                 }
                             }
+                        }
+                        Err(e @ LlmRouterError::LocalCallTimedOut { .. }) => {
+                            tracing::warn!(
+                                error = %e,
+                                "Streamed local call used its whole timeout; not asked again without streaming"
+                            );
+                            spent = Some(e);
                         }
                         Err(e) => {
                             tracing::warn!(
@@ -154,9 +228,11 @@ impl<'a> LlmBackend<'a> {
                     thinking,
                     context_management,
                     fallback_models: fallback_models.clone(),
-                    ephemeral_system_notice,
                 };
-                router.complete(request).await
+                match spent {
+                    Some(spent) => router.complete_elsewhere(request, spent).await,
+                    None => router.complete(request).await,
+                }
             }
         }
     }
@@ -164,6 +240,32 @@ impl<'a> LlmBackend<'a> {
     /// Whether this backend supports transient-error retry with backoff.
     pub(super) fn supports_retry(&self) -> bool {
         matches!(self, LlmBackend::Router { .. })
+    }
+
+    /// What one answered request cost, priced as it was counted: on the
+    /// Router backend by the function `CostTracker::record_usage` and the
+    /// router's own recording use, on the response's model and its usage
+    /// (its prompt's length against a long-prompt threshold, its cache
+    /// reads and writes at its row's multiples), so the figure is the one
+    /// the cost caps counted for it; on the Direct backend the local
+    /// estimate `agent_cost` uses (USAGE-PER-REQUEST).
+    pub(super) fn request_cost(&self, response: &ChatResponse) -> f64 {
+        let usage = &response.usage;
+        match self {
+            LlmBackend::Direct { .. } => estimate_cost(
+                usage.input_tokens,
+                usage.output_tokens,
+                FALLBACK_INPUT_RATE,
+                FALLBACK_OUTPUT_RATE,
+            ),
+            LlmBackend::Router { router, .. } => router.cost_tracker.calculate_cost_with_cache(
+                &response.model,
+                usage.input_tokens,
+                usage.output_tokens,
+                usage.cache_creation_input_tokens,
+                usage.cache_read_input_tokens,
+            ),
+        }
     }
 
     /// Accumulated cost attributable to THIS agent (not the whole task).
@@ -216,7 +318,6 @@ fn estimate_cost(input_tokens: u32, output_tokens: u32, input_rate: f64, output_
 /// loop has a store (`WriterConfig::db`), as the turn end's is. A spent
 /// ceiling, a failed call and an answer that is not a state are all an
 /// `Err`: the pipeline falls back to its heuristic.
-#[async_trait::async_trait]
 impl<'a> crate::context_budget::compaction::Summarizer for LlmBackend<'a> {
     async fn summarize(
         &self,
@@ -298,7 +399,7 @@ mod tests {
             router: &router,
             context: RequestContext::default(),
             writer: WriterConfig {
-                model: Some("claude-haiku-4-5-20251001".into()),
+                model: Some("claude-haiku-5-5".into()),
                 ..WriterConfig::default()
             },
             fallback_models: Vec::new(),
@@ -321,7 +422,7 @@ mod tests {
             request.thinking
         );
         assert_eq!(request.max_tokens, Some(working_state::MAX_TOKENS));
-        assert_eq!(request.model.as_deref(), Some("claude-haiku-4-5-20251001"));
+        assert_eq!(request.model.as_deref(), Some("claude-haiku-5-5"));
         let user = &request.messages[1].content;
         assert!(
             user.contains(&serde_json::to_string(&previous).unwrap()),

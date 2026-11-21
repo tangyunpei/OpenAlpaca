@@ -66,6 +66,14 @@ pub struct ProviderConfig {
     /// [`LlmRuntimeConfig::request_timeout_for`](super::runtime::LlmRuntimeConfig::request_timeout_for).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub request_timeout_secs: Option<u64>,
+    /// `[providers.<name>.model_aliases]`: this provider's pins for the
+    /// model aliases, `fast`, `balanced` and `strong` (the subagent design's
+    /// M-3), each a model id that replaces the compiled one when a parent
+    /// runs on this provider. Kept as written, so a write of the file keeps
+    /// every key; [`ProviderDefaults::model_aliases`](super::runtime::ProviderDefaults::model_aliases)
+    /// holds the ones that name an alias, and the load warns of the rest.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub model_aliases: Option<HashMap<String, String>>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -100,8 +108,13 @@ pub struct ModelConfigEntry {
     pub supports_document: Option<bool>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub supports_reasoning: Option<bool>,
-    /// Whether the model can be given tools. Omitted means yes — see
-    /// [`crate::routing::model_registry::ModelInfo::supports_tools`].
+    /// Whether the model can be given tools. Omitted keeps the compiled
+    /// row's flag, else what discovery read, else yes (CAP-FLAGS;
+    /// `supports_image` likewise, else no; `supports_audio`,
+    /// `supports_document` and `supports_reasoning`, which no discovery
+    /// reads, the compiled row's, else no) — see
+    /// [`crate::routing::model_registry::ModelRegistry::reload_from_config`]
+    /// and [`crate::routing::model_registry::ModelInfo::supports_tools`].
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub supports_tools: Option<bool>,
 }

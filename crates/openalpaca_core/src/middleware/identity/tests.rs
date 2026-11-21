@@ -235,3 +235,28 @@ fn test_has_content() {
     };
     assert!(identity_document_has_content(&with_emoji));
 }
+
+/// Step 9's golden (M38): each variant's text byte for byte, under `{}` and
+/// `{:#}`, with no `source()` — written against the hand-written `Display`
+/// and kept on the derive. The `match` has no `_` arm, so a new variant does
+/// not compile without its row.
+#[test]
+fn every_identity_parse_error_prints_its_text_whole_and_has_no_source() {
+    let rows = [
+        IdentityParseError::MissingFrontmatter,
+        IdentityParseError::UnterminatedFrontmatter,
+        IdentityParseError::MissingField("ti\u{202e}tle\u{200b}"),
+    ];
+    for error in rows {
+        let want = match &error {
+            IdentityParseError::MissingFrontmatter => "Missing YAML frontmatter",
+            IdentityParseError::UnterminatedFrontmatter => "Unterminated YAML frontmatter",
+            IdentityParseError::MissingField(_) => {
+                "Missing frontmatter field 'ti\u{202e}tle\u{200b}'"
+            }
+        };
+        assert_eq!(error.to_string(), want);
+        assert_eq!(format!("{error:#}"), want);
+        assert!(std::error::Error::source(&error).is_none(), "{want}");
+    }
+}

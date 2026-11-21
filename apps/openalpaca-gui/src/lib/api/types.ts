@@ -158,13 +158,6 @@ export interface AttachmentRef {
   caption?: string;
 }
 
-export interface ToolConfirmation {
-  request_id: string;
-  tool_name: string;
-  tool_arguments: unknown;
-  status: "pending" | "approved" | "denied" | "expired";
-}
-
 /**
  * One `role='artifact'` link on a stored message (GAP-23, closed): a file the
  * message's *run* produced, as the daemon resolves it — the id the Library
@@ -218,7 +211,6 @@ export interface ChatMessage {
    */
   content_json?: string | null;
   display_text?: string | null;
-  confirmation?: ToolConfirmation;
   /**
    * The run this message started (a delegating turn) or reported on (a
    * completion report) — migration 038's column. `null` for ordinary chat.
@@ -427,6 +419,12 @@ export interface FileUploadResponse {
 export interface FileOpenResponse {
   id: string;
   status: "opened";
+}
+
+/** `POST /v1/files/{id}/reveal` (Q06): the id and `revealed`, never a path. */
+export interface FileRevealResponse {
+  id: string;
+  status: "revealed";
 }
 
 // ── LLM settings, keys, models ──────────────────────────────────────────────
@@ -722,8 +720,14 @@ export interface AgentTemplate {
   singleton: boolean;
   capabilities: string[];
   denied_capabilities: string[];
-  temperature: number;
+  /** Absent when the template sets none; accepted and not sent to a model. */
+  temperature?: number;
   verbosity: string;
+  /**
+   * The template's `model:` as written: `inherit`, an alias (`fast`,
+   * `balanced`, `strong`) or a model id; absent means `inherit` (C8). A
+   * plugin's template runs on its plugin's own model whatever it says (M-7d).
+   */
   model?: string;
   fallback_models: string[];
   max_tool_calls?: number;
@@ -746,6 +750,61 @@ export interface AgentTemplate {
    * daemon actually counted rather than assuming.
    */
   window: string;
+  /**
+   * `"ready"`; `"withheld"` — a file in `config/agents` holds the id and
+   * does not parse; or `"disabled"` — a file there holds the id and says
+   * `disabled: true`, which switches the template off (subagent design §2.4
+   * L-4a). Absent from a daemon older than the field, read as ready.
+   */
+  state?: "ready" | "withheld" | "disabled";
+  /**
+   * The file the template is read from — or that withholds it or switches
+   * it off — else null (a built-in or a plugin's template).
+   */
+  path?: string | null;
+  /**
+   * Where the template comes from (subagent design §2.7 R-1): built into
+   * the daemon, a file in `config/agents`, or a plugin. This and the four
+   * fields after it are absent from a daemon older than them, which the
+   * row reads as nothing to say.
+   */
+  source?: "bundled" | "file" | "plugin";
+  /** The plugin's id for a plugin's template, else null. */
+  plugin?: string | null;
+  /** A file of the person's stands over the built-in template of this id. */
+  overrides_bundled?: boolean;
+  /** Every definition of this id that does not run. */
+  not_used?: NotUsedEntry[];
+  /**
+   * What the daemon found worth saying about the file: why it is withheld,
+   * a confirmation list naming no tool (W-1).
+   */
+  warnings?: string[];
+}
+
+/**
+ * A definition of a template's or a skill's id that does not run (subagent
+ * design §2.7 R-1, R-2): the built-in one under a file of the person's, an
+ * earlier build's unedited copy set aside, a second file of the id, a file
+ * that does not parse, or a plugin's template refused the id.
+ */
+export interface NotUsedEntry {
+  source: "bundled" | "file" | "plugin";
+  path: string | null;
+  plugin: string | null;
+  reason:
+    | "unedited_copy"
+    | "overridden"
+    | "duplicate"
+    | "does_not_parse"
+    | "plugin_refused";
+  /** For an unedited copy: this build's version or an earlier one. */
+  version: "current" | "earlier" | null;
+  /**
+   * For an unedited copy the Installation Manual's step 7 or 8 made (the
+   * project's own edit, counted as unedited — V-2a).
+   */
+  edit: "manual_step_7" | "manual_step_8" | null;
 }
 
 export interface AgentInstance {
@@ -796,12 +855,19 @@ export interface AgentActionResponse {
 
 export interface AgentConfigFile {
   agent: { id: string; name: string; description: string; icon?: string };
-  skills: { assigned: string[]; denied?: string[] };
+  /**
+   * The template's capability grant, as `AgentConfigFile` serializes it
+   * (`capabilities`, renamed from `skills` in the daemon long ago; the
+   * API contract's sample found the old name here, API-CONTRACT).
+   */
+  capabilities: { assigned: string[]; denied?: string[] | null };
   preset: { persona: string; temperature?: number; verbosity?: string };
   constraints?: {
     max_tool_calls?: number;
     timeout_seconds?: number;
     max_cost_per_task?: number;
+    /** The template's `max_rounds`, kept through a set (AGENT-SETS). */
+    max_rounds?: number;
     require_confirmation_for?: string[];
     allowed_capabilities?: string[];
     denied_capabilities?: string[];
@@ -855,8 +921,9 @@ export interface DeclaredContributions {
   types: Record<string, boolean>;
   /**
    * What the manifest holds that nothing acts on — a key OpenAlpaca does not
-   * read, `types.connector` / `types.provider` while their bridges are
-   * unwired (N-PLUG-2) — in the daemon's words, a key's hidden characters
+   * read, `types.connector` while its bridge is unwired, or `types.provider`,
+   * whose plugin provider type is removed (N-PLUG-2, M86) — in the daemon's
+   * words, a key's hidden characters
    * already shown as `<U+XXXX>`. Standing, unlike the row's per-call
    * `warnings`: the row awaiting consent draws them before Approve. Absent
    * from a daemon built before them.
@@ -937,8 +1004,9 @@ export interface ManifestSummary {
   sensitive_config_keys: string[];
   /**
    * What the manifest declares that OpenAlpaca will not act on — a key it
-   * does not read, `types.connector` / `types.provider` while their bridges
-   * are unwired (N-PLUG-2). Warnings, never refusals. Absent from a daemon
+   * does not read, `types.connector` while its bridge is unwired, or
+   * `types.provider`, whose plugin provider type is removed (N-PLUG-2, M86).
+   * Warnings, never refusals. Absent from a daemon
    * built before them.
    */
   warnings?: string[];
@@ -1011,6 +1079,12 @@ export interface ToolCatalogEntry {
   invocations_today: number;
   version: string;
   author: string;
+  /**
+   * An MCP tool's declared `outputSchema`, as its server listed it (M14);
+   * `null` when it declared none and for every other source. Opaque: a JSON
+   * Schema the GUI does not read into.
+   */
+  output_schema: Record<string, unknown> | null;
 }
 
 /**
@@ -1063,8 +1137,21 @@ export interface SkillCatalogEntry {
   invocations_today: number;
   /** `null` when the frontmatter omits it — never an invented number. */
   version: string | null;
-  /** `plugin:<id>`, `file:project` or `file:user`. */
+  /**
+   * `plugin:<id>`, `file:bundled` (built into the daemon), `file:project`
+   * (a folder in `config/skills`) or `file:user`.
+   */
   author: string;
+  /**
+   * A folder in `config/skills` runs over the built-in skill of this id
+   * (subagent design §2.7 R-2). Absent from a daemon older than it.
+   */
+  overrides_bundled?: boolean;
+  /**
+   * The definitions of this id that do not run: the built-in skill under
+   * such a folder (`overridden`), or a folder set aside as an unedited copy.
+   */
+  not_used?: NotUsedEntry[];
 }
 
 /**
@@ -1083,7 +1170,8 @@ export interface SkillDiagnostic {
     | "slash_conflict"
     | "unknown_key"
     | "too_large"
-    | "no_tools";
+    | "no_tools"
+    | "stale_shipped_file";
   severity: "error" | "warning";
   path: string;
   /** The directory's name, lowercased — `null` for the skills directory itself. */
@@ -1135,6 +1223,8 @@ export interface HealthResponse {
   version: string;
   pid: number;
   instance_id: string;
+  /** The protocol the daemon speaks (Q04); absent from an older daemon. */
+  protocol?: number;
 }
 
 /**

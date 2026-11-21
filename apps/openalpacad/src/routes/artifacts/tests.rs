@@ -1284,3 +1284,28 @@ async fn a_result_file_replaced_by_a_link_out_of_the_project_is_not_served() {
     assert_eq!(error_code(&body), "CONTENT_FAILED");
     assert!(!body.to_string().contains("not the project's"), "{body}");
 }
+
+// ============================================================================
+// The API contract's samples (API-CONTRACT)
+// ============================================================================
+
+/// `/v1/artifacts*`'s JSON bodies, for the API contract's folder: a produced
+/// artifact in two versions, linked to a run.
+pub(crate) async fn contract_samples(out: &mut crate::contract::Samples) {
+    use crate::contract::ok_body;
+    let f = Fixture::new();
+    f.task("task-1", "A run");
+    let row = f.put(OWNER, "report", "one\n", Some("task-1"));
+    let edited = f.put(OWNER, "notes", "one\n", None);
+    f.put_again(OWNER, "notes", "one\ntwo\n", Some("a note"));
+    let body = ok_body(list_artifacts(&f.db, OWNER, ListArtifactsParams::default())).await;
+    out.response("get-artifacts", body);
+    let body = ok_body(get_artifact(&f.db, OWNER, &row.id)).await;
+    out.response("get-artifacts-id", body);
+    let body = ok_body(list_artifact_versions(&f.db, OWNER, &edited.id)).await;
+    out.response("get-artifacts-id-versions", body);
+    let body = ok_body(artifact_diff(&f.db, OWNER, &edited.id, 1, 2).await).await;
+    out.response("get-artifacts-id-diff", body);
+    let body = ok_body(pin_artifact(&f.db, OWNER, &row.id, true)).await;
+    out.response("put-artifacts-id-pin", body);
+}

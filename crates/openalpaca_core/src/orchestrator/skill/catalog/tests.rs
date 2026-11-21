@@ -527,18 +527,17 @@ Do something for skill {i}.
 
 #[tokio::test]
 async fn test_concurrent_register_plugin_skill() {
-    use openalpaca_api::plugin_traits::{PluginSkillExecutor, ToolCallbackExecutor};
+    use openalpaca_api::plugin_traits::{DynToolCallbackExecutor, PluginSkillExecutor};
 
     struct MockSkillExecutor {
         id: String,
     }
-    #[async_trait::async_trait]
     impl PluginSkillExecutor for MockSkillExecutor {
         async fn invoke(
             &self,
             _q: &str,
             _c: &serde_json::Value,
-            _t: &dyn ToolCallbackExecutor,
+            _t: &DynToolCallbackExecutor<'_>,
         ) -> Result<String, String> {
             Ok("ok".into())
         }
@@ -597,18 +596,17 @@ async fn test_concurrent_register_plugin_skill() {
 
 #[tokio::test]
 async fn test_plugin_skill_registration_lifecycle() {
-    use openalpaca_api::plugin_traits::{PluginSkillExecutor, ToolCallbackExecutor};
+    use openalpaca_api::plugin_traits::{DynToolCallbackExecutor, PluginSkillExecutor};
 
     struct MockSkillExecutor {
         id: String,
     }
-    #[async_trait::async_trait]
     impl PluginSkillExecutor for MockSkillExecutor {
         async fn invoke(
             &self,
             _q: &str,
             _c: &serde_json::Value,
-            _t: &dyn ToolCallbackExecutor,
+            _t: &DynToolCallbackExecutor<'_>,
         ) -> Result<String, String> {
             Ok("ok".into())
         }
@@ -692,13 +690,12 @@ async fn test_plugin_skill_registration_lifecycle() {
 
 struct UninstallStubExecutor;
 
-#[async_trait::async_trait]
 impl openalpaca_api::plugin_traits::PluginSkillExecutor for UninstallStubExecutor {
     async fn invoke(
         &self,
         _query: &str,
         _context: &serde_json::Value,
-        _tool_executor: &dyn openalpaca_api::plugin_traits::ToolCallbackExecutor,
+        _tool_executor: &openalpaca_api::plugin_traits::DynToolCallbackExecutor<'_>,
     ) -> Result<String, String> {
         Ok(String::new())
     }

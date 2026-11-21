@@ -29,7 +29,7 @@ fn keep_sigint_from_ending_the_repl() -> std::io::Result<()> {
 
 fn history_path() -> anyhow::Result<std::path::PathBuf> {
     // Machine state, not something the user edits — it lives under state/.
-    let dir = openalpaca_storage::store::state_dir()?;
+    let dir = openalpaca_app_support::paths::state_dir()?;
     Ok(dir.join("repl_history"))
 }
 
@@ -72,8 +72,8 @@ impl SessionUsage {
 }
 
 impl ReplSession {
-    pub fn new(target: ChatTarget) -> anyhow::Result<Self> {
-        let client = DaemonClient::connect()?;
+    pub async fn new(target: ChatTarget) -> anyhow::Result<Self> {
+        let client = DaemonClient::connect().await?;
         Ok(Self {
             client,
             context: ReplContext {
@@ -84,25 +84,34 @@ impl ReplSession {
         })
     }
 
-    fn reconnect(&mut self) -> anyhow::Result<()> {
-        self.client = DaemonClient::connect()?;
+    async fn reconnect(&mut self) -> anyhow::Result<()> {
+        self.client = DaemonClient::connect().await?;
         Ok(())
     }
 
     /// Try reconnect, print feedback, return true if reconnected.
-    fn try_reconnect(&mut self) -> bool {
-        match self.reconnect() {
+    async fn try_reconnect(&mut self) -> bool {
+        match self.reconnect().await {
             Ok(()) => {
                 eprintln!("{}", "(reconnected to daemon)".yellow());
                 true
             }
-            Err(_) => false,
+            // A daemon this CLI cannot use, or one still starting, is said
+            // in its own sentence (CLI-PROTOCOL); the caller then reports
+            // the error that sent it here.
+            Err(why) => {
+                eprintln!("{}", format!("(not reconnected: {why})").yellow());
+                false
+            }
         }
     }
 
     fn should_reconnect(err: &anyhow::Error) -> bool {
         if let Some(re) = err.downcast_ref::<reqwest::Error>() {
-            return re.is_connect() || re.is_timeout();
+            // A name that does not resolve is as dead as a refused port. reqwest
+            // 0.13.5 reports a failed lookup as a connect error too; `is_dns`
+            // says so without relying on that (M57).
+            return re.is_connect() || re.is_timeout() || re.is_dns();
         }
         let msg = err.to_string().to_lowercase();
         msg.contains("daemon is not running")
@@ -168,7 +177,7 @@ impl ReplSession {
         match commands::execute_line(line, &self.client, &mut self.context).await {
             Ok(()) => {}
             Err(e) if Self::should_reconnect(&e) => {
-                if self.try_reconnect() {
+                if self.try_reconnect().await {
                     if let Err(e2) =
                         commands::execute_line(line, &self.client, &mut self.context).await
                     {
@@ -195,7 +204,7 @@ impl ReplSession {
         let send_result = match chat_stream::send_chat(&self.client, content, &self.target).await {
             Ok(resp) => Ok(resp),
             Err(e) if Self::should_reconnect(&e) => {
-                if self.try_reconnect() {
+                if self.try_reconnect().await {
                     chat_stream::send_chat(&self.client, content, &self.target).await
                 } else {
                     Err(e)
@@ -217,7 +226,7 @@ impl ReplSession {
             match chat_stream::stream_chat(&self.client, &resp.stream_id, &opts).await {
                 Ok(result) => Ok(result),
                 Err(e) if Self::should_reconnect(&e) => {
-                    if self.try_reconnect() {
+                    if self.try_reconnect().await {
                         chat_stream::stream_chat(&self.client, &resp.stream_id, &opts).await
                     } else {
                         Err(e)
@@ -343,5 +352,62 @@ mod sigint_tests {
             stdout.contains(" 1 passed;"),
             "the child ran no test: {stdout}"
         );
+    }
+}
+
+#[cfg(test)]
+mod reconnect_tests {
+    use super::ReplSession;
+    use std::sync::Arc;
+
+    /// Answers every lookup with "no such name", in-process: the test's
+    /// request never leaves the machine, not even as a DNS query.
+    struct NoSuchName;
+
+    impl reqwest::dns::Resolve for NoSuchName {
+        fn resolve(&self, _name: reqwest::dns::Name) -> reqwest::dns::Resolving {
+            Box::pin(std::future::ready(Err(Box::new(std::io::Error::new(
+                std::io::ErrorKind::NotFound,
+                "no such name (test resolver)",
+            ))
+                as Box<dyn std::error::Error + Send + Sync>)))
+        }
+    }
+
+    /// A daemon address that does not resolve is a dead connection like a
+    /// refused one: the REPL reconnects, reading `discovery.json` again (M57).
+    #[tokio::test]
+    async fn an_address_that_does_not_resolve_is_a_reason_to_reconnect() {
+        let client = reqwest::Client::builder()
+            .no_proxy()
+            .dns_resolver(Arc::new(NoSuchName))
+            .build()
+            .unwrap();
+        let err = client
+            .get("http://openalpaca-test.invalid/v1/health")
+            .send()
+            .await
+            .unwrap_err();
+        assert!(err.is_dns(), "{err:?}");
+        assert!(ReplSession::should_reconnect(&anyhow::Error::from(err)));
+    }
+
+    /// A refused port, as before.
+    #[tokio::test]
+    async fn a_refused_port_is_a_reason_to_reconnect() {
+        let port = std::net::TcpListener::bind("127.0.0.1:0")
+            .unwrap()
+            .local_addr()
+            .unwrap()
+            .port();
+        let err = reqwest::Client::builder()
+            .no_proxy()
+            .build()
+            .unwrap()
+            .get(format!("http://127.0.0.1:{port}/v1/health"))
+            .send()
+            .await
+            .unwrap_err();
+        assert!(ReplSession::should_reconnect(&anyhow::Error::from(err)));
     }
 }

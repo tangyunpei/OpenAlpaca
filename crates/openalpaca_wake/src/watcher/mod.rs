@@ -1,17 +1,28 @@
 use anyhow::Result;
-use async_trait::async_trait;
 use tokio::sync::mpsc;
 
 use openalpaca_api::events::WakeEvent;
 
 pub mod filesystem;
 
-/// Trait for wake event watchers
-#[async_trait]
-pub trait EventWatcher: Send + Sync {
+/// The wake event watchers: a closed set, one variant per kind of watcher.
+pub enum EventWatcher {
+    /// Polls files and folders for changes.
+    Filesystem(filesystem::FilesystemWatcher),
+}
+
+impl EventWatcher {
     /// Start watching for events
-    async fn start(&self, tx: mpsc::Sender<WakeEvent>) -> Result<()>;
+    pub async fn start(&self, tx: mpsc::Sender<WakeEvent>) -> Result<()> {
+        match self {
+            Self::Filesystem(watcher) => watcher.start(tx).await,
+        }
+    }
 
     /// Stop watching
-    async fn stop(&self) -> Result<()>;
+    pub async fn stop(&self) -> Result<()> {
+        match self {
+            Self::Filesystem(watcher) => watcher.stop().await,
+        }
+    }
 }

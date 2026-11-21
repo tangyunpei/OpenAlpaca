@@ -29,7 +29,6 @@ fn a_failed_tool_result_keeps_its_marked_text_and_gains_no_field() {
         enable_caching: false,
         thinking: None,
         context_management: None,
-        ephemeral_system_notice: None,
     };
 
     let body = provider.build_request_body(&request);
@@ -60,7 +59,6 @@ fn test_request_format() {
         enable_caching: false,
         thinking: None,
         context_management: None,
-        ephemeral_system_notice: None,
     };
 
     let body = provider.build_request_body(&request);
@@ -73,6 +71,35 @@ fn test_request_format() {
     assert_eq!(messages[0]["content"], "You are helpful.");
     assert_eq!(messages[1]["role"], "user");
     assert_eq!(messages[1]["content"], "Hello");
+}
+
+/// OUTPUT-BUDGET (item 8): a Chat Completions request that names no
+/// `max_tokens` asks for 16,000 output tokens, to OpenAI's own API and to a
+/// server built without a key (a compatible server, Ollama, when its
+/// `[providers.ollama]` names no budget), where it asked for 4096.
+#[test]
+fn a_request_naming_no_budget_asks_for_sixteen_thousand_tokens() {
+    let request = ChatRequest {
+        messages: Arc::new(vec![ChatMessage::user("Hello")]),
+        tools: Arc::new(vec![]),
+        model: None,
+        temperature: None,
+        max_tokens: None,
+        tool_choice: None,
+        enable_caching: false,
+        thinking: None,
+        context_management: None,
+    };
+    for provider in [
+        OpenAiProvider::new("test-key".to_string(), None, None, None),
+        OpenAiProvider::new_without_auth(
+            "local".to_string(),
+            "http://127.0.0.1:1/v1".to_string(),
+            None,
+        ),
+    ] {
+        assert_eq!(provider.build_request_body(&request)["max_tokens"], 16_000);
+    }
 }
 
 #[test]
@@ -178,7 +205,6 @@ fn test_request_serialization_filters_empty_text_parts() {
         enable_caching: false,
         thinking: None,
         context_management: None,
-        ephemeral_system_notice: None,
     };
 
     let body = provider.build_request_body(&request);
@@ -208,7 +234,6 @@ fn test_request_serialization_empty_parts_get_placeholder() {
         enable_caching: false,
         thinking: None,
         context_management: None,
-        ephemeral_system_notice: None,
     };
 
     let body = provider.build_request_body(&request);
@@ -252,7 +277,6 @@ fn strict_tool_body(parameters: serde_json::Value) -> serde_json::Value {
         enable_caching: false,
         thinking: None,
         context_management: None,
-        ephemeral_system_notice: None,
     };
     let body = provider.build_request_body(&request);
     body["tools"].as_array().unwrap()[0]["function"].clone()
@@ -472,6 +496,94 @@ async fn test_openai_sse_cached_tokens_in_usage() {
     panic!("Expected a Usage event with cached_tokens");
 }
 
+// ── CACHE-WRITE: Chat Completions' write count ──────────────────────────────
+
+/// What `usage` costs at the compiled catalogue's rates.
+fn priced(model: &str, usage: &Usage) -> f64 {
+    crate::routing::CostTracker::new(crate::routing::ModelRegistry::with_defaults())
+        .calculate_cost_with_cache(
+            model,
+            usage.input_tokens,
+            usage.output_tokens,
+            usage.cache_creation_input_tokens,
+            usage.cache_read_input_tokens,
+        )
+}
+
+/// The prompt-caching guide's own example (developers.openai.com/api/docs/
+/// guides/prompt-caching, read 2026-11-14): 12,000 input tokens, 4,000 of
+/// them cached and 7,000 written, so 1,000 ordinary. On `gpt-6.1-sol` (its
+/// page: $2 input, $0.10 cached, $2.50 cache writes, $10 output) that is
+/// $0.002 + $0.0004 + $0.0175 + $0.01 for 1,000 output tokens.
+const GUIDE_INPUT: u32 = 12_000;
+const GUIDE_CACHED: u32 = 4_000;
+const GUIDE_WRITTEN: u32 = 7_000;
+const SOL_GUIDE_COST: f64 = 0.002 + 0.0004 + 0.0175 + 0.01;
+
+/// CACHE-WRITE: Chat Completions reports the write count as
+/// `usage.prompt_tokens_details.cache_write_tokens` ("The unadjusted number
+/// of prompt tokens written to cache", the chat completions reference,
+/// developers.openai.com/api/reference/resources/chat/subresources/
+/// completions/methods/create, read 2026-11-14); the arm reads it into
+/// `cache_creation_input_tokens`, and the row's write rate prices it. Red
+/// on the parent, which read only `cached_tokens`.
+#[test]
+fn a_chat_completions_answer_reads_its_cache_writes_and_is_priced_by_the_row() {
+    let provider = OpenAiProvider::new("test-key".to_string(), None, None, None);
+    let response = provider
+        .parse_response(serde_json::json!({
+            "id": "chatcmpl-cache",
+            "model": "gpt-6.1-sol",
+            "choices": [{
+                "index": 0,
+                "message": {"role": "assistant", "content": "Hi."},
+                "finish_reason": "stop"
+            }],
+            "usage": {
+                "prompt_tokens": GUIDE_INPUT,
+                "completion_tokens": 1000,
+                "total_tokens": GUIDE_INPUT + 1000,
+                "prompt_tokens_details": {
+                    "cached_tokens": GUIDE_CACHED,
+                    "cache_write_tokens": GUIDE_WRITTEN
+                }
+            }
+        }))
+        .unwrap();
+    assert_eq!(response.usage.input_tokens, GUIDE_INPUT);
+    assert_eq!(response.usage.cache_read_input_tokens, GUIDE_CACHED);
+    assert_eq!(response.usage.cache_creation_input_tokens, GUIDE_WRITTEN);
+    let cost = priced("gpt-6.1-sol", &response.usage);
+    assert!((cost - SOL_GUIDE_COST).abs() < 1e-12, "cost={cost}");
+}
+
+/// The same count on the stream's usage chunk ("an additional chunk ...
+/// before the `data: [DONE]` message", whose `usage` is the request's; the
+/// chat completions streaming-events reference lists the same
+/// `prompt_tokens_details.cache_write_tokens`, read 2026-11-14). Red on the
+/// parent.
+#[tokio::test]
+async fn a_streamed_chat_completions_usage_reads_its_cache_writes() {
+    let raw = format!(
+        "data: {{\"choices\":[{{\"index\":0,\"delta\":{{\"content\":\"Hi.\"}}}}]}}\n\n\
+         data: {{\"choices\":[{{\"index\":0,\"delta\":{{}},\"finish_reason\":\"stop\"}}]}}\n\n\
+         data: {{\"choices\":[],\"usage\":{{\"prompt_tokens\":{GUIDE_INPUT},\"completion_tokens\":1000,\"prompt_tokens_details\":{{\"cached_tokens\":{GUIDE_CACHED},\"cache_write_tokens\":{GUIDE_WRITTEN}}}}}}}\n\n\
+         data: [DONE]\n\n"
+    );
+    let byte_stream = futures_util::stream::iter(vec![Ok(bytes::Bytes::from(raw))]);
+    let response = crate::streaming::collect_stream(
+        Box::pin(parse_openai_sse(byte_stream)),
+        "gpt-6.1-sol".to_string(),
+    )
+    .await
+    .expect("the stream collects");
+    assert_eq!(response.usage.input_tokens, GUIDE_INPUT);
+    assert_eq!(response.usage.cache_read_input_tokens, GUIDE_CACHED);
+    assert_eq!(response.usage.cache_creation_input_tokens, GUIDE_WRITTEN);
+    let cost = priced("gpt-6.1-sol", &response.usage);
+    assert!((cost - SOL_GUIDE_COST).abs() < 1e-12, "cost={cost}");
+}
+
 #[test]
 fn test_openai_reasoning_effort_mapping() {
     let provider = OpenAiProvider::new("test-key".to_string(), None, None, None);
@@ -487,7 +599,6 @@ fn test_openai_reasoning_effort_mapping() {
         enable_caching: false,
         thinking: Some(ThinkingConfig::Enabled { budget_tokens: 4096 }),
         context_management: None,
-        ephemeral_system_notice: None,
     };
     let body = provider.build_request_body(&request);
     assert_eq!(body["reasoning_effort"], "high");
@@ -502,9 +613,10 @@ fn test_openai_reasoning_effort_mapping() {
         max_tokens: None,
         tool_choice: None,
         enable_caching: false,
-        thinking: Some(ThinkingConfig::Adaptive),
+        thinking: Some(ThinkingConfig::Adaptive {
+            display: ThinkingDisplay::ModelDefault,
+        }),
         context_management: None,
-        ephemeral_system_notice: None,
     };
     let body2 = provider.build_request_body(&request2);
     assert_eq!(body2["reasoning_effort"], "medium");
@@ -520,7 +632,6 @@ fn test_openai_reasoning_effort_mapping() {
         enable_caching: false,
         thinking: Some(ThinkingConfig::Disabled),
         context_management: None,
-        ephemeral_system_notice: None,
     };
     let body3 = provider.build_request_body(&request3);
     assert!(body3.get("reasoning_effort").is_none() || body3["reasoning_effort"].is_null());
@@ -545,7 +656,6 @@ fn test_disabled_thinking_asks_ollama_for_no_reasoning() {
         enable_caching: false,
         thinking: Some(ThinkingConfig::Disabled),
         context_management: None,
-        ephemeral_system_notice: None,
     };
 
     let ollama = build_request_body("qwen3.8:27b", 8192, OpenAiFlavour::Ollama, &request);
@@ -581,7 +691,6 @@ fn test_ollama_flavour_leaves_the_other_thinking_arms_alone() {
         enable_caching: false,
         thinking: None,
         context_management: None,
-        ephemeral_system_notice: None,
     };
 
     let body = build_request_body("qwen3.8:27b", 8192, OpenAiFlavour::Ollama, &request);
@@ -590,7 +699,9 @@ fn test_ollama_flavour_leaves_the_other_thinking_arms_alone() {
         "no thinking config means the model reasons as it normally would"
     );
 
-    request.thinking = Some(ThinkingConfig::Adaptive);
+    request.thinking = Some(ThinkingConfig::Adaptive {
+        display: ThinkingDisplay::Summarized,
+    });
     let body = build_request_body("qwen3.8:27b", 8192, OpenAiFlavour::Ollama, &request);
     assert_eq!(body["reasoning_effort"], "medium");
 
@@ -1079,6 +1190,8 @@ async fn the_captured_ollama_body_collects_into_a_tool_call_with_arguments() {
     assert_eq!(response.thinking.as_deref(), Some("The user"));
 }
 
+/// A kept budget notice (`ChatMessage::notice`) sent last goes as the tail
+/// system-role message of Chat Completions' `messages`.
 #[test]
 fn test_openai_ephemeral_notice_placement() {
     use crate::types::{ChatMessage, ChatRequest};
@@ -1088,6 +1201,7 @@ fn test_openai_ephemeral_notice_placement() {
         messages: Arc::new(vec![
             ChatMessage::system("real system"),
             ChatMessage::user("hello"),
+            ChatMessage::notice("[budget_notice]\nwatch out\n[/budget_notice]"),
         ]),
         tools: Arc::new(vec![]),
         model: None,
@@ -1097,7 +1211,6 @@ fn test_openai_ephemeral_notice_placement() {
         enable_caching: false,
         thinking: None,
         context_management: None,
-        ephemeral_system_notice: Some("[budget_notice]\nwatch out\n[/budget_notice]".to_string()),
     };
 
     let body =
@@ -1424,4 +1537,49 @@ async fn a_streamed_call_whose_arguments_arrive_as_an_object_keeps_them() {
         response.tool_calls[0].arguments,
         serde_json::json!({"path": "a"})
     );
+}
+
+/// MODELS-LATEST (the design's §4.9.5): the arm's model for a request that
+/// names none is a compiled row, `gpt-6-luna` (the deprecations page names
+/// it GPT-4o's replacement). Red on the parent's `gpt-4o`, which has none.
+#[test]
+fn the_arms_default_model_is_luna() {
+    assert_eq!(DEFAULT_MODEL, "gpt-6-luna");
+    assert!(
+        crate::routing::model_registry::ModelRegistry::with_defaults()
+            .get_model_info(DEFAULT_MODEL)
+            .is_some()
+    );
+}
+
+/// LLM-TEST-GUARD (pending-decisions *Rev 127* item 9, (b), taken
+/// *Rev 128*): the guard refuses only OpenAI's real hosts, read from the
+/// base's host whatever its scheme, case or trailing dot, and never a
+/// loopback, LAN or other OpenAI-compatible server. Pure: no call is made.
+#[cfg(not(feature = "live-eval"))]
+#[test]
+fn the_test_build_guard_refuses_only_openais_real_hosts() {
+    let refused = |base: &str| {
+        OpenAiProvider::new("k".to_string(), None, Some(base.to_string()), None)
+            .refuse_real_endpoint()
+            .is_err()
+    };
+    assert!(refused(DEFAULT_BASE_URL));
+    for host in OPENAI_API_HOSTS {
+        assert!(refused(&format!("https://{host}/v1")), "{host}");
+    }
+    assert!(refused("http://api.openai.com/v1"));
+    assert!(refused("https://API.OpenAI.com/v1"));
+    assert!(refused("https://api.openai.com./v1"));
+    for base in [
+        "http://127.0.0.1:1/v1",
+        "http://localhost:11434/v1",
+        "http://192.168.1.10:1234/v1",
+        "http://[::1]:8080/v1",
+        "https://gateway.example.com/openai/v1",
+        "https://api.openai.com.example.com/v1",
+        "not a url",
+    ] {
+        assert!(!refused(base), "{base}");
+    }
 }

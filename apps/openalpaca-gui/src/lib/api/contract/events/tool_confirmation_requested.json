@@ -1,0 +1,16 @@
+{
+  "agent_id": "",
+  "instance_id": "",
+  "lane_key": "",
+  "per_call": false,
+  "preview": "",
+  "request_id": "",
+  "stream_id": "",
+  "task_id": "",
+  "tool_arguments": {
+    "path": ""
+  },
+  "tool_name": "",
+  "ts": "",
+  "type": "tool_confirmation_requested"
+}

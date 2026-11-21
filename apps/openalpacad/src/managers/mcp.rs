@@ -38,6 +38,7 @@ use openalpaca_core::daemon_config::DaemonConfig;
 use openalpaca_core::events::SystemEvent;
 use openalpaca_core::orchestrator::skill_catalog::SkillCatalog;
 use openalpaca_core::tools::ToolRegistry;
+use openalpaca_core::tools::extensions::stderr::{self, looks_like_a_secret};
 use openalpaca_core::tools::extensions::{
     DependentScan, ExtensionError, ExtensionId, ExtensionKind, ExtensionLedger, ExtensionRecord,
     ExtensionState, ExtensionSupervisor, FailureReason, PendingScan, Transition, WithdrawalCause,
@@ -49,7 +50,7 @@ use openalpaca_core::tools::mcp::{
 };
 use openalpaca_mcp::{
     ConnectionEvent, ConnectionEventHandler, ConnectionSnapshot, Implementation, McpClient,
-    McpClientConfig, McpError, ProtocolMode, ServerChange, TransportKind,
+    McpClientConfig, McpError, ProtocolMode, ServerChange, SpawnTail, StderrTail, TransportKind,
 };
 use openalpaca_storage::hash::sha256_hex;
 use tokio::sync::mpsc::{UnboundedReceiver, unbounded_channel};
@@ -407,24 +408,6 @@ impl McpDeclaration {
     }
 }
 
-/// Does this `env` key name a credential? (R65.)
-///
-/// Deliberately a name test and deliberately coarse: it is the shape of the
-/// key, not the entropy of the value, that says *"the owner is about to hand
-/// the daemon a secret to write down"*. A false positive costs one `env_from`
-/// indirection, which is the shape this route wants anyway; a false negative
-/// costs a token in a config file and in five rotated backups.
-///
-/// It governs only what the **daemon writes**. A hand-authored `mcp.toml` may
-/// still carry literal `env` values — the parser reads them unchanged — because
-/// that file is the owner's, and this is about the daemon not becoming a
-/// secret-writing tool.
-fn looks_like_a_secret(key: &str) -> bool {
-    const MARKERS: [&str; 5] = ["TOKEN", "KEY", "SECRET", "PASSWORD", "CREDENTIAL"];
-    let upper = key.to_ascii_uppercase();
-    MARKERS.iter().any(|marker| upper.contains(marker))
-}
-
 /// Does this stdio `args` list hand the daemon a credential to write down?
 /// (R82.)
 ///
@@ -597,6 +580,11 @@ pub struct McpSupervisor {
     /// construction — there is no window in which a supervisor exists without
     /// the handles its dependent scan needs.
     dependents: Dependents,
+    /// Variables a test has every stdio child inherit as if they were in the
+    /// daemon's own environment, which a test may not change
+    /// ([`Self::inherit_for_tests`]).
+    #[cfg(test)]
+    inherited_for_tests: StdMutex<Vec<(String, String)>>,
 }
 
 /// The two registries T1 step 3 intersects the withdrawn set with, plus the
@@ -648,7 +636,37 @@ impl McpSupervisor {
             reaper_rx: StdMutex::new(Some(rx)),
             readers_running: Arc::new(AtomicUsize::new(0)),
             dependents,
+            #[cfg(test)]
+            inherited_for_tests: StdMutex::new(Vec::new()),
         })
+    }
+
+    /// The environment every stdio child inherits: the daemon's own (N-MCP-5
+    /// masks a failed server's stderr with the values whose names look like
+    /// secrets).
+    #[cfg(not(test))]
+    fn inherited_env(&self) -> Vec<(String, String)> {
+        std::env::vars_os()
+            .filter_map(|(name, value)| Some((name.into_string().ok()?, value.into_string().ok()?)))
+            .collect()
+    }
+
+    /// A test build's stand-in: only what a test set
+    /// ([`Self::inherit_for_tests`]), never the machine's environment, so no
+    /// developer's credential enters a test's mask set.
+    #[cfg(test)]
+    fn inherited_env(&self) -> Vec<(String, String)> {
+        self.inherited_for_tests.lock_or_recover().clone()
+    }
+
+    /// Have every later stdio child inherit `name=value` as if the daemon's
+    /// own environment held it — set on the child's command, never on the
+    /// test process's environment.
+    #[cfg(test)]
+    pub(crate) fn inherit_for_tests(&self, name: &str, value: &str) {
+        self.inherited_for_tests
+            .lock_or_recover()
+            .push((name.to_string(), value.to_string()));
     }
 
     /// **T1 step 3's** reader.
@@ -1126,7 +1144,9 @@ impl McpSupervisor {
 
         // E2 — re-resolve `bearer_env`/`api_key_env` from the process env, so a
         // rotated credential takes effect here without a restart.
-        let client_config = match build_client_config(name, cfg, defaults) {
+        #[allow(unused_mut)] // only a test build adds to it
+        let mut client_config = match build_client_config(name, cfg, defaults, self.inherited_env())
+        {
             Ok(c) => c,
             Err(missing) => {
                 return self.fail(
@@ -1139,6 +1159,16 @@ impl McpSupervisor {
             }
         };
         let request_timeout = client_config.request_timeout;
+        // A test's inherited pairs join the stub's command here, after the
+        // tail's mask set was built, so they are masked only by the
+        // inherited path, never by the `env` path.
+        #[cfg(test)]
+        if let TransportKind::Stdio { env, .. } = &mut client_config.transport {
+            env.extend(self.inherited_for_tests.lock_or_recover().iter().cloned());
+        }
+        // The caller's handle on each spawn's stderr: a connect that fails
+        // drops the client, and the tail is still here (N-MCP-5).
+        let stderr = client_config.stderr_tail.clone();
 
         let connect_timeout = Duration::from_secs(
             cfg.connect_timeout_secs()
@@ -1159,24 +1189,25 @@ impl McpSupervisor {
             );
         }
         let connect_started = std::time::Instant::now();
-        let client = match tokio::time::timeout(connect_timeout, McpClient::connect(client_config))
-            .await
-        {
-            Ok(Ok(client)) => Arc::new(client),
-            Ok(Err(e)) => {
-                // `connect` itself failed, so nothing was built and there is
-                // nothing to unwind.
-                let reason = classify_bringup_failure(&e);
-                return self.fail(&ext, reason, format!("connect: {e}"));
-            }
-            Err(_elapsed) => {
-                return self.fail(
-                    &ext,
-                    FailureReason::Unreachable,
-                    format!("connect timed out after {connect_timeout:?}"),
-                );
-            }
-        };
+        let client =
+            match tokio::time::timeout(connect_timeout, McpClient::connect(client_config)).await {
+                Ok(Ok(client)) => Arc::new(client),
+                Ok(Err(e)) => {
+                    // `connect` itself failed, so nothing was built and there is
+                    // nothing to unwind.
+                    let reason = classify_bringup_failure(&e);
+                    let detail = stderr::detail_with_stderr(format!("connect: {e}"), &stderr).await;
+                    return self.fail(&ext, reason, detail);
+                }
+                Err(_elapsed) => {
+                    let detail = stderr::detail_with_stderr(
+                        format!("connect timed out after {connect_timeout:?}"),
+                        &stderr,
+                    )
+                    .await;
+                    return self.fail(&ext, FailureReason::Unreachable, detail);
+                }
+            };
 
         // The row's `version` (§8) is this incarnation's handshake, kept only
         // as long as the handle: `Some` when the server told us one, `None`
@@ -1208,7 +1239,8 @@ impl McpSupervisor {
                 // E-FAIL — this failed *after* connect, so a handle exists.
                 let reason = self.classify_after_connect(&client, &e).await;
                 self.tear_down_bringup(name, &client, request_timeout).await;
-                return self.fail(&ext, reason, format!("list_tools: {e}"));
+                let detail = stderr::detail_with_stderr(format!("list_tools: {e}"), &stderr).await;
+                return self.fail(&ext, reason, detail);
             }
         };
 
@@ -1246,11 +1278,12 @@ impl McpSupervisor {
                         self.tool_registry.remove(published);
                     }
                     self.tear_down_bringup(name, &client, request_timeout).await;
-                    return self.fail(
-                        &ext,
-                        FailureReason::Unreachable,
+                    let detail = stderr::detail_with_stderr(
                         format!("tool '{tool_name}' could not be registered: {e}"),
-                    );
+                        &stderr,
+                    )
+                    .await;
+                    return self.fail(&ext, FailureReason::Unreachable, detail);
                 }
             }
         }
@@ -1374,23 +1407,22 @@ impl McpSupervisor {
     /// then reports no exit at all. An exit during the bring-up itself, before
     /// E5 commits `Enabled`, changes nothing either: the next call's pre-send
     /// reconnect finds it, as before.
+    ///
+    /// **N-MCP-5:** an exit's detail ends with the exited process's stderr
+    /// tail, so `mark_exited` waits for that stderr to end, at most
+    /// [`openalpaca_mcp::STDERR_SETTLE`] — here, on a task of its own, never
+    /// in the process's wait (which would hold up rmcp's close, and a call in
+    /// that gap would miss its pre-send reconnect). The events stay in order:
+    /// a reconnect reported while an exit is still waiting goes after it, so a
+    /// late exit never turns a recovered row `Failed`; with none waiting, it
+    /// is applied at once, as before.
     fn watch_connection(&self, ext: &ExtensionId, generation: u64, client: &McpClient) {
-        let ledger = Arc::clone(&self.ledger);
-        let id = ext.clone();
-        let handler: ConnectionEventHandler = Arc::new(move |event| match event {
-            ConnectionEvent::Exited(status) => {
-                ledger.mark_exited(
-                    &id,
-                    generation,
-                    format!(
-                        "the server's process exited ({status}); the next call starts it again"
-                    ),
-                );
-            }
-            ConnectionEvent::Reconnected => {
-                ledger.mark_recovered(&id, generation);
-            }
-        });
+        let handler = connection_handler(
+            Arc::clone(&self.ledger),
+            ext.clone(),
+            generation,
+            client.stderr_tail().clone(),
+        );
         if !client.on_connection_event(handler) {
             tracing::debug!(extension = %ext, "MCP connection receiver already installed");
         }
@@ -1477,6 +1509,7 @@ impl McpSupervisor {
                         ConnectionSnapshot::Failed { reason } => reason,
                         _ => e.to_string(),
                     };
+                    let detail = stderr::detail_with_stderr(detail, client.stderr_tail()).await;
                     self.ledger.mark_failed(ext, generation, reason, detail);
                 }
                 return ToolListRefresh::FetchFailed;
@@ -2120,7 +2153,6 @@ impl Drop for ReaderGuard {
 // The trait
 // ============================================================================
 
-#[async_trait::async_trait]
 impl ExtensionSupervisor for McpSupervisor {
     /// W (`enabled = true`) then E0–E5. `200` even when bring-up fails: the
     /// write succeeded and the intent is durable; the connection outcome is a
@@ -2137,7 +2169,7 @@ impl ExtensionSupervisor for McpSupervisor {
         // W — skipped when the bit already matches (§8: "W is skipped — the bit
         // is already `true`"), which is also what keeps a redundant enable off
         // a read-only file.
-        if self.ledger.record(id).map(|r| r.disposition.0) != Some(true) {
+        if self.ledger.record(id).is_none_or(|r| !r.disposition.0) {
             self.write_bit(name, true)?;
         }
         self.ledger.set_disposition(id, true);
@@ -2173,7 +2205,7 @@ impl ExtensionSupervisor for McpSupervisor {
         // Symmetric with `enable`: W is skipped when the bit is already
         // `false`, so a redundant disable against a read-only file is the
         // `200`-current no-op §3.3.1 promises, not a `500`.
-        if self.ledger.record(id).map(|r| r.disposition.0) != Some(false) {
+        if self.ledger.record(id).is_none_or(|r| r.disposition.0) {
             self.write_bit(name, false)?;
         }
         if self.ledger.record(id).is_none() {
@@ -2369,10 +2401,15 @@ fn elapsed_ms(started: std::time::Instant) -> u64 {
     u64::try_from(started.elapsed().as_millis()).unwrap_or(u64::MAX)
 }
 
+/// `inherited` is the environment every stdio child inherits (the daemon's):
+/// a failed server's stderr is masked with the values of its variables whose
+/// names pass [`looks_like_a_secret`], beside the ones this load resolves —
+/// read here, at the load, which is when every spawn of the load reads it.
 fn build_client_config(
     server_name: &str,
     server_cfg: &McpServerConfig,
     defaults: &McpDefaults,
+    inherited: Vec<(String, String)>,
 ) -> Result<McpClientConfig, MissingEnv> {
     let request_timeout = Duration::from_secs(
         server_cfg
@@ -2380,6 +2417,7 @@ fn build_client_config(
             .unwrap_or(defaults.request_timeout_secs),
     );
 
+    let mut stderr_tail = StderrTail::default();
     let transport = match server_cfg {
         McpServerConfig::Stdio {
             command,
@@ -2388,14 +2426,18 @@ fn build_client_config(
             env_from,
             cwd,
             ..
-        } => TransportKind::Stdio {
-            command: command.clone(),
-            args: args.clone(),
+        } => {
             // Re-resolved on every load, exactly like `bearer_env` below, so a
             // rotated credential takes effect without a restart (§3.3 E2).
-            env: resolve_stdio_env(server_name, env, env_from)?,
-            cwd: cwd.clone(),
-        },
+            let env = resolve_stdio_env(server_name, env, env_from)?;
+            stderr_tail = StderrTail::new(stderr_secrets(&env, args, inherited));
+            TransportKind::Stdio {
+                command: command.clone(),
+                args: args.clone(),
+                env,
+                cwd: cwd.clone(),
+            }
+        }
         McpServerConfig::Http {
             url,
             auth,
@@ -2423,7 +2465,43 @@ fn build_client_config(
         request_timeout,
         max_reconnect_attempts: defaults.max_reconnect_attempts,
         reconnect_backoff_ms: defaults.reconnect_backoff_ms,
+        stderr_tail,
     })
+}
+
+/// What a stdio server's stderr tail is masked with (N-MCP-5, D20 (d)): every
+/// value of its resolved `env` (the literal entries and the `env_from` ones),
+/// the value of every credential-bearing argument (the rule
+/// [`args_carry_a_credential`] reads: `--api-key=<value>`, or `--api-key
+/// <value>`), and the value of every inherited variable whose name passes
+/// [`looks_like_a_secret`].
+fn stderr_secrets(
+    env: &HashMap<String, String>,
+    args: &[String],
+    inherited: Vec<(String, String)>,
+) -> Vec<String> {
+    let mut secrets: Vec<String> = env.values().cloned().collect();
+    let mut args_iter = args.iter().peekable();
+    while let Some(arg) = args_iter.next() {
+        let named = arg.trim_start_matches('-');
+        match named.split_once('=') {
+            Some((name, value)) if looks_like_a_secret(name) => secrets.push(value.to_string()),
+            Some(_) => {}
+            None if arg.starts_with('-') && looks_like_a_secret(named) => {
+                if let Some(value) = args_iter.peek() {
+                    secrets.push((*value).clone());
+                }
+            }
+            None => {}
+        }
+    }
+    secrets.extend(
+        inherited
+            .into_iter()
+            .filter(|(name, _)| looks_like_a_secret(name))
+            .map(|(_, value)| value),
+    );
+    secrets
 }
 
 /// The child's environment: the literal `env` entries, plus one entry per
@@ -2543,6 +2621,72 @@ impl<T> LockOrRecover<T> for StdMutex<T> {
     fn lock_or_recover(&self) -> std::sync::MutexGuard<'_, T> {
         self.lock().unwrap_or_else(|p| p.into_inner())
     }
+}
+
+/// [`McpSupervisor::watch_connection`]'s receiver for one load's client, and
+/// the task that applies an exit once its stderr has settled (N-MCP-5). The
+/// task ends with the handler, which the client holds; a handler the client
+/// refuses ends it at once.
+fn connection_handler(
+    ledger: Arc<ExtensionLedger>,
+    id: ExtensionId,
+    generation: u64,
+    tail: StderrTail,
+) -> ConnectionEventHandler {
+    enum Observed {
+        Exited(std::process::ExitStatus, SpawnTail),
+        Reconnected,
+    }
+    let (tx, mut rx) = unbounded_channel::<Observed>();
+    // Exits whose `mark_exited` has not run yet.
+    let pending = Arc::new(StdMutex::new(0usize));
+    let handler: ConnectionEventHandler = {
+        let ledger = Arc::clone(&ledger);
+        let id = id.clone();
+        let tail = tail.clone();
+        let pending = Arc::clone(&pending);
+        Arc::new(move |event| {
+            let mut waiting = pending.lock_or_recover();
+            match event {
+                ConnectionEvent::Exited(status) => {
+                    // The exited process's tail, taken now: a respawn starts
+                    // a fresh one.
+                    if tx.send(Observed::Exited(status, tail.current())).is_ok() {
+                        *waiting += 1;
+                    }
+                }
+                ConnectionEvent::Reconnected if *waiting == 0 => {
+                    ledger.mark_recovered(&id, generation);
+                }
+                ConnectionEvent::Reconnected => {
+                    let _ = tx.send(Observed::Reconnected);
+                }
+            }
+        })
+    };
+    tokio::spawn(async move {
+        while let Some(observed) = rx.recv().await {
+            match observed {
+                Observed::Exited(status, spawn) => {
+                    let detail = stderr::detail_with_spawn_stderr(
+                        format!(
+                            "the server's process exited ({status}); the next call starts it again"
+                        ),
+                        &spawn,
+                        tail.secrets(),
+                    )
+                    .await;
+                    let mut waiting = pending.lock_or_recover();
+                    ledger.mark_exited(&id, generation, detail);
+                    *waiting = waiting.saturating_sub(1);
+                }
+                Observed::Reconnected => {
+                    ledger.mark_recovered(&id, generation);
+                }
+            }
+        }
+    });
+    handler
 }
 
 #[cfg(test)]

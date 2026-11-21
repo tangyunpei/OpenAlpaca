@@ -1,4 +1,3 @@
-use async_trait::async_trait;
 use openalpaca_connectors::{Connector, ConnectorError};
 use serde_json::Value;
 use tracing::{debug, warn};
@@ -46,7 +45,6 @@ impl PluginConnector {
     }
 }
 
-#[async_trait]
 impl Connector for PluginConnector {
     fn name(&self) -> &str {
         &self.platform

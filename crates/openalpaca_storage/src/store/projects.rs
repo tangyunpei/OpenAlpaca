@@ -22,6 +22,7 @@ use std::str::FromStr;
 use std::sync::{Mutex, MutexGuard};
 
 use anyhow::{Context, Result, bail};
+use openalpaca_app_support::paths;
 use unicode_normalization::UnicodeNormalization;
 use unicode_normalization::char::is_combining_mark;
 use uuid::Uuid;
@@ -204,7 +205,7 @@ pub fn canonical_root(path: &Path) -> Result<PathBuf> {
 /// it. `false` when there is no usable home root or `root` is relative: a
 /// question, never a reason to fail.
 pub fn overlaps_home_store(root: &Path) -> bool {
-    let Ok(home) = super::home_root() else {
+    let Ok(home) = paths::home_root() else {
         return false;
     };
     overlaps_home_store_in(&home, root)
@@ -305,24 +306,41 @@ impl Project {
 /// Why a project operation was refused — returned **inside** `anyhow::Error`
 /// (the `ArtifactError` convention, `artifacts/mod.rs`), recovered with
 /// `downcast_ref`. `Display` is one sentence a person can act on.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
 pub enum ProjectError {
     /// R12: a root with no folder under `projects/`. `store_root` returns it (S3).
+    #[error("{root} is not a project OpenAlpaca knows: no folder under projects/ records it")]
     NotRegistered { root: String },
     /// R13: the path is the home store, inside it, or contains it.
+    #[error(
+        "{path} is, contains or lies inside the OpenAlpaca home store, so it cannot be a \
+         project. Name the project directory itself"
+    )]
     IsHome { path: String },
     /// The path does not exist or is not a directory (register, choose,
     /// re-point target).
+    #[error("{path} is not a directory. Create it first, or name the folder the project is in now")]
     NotADirectory { path: String },
     /// ST-20: the re-point target is already a project, or one of the five
     /// path columns names it.
+    #[error(
+        "{path} is already a project of its own, or OpenAlpaca's records already name it. \
+         Re-pointing onto it would merge two projects: delete that project's data first, \
+         or re-point onto another path"
+    )]
     Exists { path: String },
     /// ST-20 against a re-point that has not finished: the target is that
     /// project's new root or its old one. The same code as [`Self::Exists`];
     /// its sentence names the start of the daemon that finishes the re-point,
     /// since deleting that project's data is refused until then (residual X7).
+    #[error(
+        "{path} is either path of another project's re-point that has not finished; the \
+         next start of the daemon finishes that re-point. Re-pointing onto it would merge \
+         two projects: re-point onto another path"
+    )]
     RepointUnfinished { path: String },
     /// A re-point onto the path the project already has.
+    #[error("{path} is already where the project is")]
     SamePath { path: String },
 }
 
@@ -338,41 +356,6 @@ impl ProjectError {
         }
     }
 }
-
-impl fmt::Display for ProjectError {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            Self::NotRegistered { root } => write!(
-                f,
-                "{root} is not a project OpenAlpaca knows: no folder under projects/ records it"
-            ),
-            Self::IsHome { path } => write!(
-                f,
-                "{path} is, contains or lies inside the OpenAlpaca home store, so it cannot be a \
-                 project. Name the project directory itself"
-            ),
-            Self::NotADirectory { path } => write!(
-                f,
-                "{path} is not a directory. Create it first, or name the folder the project is in now"
-            ),
-            Self::Exists { path } => write!(
-                f,
-                "{path} is already a project of its own, or OpenAlpaca's records already name it. \
-                 Re-pointing onto it would merge two projects: delete that project's data first, \
-                 or re-point onto another path"
-            ),
-            Self::RepointUnfinished { path } => write!(
-                f,
-                "{path} is either path of another project's re-point that has not finished; the \
-                 next start of the daemon finishes that re-point. Re-pointing onto it would merge \
-                 two projects: re-point onto another path"
-            ),
-            Self::SamePath { path } => write!(f, "{path} is already where the project is"),
-        }
-    }
-}
-
-impl std::error::Error for ProjectError {}
 
 /// Whether `e`, anywhere in its chain, is [`ProjectError::NotRegistered`] —
 /// how a reader learns after the fact that a root is unregistered (R12).
@@ -392,7 +375,7 @@ pub fn is_not_registered(e: &anyhow::Error) -> bool {
 
 /// `home_root()/projects`. A path query: creates nothing.
 pub fn projects_dir() -> Result<PathBuf> {
-    Ok(projects_dir_in(&super::home_root()?))
+    Ok(projects_dir_in(&paths::home_root()?))
 }
 
 /// `home/projects`, for the home store `home` as [`register`] resolved it
@@ -419,7 +402,7 @@ fn projects_dir_in(home: &Path) -> PathBuf {
 /// folder per process (R11). An error is a relative `root`, no home root, or
 /// a folder that cannot be resolved.
 pub fn lookup(root: &Path) -> Result<Option<Project>> {
-    lookup_in(&super::home_root()?, root)
+    lookup_in(&paths::home_root()?, root)
 }
 
 /// [`lookup`] under the home store `home`, as [`register`] resolved it once.
@@ -696,7 +679,7 @@ fn first_warning(key: String) -> bool {
 /// folder — are both left out with one WARN (R11): neither can be told from
 /// the other, so neither is opened, and neither is deleted.
 pub fn list() -> Result<Vec<Project>> {
-    list_in(&super::home_root()?)
+    list_in(&paths::home_root()?)
 }
 
 /// [`list`] under the home store `home`, as [`register`] resolved it once.
@@ -839,10 +822,10 @@ fn unguarded_home(
 /// the variable in between — so a check that passed would no longer describe
 /// the store written to (the S1 review's I1).
 fn register_home() -> Result<PathBuf> {
-    let set = std::env::var_os(super::HOME_STORE_ENV);
-    let user_home = directories::BaseDirs::new().map(|b| b.home_dir().to_path_buf());
+    let set = std::env::var_os(paths::HOME_STORE_ENV);
+    let user_home = std::env::home_dir();
     refuse_unguarded_test_home(set.as_deref(), user_home.as_deref());
-    super::resolve_home_root(set.map(PathBuf::from), user_home)
+    paths::resolve_home_root(set.map(PathBuf::from), user_home)
 }
 
 /// The owner's rule that no test writes into a developer's real store:
@@ -856,10 +839,10 @@ fn register_home() -> Result<PathBuf> {
 /// even its metadata. A path that cannot be resolved is judged as written.
 #[cfg(any(test, feature = "test-home-guard"))]
 fn refuse_unguarded_test_home(set: Option<&std::ffi::OsStr>, user_home: Option<&Path>) {
-    let real = user_home.map(|home| home.join(super::STORE_DIR_NAME));
+    let real = user_home.map(|home| home.join(paths::STORE_DIR_NAME));
     let why = unguarded_home(set, real.as_deref()).or_else(|| {
         let set = set.map(|value| resolved_or_as_written(Path::new(value)));
-        let real = user_home.map(|home| resolved_or_as_written(home).join(super::STORE_DIR_NAME));
+        let real = user_home.map(|home| resolved_or_as_written(home).join(paths::STORE_DIR_NAME));
         unguarded_home(set.as_deref().map(Path::as_os_str), real.as_deref())
     });
     if let Some(why) = why {
@@ -868,7 +851,7 @@ fn refuse_unguarded_test_home(set: Option<&std::ffi::OsStr>, user_home: Option<&
              home-store guard (HomeStoreGuard; EnvSandbox in the CLI) first, so no test writes \
              into the developer's ~/.openalpaca. A daemon binary `cargo test` built carries this \
              check too: rebuild it with `cargo build -p openalpacad` before running it by hand",
-            super::HOME_STORE_ENV,
+            paths::HOME_STORE_ENV,
         );
     }
 }
@@ -1008,7 +991,7 @@ pub(crate) fn name_for(
     this: Option<&ProjectId>,
     held: &ProjectsLock,
 ) -> Result<String> {
-    name_for_in(&super::home_root()?, root, this, held)
+    name_for_in(&paths::home_root()?, root, this, held)
 }
 
 /// [`name_for`] under the home store `home`, as [`register`] resolved it once.

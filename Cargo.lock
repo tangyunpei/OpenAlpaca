@@ -259,9 +259,9 @@ dependencies = [
 
 [[package]]
 name = "async-executor"
-version = "1.14.0"
+version = "1.13.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "c96bf972d85afc50bf5ab8fe2d54d1586b4e0b46c97c50a0c9e71e2f7bcd812a"
+checksum = "497c00e0fd83a72a79a39fcbd8e3e2f055d6f6c7e025f3b3d91f4f8e76527fb8"
 dependencies = [
  "async-task",
  "concurrent-queue",
@@ -711,9 +711,9 @@ dependencies = [
 
 [[package]]
 name = "calamine"
-version = "0.37.0"
+version = "0.38.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "c9ca341b94bc4b29e08970b1a03914fad2dfe177e2ecb67fcd6de9046004aafb"
+checksum = "f431b67cba6122a1f7d26b7adafc71bbdf07026095fe811f5efc025d8748e1d8"
 dependencies = [
  "atoi_simd",
  "byteorder",
@@ -1187,7 +1187,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "d045de693cb712d0b22c6a64be5b953f67b3ce00ab5ad3dd5d8b441886ab8e1a"
 dependencies = [
  "quote",
- "syn 2.0.119",
+ "syn 3.0.9",
 ]
 
 [[package]]
@@ -1468,15 +1468,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "directories"
-version = "6.0.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "16f5094c54661b38d03bd7e50df373292118db60b585c08a411c6d840017fe7d"
-dependencies = [
- "dirs-sys",
-]
-
-[[package]]
 name = "dirs"
 version = "7.0.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1603,6 +1594,26 @@ name = "dyn-clone"
 version = "1.0.20"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "d0881ea181b1df73ff77ffaaf9c7544ecc11e82fba9b5f27b262a3c73a332555"
+
+[[package]]
+name = "dynosaur"
+version = "0.3.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "fdb33e6854ea615b65faf9c40d4ea9c4de9e9fa5d6772ad6ce57950a6da3957d"
+dependencies = [
+ "dynosaur_derive",
+]
+
+[[package]]
+name = "dynosaur_derive"
+version = "0.3.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "5ac0893f103ae7bf50181323d748d505f27b6255777c28b502030bdaf8749f4c"
+dependencies = [
+ "proc-macro2",
+ "quote",
+ "syn 2.0.119",
+]
 
 [[package]]
 name = "ecb"
@@ -1814,16 +1825,6 @@ checksum = "38e2275cc4e4fc009b0669731a1e5ab7ebf11f469eaede2bab9309a5b4d6057f"
 dependencies = [
  "memoffset",
  "rustc_version",
-]
-
-[[package]]
-name = "file-lock"
-version = "2.1.11"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "040b48f80a749da50292d0f47a1e2d5bf1d772f52836c07f64bfccc62ba6e664"
-dependencies = [
- "cc",
- "libc",
 ]
 
 [[package]]
@@ -3110,9 +3111,9 @@ dependencies = [
 
 [[package]]
 name = "libsqlite3-sys"
-version = "0.38.2"
+version = "0.39.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "f1d20bef17f513b9b3004532233187769cd072d790971f4e4da0e346eb6401e8"
+checksum = "14a5f01b87b92705d07b433c06f96cbc764637d81a0bffb5734ce17cf0f9a2b3"
 dependencies = [
  "cc",
  "pkg-config",
@@ -3831,6 +3832,7 @@ dependencies = [
  "futures-util",
  "mime_guess",
  "nix",
+ "openalpaca_app_support",
  "openalpaca_core",
  "openalpaca_llm",
  "openalpaca_storage",
@@ -3851,10 +3853,27 @@ dependencies = [
 name = "openalpaca_api"
 version = "0.1.0"
 dependencies = [
- "async-trait",
  "chrono",
+ "dynosaur",
  "serde",
  "serde_json",
+]
+
+[[package]]
+name = "openalpaca_app_support"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "base64 0.23.1",
+ "chrono",
+ "libc",
+ "rand 0.10.3",
+ "serde",
+ "serde_json",
+ "sysinfo",
+ "tempfile",
+ "tracing",
+ "uuid",
 ]
 
 [[package]]
@@ -3862,11 +3881,11 @@ name = "openalpaca_connectors"
 version = "0.1.0"
 dependencies = [
  "arc-swap",
- "async-trait",
  "axum",
  "chrono",
  "dashmap",
  "openalpaca_api",
+ "openalpaca_app_support",
  "openalpaca_core",
  "openalpaca_storage",
  "reqwest 0.13.5",
@@ -3892,17 +3911,17 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "arc-swap",
- "async-trait",
  "base64 0.23.1",
  "blake3",
  "chrono",
  "dashmap",
- "file-lock",
+ "dynosaur",
  "futures-util",
  "infer",
  "libc",
  "lru",
  "openalpaca_api",
+ "openalpaca_app_support",
  "openalpaca_llm",
  "openalpaca_mcp",
  "openalpaca_storage",
@@ -3932,16 +3951,18 @@ name = "openalpaca_gui"
 version = "0.1.0"
 dependencies = [
  "anyhow",
- "directories",
  "libc",
- "openalpaca_storage",
+ "openalpaca_app_support",
  "serde",
  "serde_json",
  "tauri",
  "tauri-build",
  "tauri-plugin-dialog",
+ "thiserror 2.0.21",
  "tokio",
+ "toml 1.1.8+spec-1.1.0",
  "tracing",
+ "tracing-subscriber",
 ]
 
 [[package]]
@@ -3951,11 +3972,10 @@ dependencies = [
  "aes-gcm",
  "apple-native-keyring-store",
  "arc-swap",
- "async-trait",
  "base64 0.23.1",
  "bytes",
  "dashmap",
- "file-lock",
+ "dynosaur",
  "futures-util",
  "keyring-core",
  "rand 0.10.3",
@@ -3970,6 +3990,7 @@ dependencies = [
  "toml_edit 0.25.17+spec-1.1.0",
  "tracing",
  "tracing-test",
+ "url",
  "uuid",
  "which",
  "windows-native-keyring-store",
@@ -3980,7 +4001,6 @@ dependencies = [
 name = "openalpaca_mcp"
 version = "0.1.0"
 dependencies = [
- "async-trait",
  "axum",
  "futures-util",
  "process-wrap",
@@ -4000,9 +4020,9 @@ name = "openalpaca_plugins"
 version = "0.1.0"
 dependencies = [
  "arc-swap",
- "async-trait",
  "chrono",
  "openalpaca_api",
+ "openalpaca_app_support",
  "openalpaca_connectors",
  "openalpaca_core",
  "openalpaca_llm",
@@ -4022,19 +4042,16 @@ name = "openalpaca_storage"
 version = "0.1.0"
 dependencies = [
  "anyhow",
- "base64 0.23.1",
  "chrono",
- "directories",
- "file-lock",
  "libc",
- "rand 0.10.3",
+ "openalpaca_app_support",
  "rusqlite",
  "serde",
  "serde_json",
  "sha2 0.11.1",
  "similar",
- "sysinfo",
  "tempfile",
+ "thiserror 2.0.21",
  "tracing",
  "tracing-test",
  "unicode-normalization",
@@ -4046,7 +4063,6 @@ name = "openalpaca_wake"
 version = "0.1.0"
 dependencies = [
  "anyhow",
- "async-trait",
  "notify",
  "openalpaca_api",
  "serde",
@@ -4063,7 +4079,6 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "arc-swap",
- "async-trait",
  "axum",
  "calamine",
  "chrono",
@@ -4071,6 +4086,7 @@ dependencies = [
  "infer",
  "libc",
  "openalpaca_api",
+ "openalpaca_app_support",
  "openalpaca_connectors",
  "openalpaca_core",
  "openalpaca_llm",
@@ -4114,6 +4130,7 @@ dependencies = [
  "normpath",
  "url",
  "windows-sys 0.61.2",
+ "zbus",
 ]
 
 [[package]]
@@ -4933,9 +4950,9 @@ dependencies = [
 
 [[package]]
 name = "rmcp"
-version = "3.7.0"
+version = "3.9.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "ece64e19631fc38758181e637c15509a2c2709ee53bfde1e1d58f9dc991f919e"
+checksum = "d24a7e92f4bcaa36b97fa93c4fa7ca8f3e669eced949345b3462dba333c7f909"
 dependencies = [
  "base64 0.23.1",
  "bytes",
@@ -4952,6 +4969,7 @@ dependencies = [
  "schemars 1.2.3",
  "serde",
  "serde_json",
+ "sha2 0.11.1",
  "sse-stream",
  "thiserror 2.0.21",
  "tokio",
@@ -4963,9 +4981,9 @@ dependencies = [
 
 [[package]]
 name = "rmcp-macros"
-version = "3.7.0"
+version = "3.9.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "967fa7f7935d7d6217d593df0e8e5c9307bcaf256974a5a9ee64476c97735389"
+checksum = "b3140f24a766f80f9ec1607bde85680959a69b83d46fa9ce87dadab7e67ab029"
 dependencies = [
  "darling 0.24.1",
  "proc-macro2",
@@ -4986,9 +5004,9 @@ dependencies = [
 
 [[package]]
 name = "rusqlite"
-version = "0.40.2"
+version = "0.41.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "23f2a97da3e3873c73cb2a2e71b35c40ff95e0b1eefa8d72d8499a6928c3b5b3"
+checksum = "da9bba6f3506135e120a6586df05be18b48d18896600646a4bec8f993d91a594"
 dependencies = [
  "bitflags 2.13.2",
  "fallible-iterator",
@@ -8177,6 +8195,7 @@ dependencies = [
  "endi",
  "enumflags2",
  "serde",
+ "url",
  "winnow 1.0.4",
  "zcheapstr",
  "zvariant_derive",

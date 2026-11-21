@@ -1,6 +1,7 @@
 //! Internal helpers for AI config read/write operations.
 
 use anyhow::{Context, Result};
+use openalpaca_app_support::paths;
 use openalpaca_llm::cli_backend::{CliBackendConfig, CliBackendsConfig};
 use openalpaca_llm::config::{KeyConfig, LlmRouterConfig, OrchestratorLlmConfig, read_config};
 use openalpaca_llm::keys::credential_discovery::CredentialDiscoveryConfig;
@@ -12,13 +13,12 @@ use std::path::{Path, PathBuf};
 /// The encryptor for `llm.toml` secrets, keyed on the one master key.
 ///
 /// `openalpaca_llm` resolves no paths of its own, so the directory is always
-/// passed in — and it is always `store::master_key_dir()`, the same file the
+/// passed in — and it is always `paths::master_key_dir()`, the same file the
 /// daemon loads at boot. Resolving it anywhere else would silently generate a
 /// second key: `ai config set-key` would then write secrets the daemon cannot
 /// decrypt.
 pub(super) fn encryptor() -> Result<KeyEncryptor> {
-    let dir = openalpaca_storage::store::master_key_dir()
-        .context("Failed to resolve the master key directory")?;
+    let dir = paths::master_key_dir().context("Failed to resolve the master key directory")?;
     KeyEncryptor::load_or_generate_at(&dir).map_err(|e| anyhow::anyhow!("{}", e))
 }
 
@@ -51,7 +51,7 @@ pub fn llm_config_path() -> Result<PathBuf> {
         }
     }
     // 2. Writable home_root()/config/
-    if let Ok(dir) = openalpaca_storage::store::runtime_config_dir() {
+    if let Ok(dir) = paths::runtime_config_dir() {
         let p = dir.join("llm.toml");
         if p.exists() {
             return Ok(p);
@@ -73,7 +73,7 @@ pub(super) fn load_or_default(path: &Path) -> Result<LlmRouterConfig> {
 pub(super) fn default_config() -> LlmRouterConfig {
     LlmRouterConfig {
         orchestrator: Some(OrchestratorLlmConfig {
-            model: "claude-sonnet-4-5-20250929".to_string(),
+            model: openalpaca_llm::config::DEFAULT_ORCHESTRATOR_MODEL.to_string(),
             fallback_models: None,
         }),
         providers: Some(HashMap::new()),
@@ -125,7 +125,7 @@ pub(super) fn apply_to_config(
             config
                 .orchestrator
                 .get_or_insert_with(|| OrchestratorLlmConfig {
-                    model: "claude-sonnet-4-5-20250929".to_string(),
+                    model: openalpaca_llm::config::DEFAULT_ORCHESTRATOR_MODEL.to_string(),
                     fallback_models: None,
                 })
                 .fallback_models = Some(models);
@@ -249,14 +249,12 @@ pub(super) fn apply_to_config(
                         k.secret_ref
                             .as_ref()
                             .and_then(|sr| store.get(sr).ok().flatten())
-                            .map(|decrypted| decrypted == value)
-                            .unwrap_or(false)
+                            .is_some_and(|decrypted| decrypted == value)
                     } else {
                         k.secret_encrypted
                             .as_ref()
                             .and_then(|enc| encryptor().ok().and_then(|e| e.decrypt(enc).ok()))
-                            .map(|decrypted| decrypted == value)
-                            .unwrap_or(false)
+                            .is_some_and(|decrypted| decrypted == value)
                     }
                 });
                 if !already_stored {

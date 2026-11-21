@@ -5,7 +5,6 @@ use crate::lane::{LaneKey, LaneManager};
 use crate::memory::learning::LearningQueue;
 use crate::memory::service::MemoryUsed;
 use crate::security::policy::{Principal, Scope};
-use async_trait::async_trait;
 use openalpaca_api::events::EventSource;
 use openalpaca_storage::Database;
 use std::sync::Arc;
@@ -190,18 +189,23 @@ impl HandleRequest {
 
 /// Trait for processing messages through the pipeline.
 /// The daemon implements this by delegating to the Orchestrator.
-#[async_trait]
+#[dynosaur::dynosaur(pub DynMessageHandler = dyn(box) MessageHandler)]
 pub trait MessageHandler: Send + Sync {
-    async fn handle(&self, request: HandleRequest) -> Result<HandleResult, String>;
+    fn handle(
+        &self,
+        request: HandleRequest,
+    ) -> impl Future<Output = Result<HandleResult, String>> + Send;
 
     /// Handle a message with attachments. Default delegates to `handle()`.
-    async fn handle_with_attachments(
+    fn handle_with_attachments(
         &self,
         request: HandleRequest,
         attachments: Vec<ResolvedAttachment>,
-    ) -> Result<HandleResult, String> {
-        let _ = attachments; // default: ignore attachments
-        self.handle(request).await
+    ) -> impl Future<Output = Result<HandleResult, String>> + Send {
+        async move {
+            let _ = attachments; // default: ignore attachments
+            self.handle(request).await
+        }
     }
 }
 
@@ -283,7 +287,7 @@ pub struct GatewayResponse {
 pub struct Gateway {
     pub shared_context: Arc<SharedContext>,
     pub lane_manager: Arc<LaneManager>,
-    pub handler: Arc<dyn MessageHandler>,
+    pub handler: Arc<DynMessageHandler<'static>>,
     pub bus: EventBus,
     persistence: Option<GatewayPersistence>,
     /// Learning v2 (design 09 §1.5): the queue every persisted turn is fed
@@ -295,7 +299,7 @@ impl Gateway {
     pub fn new(
         shared_context: Arc<SharedContext>,
         lane_manager: Arc<LaneManager>,
-        handler: Arc<dyn MessageHandler>,
+        handler: Arc<impl MessageHandler + 'static>,
         bus: EventBus,
         db: Option<Database>,
     ) -> Self {
@@ -303,7 +307,7 @@ impl Gateway {
         Self {
             shared_context,
             lane_manager,
-            handler,
+            handler: DynMessageHandler::from_arc(handler),
             bus,
             persistence,
             learning: None,

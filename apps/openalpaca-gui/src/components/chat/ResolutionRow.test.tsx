@@ -89,6 +89,31 @@ describe("settling an answered confirmation (G6)", () => {
     ).toBe("artifact_write approved · returned in 1.4s, the agent resumed.");
   });
 
+  /** TIMEOUT-ONE-CLOCK: a run the sandbox cut says it timed out. */
+  it("says a run the sandbox cut timed out", () => {
+    expect(
+      resolutionNote(
+        "approved",
+        "shell_execute",
+        settlingRun(
+          [
+            ran({
+              toolName: "shell_execute",
+              success: false,
+              timedOut: true,
+              duration: "2.0s",
+            }),
+          ],
+          "shell_execute",
+          1_000,
+          MAIN_LOOP,
+        ),
+      ),
+    ).toBe(
+      "shell_execute approved · timed out after 2.0s, the agent continued without it.",
+    );
+  });
+
   it("still says `waiting` when nothing has reported yet", () => {
     expect(resolutionNote("approved", "artifact_write", null)).toBe(
       "artifact_write approved · waiting for the tool to run…",

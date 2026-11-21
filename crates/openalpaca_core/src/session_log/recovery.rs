@@ -96,15 +96,16 @@ pub fn undrained_steering(session_dir: &Path, task_id: &str) -> io::Result<Steer
                 continue;
             }
             match record.kind.as_str() {
-                "steering_drained" => {
-                    if let Some(ids) = record.data.get("request_ids").and_then(|v| v.as_array()) {
-                        drained.extend(ids.iter().filter_map(|v| v.as_str().map(str::to_string)));
-                    }
+                "steering_drained"
+                    if let Some(ids) =
+                        record.data.get("request_ids").and_then(|v| v.as_array()) =>
+                {
+                    drained.extend(ids.iter().filter_map(|v| v.as_str().map(str::to_string)));
                 }
-                "steering" => {
-                    if let Some(id) = record.data.get("request_id").and_then(|v| v.as_str()) {
-                        pushed.push((id.to_string(), record));
-                    }
+                "steering"
+                    if let Some(id) = record.data.get("request_id").and_then(|v| v.as_str()) =>
+                {
+                    pushed.push((id.to_string(), record));
                 }
                 _ => {}
             }

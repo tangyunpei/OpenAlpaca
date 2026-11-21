@@ -6,6 +6,7 @@
  * usage/tasks hooks need mocking to exercise its rendering.
  */
 import {
+  cleanup,
   fireEvent,
   render,
   screen,
@@ -19,12 +20,16 @@ import type { DaemonStatus, SessionSweep } from "@/lib/api/types";
 import { useProjectStore } from "@/stores/project";
 import { useUiStore } from "@/stores/ui";
 
+import daemonPaths from "@/lib/daemon-path.json";
+
 import {
   ConnectionSection,
   DAEMON_LOG_LINES,
   StorageCard,
+  daemonPathNote,
   homeStoreLabel,
   projectCardRoot,
+  statusTitle,
 } from "./ConnectionSection";
 
 /**
@@ -128,7 +133,18 @@ const daemon = vi.hoisted(() => ({ data: undefined as unknown }));
 
 /** The window's own view of the connection, mutable per test. */
 const link = vi.hoisted(() => ({
+  /** The connection's `daemonPath` (Q21), `null` for none. */
+  daemonPath: null as {
+    source: "login-shell" | "login-shell-noninteractive" | "fallback-list";
+    captureMs: number;
+    reason: string | null;
+    passedKeys: string[];
+  } | null,
   connected: true,
+  /** The socket's state when it is not the one `connected` implies (Q04). */
+  socket: null as "starting" | "mismatch" | null,
+  /** The shell's note on the daemon (Q04), `null` for none. */
+  note: null as string | null,
   lastError: null as string | null,
   stopIntent: null as "stopped_here" | "stopped_elsewhere" | null,
   stopPhase: null as
@@ -145,10 +161,19 @@ const link = vi.hoisted(() => ({
 
 vi.mock("@/hooks/useConnection", () => ({
   useConnectionStatus: () => ({
-    info: null,
+    info:
+      link.daemonPath === null
+        ? null
+        : {
+            baseUrl: "http://127.0.0.1:51823",
+            token: "t",
+            instanceId: "7f3a",
+            daemonPath: link.daemonPath,
+          },
     health: undefined,
-    socket: link.connected ? "connected" : "error",
+    socket: link.socket ?? (link.connected ? "connected" : "error"),
     connected: link.connected,
+    note: link.note,
     instanceChip: "7f3a",
     endpoint: "127.0.0.1:51823",
     lastError: link.lastError,
@@ -192,7 +217,10 @@ vi.mock("@/lib/connection", async (importOriginal) => ({
 }));
 
 afterEach(() => {
+  link.daemonPath = null;
   link.connected = true;
+  link.socket = null;
+  link.note = null;
   link.lastError = null;
   link.stopIntent = null;
   link.stopPhase = null;
@@ -400,6 +428,109 @@ describe("where a project-less run's files go (G7)", () => {
 });
 
 /**
+ * Where the `PATH` of a daemon this app spawned came from (Q21): the shell's
+ * `daemonPath`, its source and the capture's duration, never the `PATH`.
+ */
+describe("the daemon's PATH (Q21)", () => {
+  it("says the login shell's, with the capture's duration", () => {
+    link.daemonPath = {
+      source: "login-shell",
+      captureMs: 212,
+      reason: null,
+      passedKeys: [],
+    };
+    render(<ConnectionSection />);
+
+    expect(
+      screen.getByText(
+        "This daemon's PATH is your login shell's, read when the app started (212 ms).",
+      ),
+    ).toBeTruthy();
+  });
+
+  it("says the fallback list and why, with the capture's duration", () => {
+    link.daemonPath = {
+      source: "fallback-list",
+      captureMs: 3001,
+      reason: "the login shell did not finish within 3000 ms",
+      passedKeys: [],
+    };
+    render(<ConnectionSection />);
+
+    expect(
+      screen.getByText(
+        "This daemon's PATH is the app's fallback list: the login shell did not finish within 3000 ms (3001 ms).",
+      ),
+    ).toBeTruthy();
+  });
+
+  it("says the login shell's read again without -i, and why (CAPTURE-RETRY)", () => {
+    link.daemonPath = {
+      source: "login-shell-noninteractive",
+      captureMs: 1840,
+      reason: null,
+      passedKeys: ["AWS_PROFILE"],
+    };
+    render(<ConnectionSection />);
+
+    expect(
+      screen.getByText(
+        "This daemon's PATH is your login shell's without its interactive startup files (such as ~/.zshrc), read when the app started (1840 ms): run interactively, your shell ended before it printed its environment. Also passed from your login shell, as daemon.toml's [daemon.env] passthrough_keys lists: AWS_PROFILE.",
+      ),
+    ).toBeTruthy();
+  });
+
+  it("names the keys passed beside it, never their values (N-DAEMON-2)", () => {
+    link.daemonPath = {
+      source: "login-shell",
+      captureMs: 212,
+      reason: null,
+      passedKeys: ["AWS_PROFILE"],
+    };
+    render(<ConnectionSection />);
+
+    expect(
+      screen.getByText(
+        "This daemon's PATH is your login shell's, read when the app started (212 ms). Also passed from your login shell, as daemon.toml's [daemon.env] passthrough_keys lists: AWS_PROFILE.",
+      ),
+    ).toBeTruthy();
+  });
+
+  it("says nothing for a daemon this app did not spawn, or while stopped", () => {
+    render(<ConnectionSection />);
+    expect(screen.queryByText(/This daemon's PATH/)).toBeNull();
+
+    link.daemonPath = {
+      source: "login-shell",
+      captureMs: 212,
+      reason: null,
+      passedKeys: [],
+    };
+    link.stopIntent = "stopped_here";
+    link.stopPhase = "stopped";
+    render(<ConnectionSection />);
+    expect(screen.queryByText(/This daemon's PATH/)).toBeNull();
+  });
+
+  it("words each row of the shell's table", () => {
+    expect(daemonPathNote(daemonPaths.login_shell as never)).toBe(
+      "This daemon's PATH is your login shell's, read when the app started (212 ms).",
+    );
+    expect(daemonPathNote(daemonPaths.login_shell_with_keys as never)).toBe(
+      "This daemon's PATH is your login shell's, read when the app started (212 ms). Also passed from your login shell, as daemon.toml's [daemon.env] passthrough_keys lists: AWS_PROFILE, KUBECONFIG.",
+    );
+    expect(
+      daemonPathNote(daemonPaths.login_shell_noninteractive as never),
+    ).toBe(
+      "This daemon's PATH is your login shell's without its interactive startup files (such as ~/.zshrc), read when the app started (1840 ms): run interactively, your shell ended before it printed its environment.",
+    );
+    expect(daemonPathNote(daemonPaths.fallback_list as never)).toBe(
+      "This daemon's PATH is the app's fallback list: the login shell did not finish within 3000 ms (3000 ms).",
+    );
+  });
+});
+
+/**
  * A daemon that would not start used to say nothing: the sidecar's output
  * went to `/dev/null`, and the one string that reached the window was "did
  * not become ready within timeout". The shell's rejection now ends with the
@@ -438,6 +569,64 @@ describe("why the daemon would not start", () => {
     render(<ConnectionSection />);
 
     expect(screen.queryByLabelText("Why the daemon is unreachable")).toBeNull();
+  });
+});
+
+/**
+ * Q04: a daemon still starting is a wait the card names, a daemon this app
+ * cannot use is named with the shell's sentence and its remedy, and a daemon
+ * of another version is used with the shell's note.
+ */
+describe("the daemon compatibility contract (Q04)", () => {
+  it("titles the card while the daemon is starting, with the shell's sentence", () => {
+    link.connected = false;
+    link.socket = "starting";
+    link.lastError =
+      "The daemon (pid 4242) is starting: it has written its discovery file but does not answer yet. Waiting for it, up to 45 seconds.";
+    render(<ConnectionSection />);
+    expect(screen.getByText("Daemon is starting")).toBeTruthy();
+    expect(
+      screen.getByLabelText("Why the daemon is unreachable").textContent,
+    ).toBe(link.lastError);
+  });
+
+  it("titles the card on a mismatch, with the shell's sentence and remedy", () => {
+    link.connected = false;
+    link.socket = "mismatch";
+    link.lastError =
+      "The daemon running (pid 4242, version 0.2.0, protocol 2) is not one this app can use: the app speaks protocol 1. Nothing was stopped or started. Update the app to one that speaks protocol 2, or stop that daemon with `openalpaca daemon stop` and press Reconnect in Settings → Connection to start this app's own.";
+    render(<ConnectionSection />);
+    expect(screen.getByText("Daemon version mismatch")).toBeTruthy();
+    expect(
+      screen.getByLabelText("Why the daemon is unreachable").textContent,
+    ).toBe(link.lastError);
+    expect(screen.getByRole("button", { name: "Reconnect" })).toBeTruthy();
+  });
+
+  it("shows the shell's note on a daemon it uses, and none while stopped", () => {
+    link.note =
+      "This daemon is version 0.1.0 and this app is 0.2.0; they speak the same protocol, so the app uses it. To run this app's own version, use Stop daemon…, then Start daemon.";
+    render(<ConnectionSection />);
+    expect(screen.getByText(link.note)).toBeTruthy();
+
+    cleanup();
+    link.stopIntent = "stopped_here";
+    link.stopPhase = "stopped";
+    render(<ConnectionSection />);
+    expect(screen.queryByText(link.note)).toBeNull();
+  });
+
+  it("words the title from the socket's Q04 states, never over a stop", () => {
+    expect(statusTitle(null, false, null, "starting")).toBe(
+      "Daemon is starting",
+    );
+    expect(statusTitle(null, false, null, "mismatch")).toBe(
+      "Daemon version mismatch",
+    );
+    expect(statusTitle(null, false, null, "error")).toBe("Daemon unreachable");
+    expect(statusTitle("stopped_here", false, "stopped", "starting")).toBe(
+      "Daemon stopped",
+    );
   });
 });
 

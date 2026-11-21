@@ -2446,11 +2446,7 @@ pub(super) fn cut_bytes(text: &str, max: usize) -> (String, bool) {
     if text.len() <= max {
         return (text.to_string(), false);
     }
-    let mut end = max;
-    while !text.is_char_boundary(end) {
-        end -= 1;
-    }
-    (text[..end].to_string(), true)
+    (text[..text.floor_char_boundary(max)].to_string(), true)
 }
 
 /// The section headed `heading` (any level): the heading line and the lines

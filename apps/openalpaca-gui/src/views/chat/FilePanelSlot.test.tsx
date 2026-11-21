@@ -1,12 +1,13 @@
 /**
  * The file panel's `Open` and `Reveal in Finder`, wired to the artifact the
- * slot read: the daemon's open route for its id, the shell's `reveal_path` for
- * its `path`. Only the Tauri `invoke` and `fetch` are doubled.
+ * slot read: the daemon's open and reveal routes for its id (Q06). Only the
+ * Tauri `invoke` and `fetch` are doubled.
  */
 
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { invoke } from "@tauri-apps/api/core";
 import {
+  act,
   fireEvent,
   render,
   screen,
@@ -17,7 +18,7 @@ import userEvent from "@testing-library/user-event";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import type { Artifact } from "@/lib/api/artifacts";
-import { resetConnection } from "@/lib/connection";
+import { refreshConnection, resetConnection } from "@/lib/connection";
 import { revealLabel } from "@/lib/reveal";
 import { useUiStore } from "@/stores/ui";
 
@@ -90,15 +91,11 @@ beforeEach(() => {
     panelTab: "preview",
     libraryResults: false,
   });
-  vi.mocked(invoke).mockImplementation(async (command: string) =>
-    command === "reveal_path"
-      ? null
-      : {
-          baseUrl: "http://127.0.0.1:9999",
-          token: "test-token",
-          instanceId: "7f3a1122",
-        },
-  );
+  vi.mocked(invoke).mockImplementation(async () => ({
+    baseUrl: "http://127.0.0.1:9999",
+    token: "test-token",
+    instanceId: "7f3a1122",
+  }));
   vi.stubGlobal(
     "fetch",
     vi.fn(async (input: unknown, init?: RequestInit) => {
@@ -107,6 +104,11 @@ beforeEach(() => {
       requests.push(`${method} ${url}`);
       if (url.endsWith("/v1/files/art-1/open")) {
         return new Response(JSON.stringify({ id: "art-1", status: "opened" }));
+      }
+      if (url.endsWith("/v1/files/art-1/reveal")) {
+        return new Response(
+          JSON.stringify({ id: "art-1", status: "revealed" }),
+        );
       }
       if (url.endsWith("/v1/artifacts/art-1")) {
         return new Response(JSON.stringify(served));
@@ -154,7 +156,7 @@ describe("FilePanelSlot — Open and Reveal", () => {
     );
   });
 
-  it("reveals the path the artifact row carries", async () => {
+  it("reveals the artifact through the daemon's reveal route, by its id", async () => {
     vi.stubGlobal("isTauri", true);
     const user = userEvent.setup();
     renderSlot();
@@ -163,8 +165,13 @@ describe("FilePanelSlot — Open and Reveal", () => {
       await screen.findByRole("button", { name: revealLabel() }),
     );
 
-    expect(invoke).toHaveBeenCalledWith("reveal_path", { path: row.path });
-    // Finder coming forward is the answer: once the shell has replied and
+    await waitFor(() =>
+      expect(requests).toContain(
+        "POST http://127.0.0.1:9999/v1/files/art-1/reveal",
+      ),
+    );
+    expect(invoke).not.toHaveBeenCalledWith("reveal_path", expect.anything());
+    // Finder coming forward is the answer: once the daemon has replied and
     // every reaction to it has run (a macrotask runs after all of them),
     // nothing was toasted.
     await new Promise((resolve) => setTimeout(resolve, 0));
@@ -339,5 +346,35 @@ describe("FilePanelSlot — the Preview of a file written into the project (X15,
       ),
     ).toBeInTheDocument();
     expect(screen.queryByText(/Export or Open/)).not.toBeInTheDocument();
+  });
+});
+
+describe("FilePanelSlot — an image's token (TOKEN-REREAD)", () => {
+  it("draws the image again with the token the connection was read again for", async () => {
+    served = {
+      ...row,
+      name: "chart.png",
+      kind: "image",
+      mime_type: "image/png",
+    };
+    renderSlot();
+    expect(await screen.findByAltText("chart.png")).toHaveAttribute(
+      "src",
+      "http://127.0.0.1:9999/v1/artifacts/art-1/content?token=test-token",
+    );
+
+    vi.mocked(invoke).mockResolvedValueOnce({
+      baseUrl: "http://127.0.0.1:9999",
+      token: "renewed-token",
+      instanceId: "7f3a1122",
+    });
+    await act(async () => {
+      await refreshConnection();
+    });
+
+    expect(screen.getByAltText("chart.png")).toHaveAttribute(
+      "src",
+      "http://127.0.0.1:9999/v1/artifacts/art-1/content?token=renewed-token",
+    );
   });
 });

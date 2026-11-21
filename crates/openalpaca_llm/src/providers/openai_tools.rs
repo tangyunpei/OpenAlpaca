@@ -1,6 +1,8 @@
 //! The OpenAI-compatible `tools[]` entry — one function tool as the chat
 //! completions API takes it — shared by the OpenAI and Ollama providers
-//! (Ollama sends through the OpenAI request builder).
+//! (Ollama sends through the OpenAI request builder), and the same tool in
+//! the Responses API's form, which the OpenAI arm sends to OpenAI's own API
+//! (C7b).
 //!
 //! Not behind a provider feature: it is pure JSON, and the crate that owns
 //! the builtin tools (`openalpaca_core`, which builds this crate with no
@@ -23,13 +25,42 @@ pub fn openai_function_tool(t: &ToolDefinition) -> Value {
         "description": t.description,
         "parameters": t.parameters,
     });
-    if t.strict == Some(true) && strict_mode_compatible(&t.parameters) {
+    if goes_strict(t) {
         function["strict"] = serde_json::json!(true);
     }
     serde_json::json!({
         "type": "function",
         "function": function,
     })
+}
+
+/// The same tool in the Responses API's function-tool form (C7b), which the
+/// OpenAI arm sends to OpenAI's own API: `type`, `name`, `description`,
+/// `parameters` and `strict` side by side, not under `function`
+/// (developers.openai.com/api/docs/guides/function-calling, read
+/// 2026-11-12).
+///
+/// `strict` is always written. It is `true` exactly where
+/// [`openai_function_tool`] sends it, and `false` everywhere else, because
+/// on the Responses API an omitted `strict` is not best effort: "Responses
+/// requests will attempt to normalize your schema into strict mode when
+/// possible" ("To opt out of strict mode in Responses and keep non-strict,
+/// best-effort function calling, explicitly set `strict: false`", the same
+/// page). So a tool goes out with the adherence it has on Chat Completions.
+pub fn openai_responses_function_tool(t: &ToolDefinition) -> Value {
+    serde_json::json!({
+        "type": "function",
+        "name": t.name,
+        "description": t.description,
+        "parameters": t.parameters,
+        "strict": goes_strict(t),
+    })
+}
+
+/// Whether `t` goes out strict: it asks for it, and its schema is one strict
+/// mode accepts.
+fn goes_strict(t: &ToolDefinition) -> bool {
+    t.strict == Some(true) && strict_mode_compatible(&t.parameters)
 }
 
 /// Object nesting OpenAI's strict mode accepts ("up to 10 levels").

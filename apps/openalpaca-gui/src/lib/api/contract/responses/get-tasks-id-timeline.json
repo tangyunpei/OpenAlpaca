@@ -1,0 +1,18 @@
+{
+  "completed_at": null,
+  "lanes": [
+    {
+      "agent_instance_id": "",
+      "detail": null,
+      "ended_at": null,
+      "label": "",
+      "lane_id": "",
+      "started_at": "",
+      "state": "",
+      "template_id": ""
+    }
+  ],
+  "now": "",
+  "started_at": "",
+  "task_id": ""
+}

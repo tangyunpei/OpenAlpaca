@@ -14,14 +14,16 @@ mod tracker;
 // External API (unchanged)
 pub use prompt::build_lead_agent_prompt_from_templates;
 pub use tools::{
-    check_subagent_status_tool_definition, post_update_tool_definition,
-    queue_followup_tool_definition, register_coordination_tools, register_workflow_tools,
-    spawn_subagent_tool_definition_from_templates,
-    spawn_subagents_batch_tool_definition, wait_for_subagents_tool_definition,
     CheckSubagentStatusTool, PostUpdateTool, QueueFollowupTool, SpawnSubagentTool,
-    SpawnSubagentsBatchTool, WaitForSubagentsTool,
+    SpawnSubagentsBatchTool, WaitForSubagentsTool, check_subagent_status_tool_definition,
+    post_update_tool_definition, queue_followup_tool_definition, register_coordination_tools,
+    register_workflow_tools, spawn_subagent_tool_definition_from_templates,
+    spawn_subagent_tool_definition_with_models, spawn_subagents_batch_tool_definition,
+    spawn_subagents_batch_tool_definition_with_models, wait_for_subagents_tool_definition,
 };
-pub use tools::{SUBAGENT_DAEMON_STOP_DETAIL, SUBAGENT_RUN_ENDED_DETAIL};
+pub use tools::{
+    DEFAULT_SUBAGENT_TEMPLATE, SUBAGENT_DAEMON_STOP_DETAIL, SUBAGENT_RUN_ENDED_DETAIL,
+};
 pub use tracker::{SubagentStatus, SubagentTracker};
 
 use crate::agent::subagent::SubAgent;
@@ -50,8 +52,6 @@ use tokio_util::sync::CancellationToken;
 
 // Test-only imports (for `use super::*` in tests.rs)
 #[cfg(test)]
-use async_trait::async_trait;
-#[cfg(test)]
 use crate::tools::registry::BuiltInTool;
 #[cfg(test)]
 use openalpaca_llm::ToolDefinition;
@@ -70,6 +70,11 @@ pub struct LeadAgentResult {
     pub final_content: String,
     pub loop_result: LoopResult,
     pub subagents_spawned: usize,
+    /// The model the lead's own choice resolved to before its loop (C8,
+    /// M-6e): an id, never the template's word — what its usage row and its
+    /// completion report name when no round answered. `None` only when
+    /// nothing was routable.
+    pub lead_model: Option<String>,
 }
 
 // ── run_lead_agent ───────────────────────────────────────────────────
@@ -133,7 +138,35 @@ pub async fn run_lead_agent(
         "Lead agent starting execution"
     );
 
-    // 1. List worker agent templates (all templates except the lead itself)
+    // C8 (M-6e): the lead's own choice resolves first, on a copy — the
+    // registry's instance and the template keep their word — so its window,
+    // its loop config, its telemetry and the spawn tools' `model` parameter
+    // all read the id that will answer. `inherit` is the model a request
+    // naming none reaches (its parent, the main loop, requests none); a
+    // borrowed lead's `inherit` follows the shipped lead's choice (M-1a).
+    let lead_choice =
+        crate::runner::model_choice::lead_choice(&shared_context.agent_registry, lead_agent);
+    let lead_model = crate::runner::model_choice::resolve(router.as_ref(), &lead_choice, None);
+    let mut resolved_lead = lead_agent.clone();
+    resolved_lead.llm_config.model = lead_model.clone();
+    if crate::runner::model_choice::is_word(&lead_choice) {
+        resolved_lead.llm_config.fallback_models.clear();
+    }
+    let lead_agent = &resolved_lead;
+    // M-1: the model that answered the lead's last round, which a subagent
+    // on `inherit` runs on; and M-8's menu, against the model the lead's id
+    // will reach — itself when routable, else the ladder's (an edited lead
+    // naming an unroutable id), the model its children inherit.
+    let answering_model = crate::runner::model_choice::answering_model();
+    let menu_model = lead_model
+        .as_deref()
+        .and_then(|model| router.would_answer(model, &lead_agent.llm_config.fallback_models));
+    let model_menu =
+        crate::runner::model_choice::ModelMenu::for_lead(router.as_ref(), menu_model.as_deref());
+
+    // 1. List worker agent templates (all templates except the lead itself),
+    // sorted by id (G-2): the `<agents>` block and both spawn descriptions
+    // read the same from run to run.
     let all_templates = shared_context.agent_registry.list_templates();
     let worker_templates: Vec<AgentTemplate> = all_templates
         .into_iter()
@@ -148,7 +181,7 @@ pub async fn run_lead_agent(
     );
 
     // 2. Build spawn_subagent tool definition from templates
-    let spawn_tool_def = spawn_subagent_tool_definition_from_templates(&worker_templates);
+    let spawn_tool_def = spawn_subagent_tool_definition_with_models(&worker_templates, &model_menu);
 
     // 3. Build tools: spawn_subagent + check/wait + workspace + memory reads
     let batch_spawn_enabled = daemon_config
@@ -158,7 +191,10 @@ pub async fn run_lead_agent(
         .batch_spawn_enabled;
     let mut tools = vec![spawn_tool_def];
     if batch_spawn_enabled {
-        tools.push(spawn_subagents_batch_tool_definition(&worker_templates));
+        tools.push(spawn_subagents_batch_tool_definition_with_models(
+            &worker_templates,
+            &model_menu,
+        ));
     }
     tools.push(check_subagent_status_tool_definition());
     tools.push(wait_for_subagents_tool_definition());
@@ -294,34 +330,37 @@ pub async fn run_lead_agent(
     // TODO: In future, resolve via context_manager.resolve() with LeadAgent path
     let parent_bundle = Arc::new(ContextBundle::empty());
 
-    let spawn_tool = Arc::new(SpawnSubagentTool::new(
-        router.clone(),
-        tool_registry.clone(),
-        shared_context.clone(),
-        bus.clone(),
-        db.clone(),
-        task_id.to_string(),
-        created_by.to_string(),
-        lead_agent.template_id.clone(),
-        daemon_config.clone(),
-        cancel_token.clone(),
-        tracker.clone(),
-        0, // depth: top-level lead agent
-        daemon_config
-            .load()
-            .execution
-            .lead_agent_defaults
-            .max_concurrent_subagents,
-        workspace.clone(),
-        confirmation_broker.clone(),
-        context_manager,
-        parent_bundle,
-        compose_engine.clone(),
-        // M6: every subagent of this run inherits the run's answer.
-        unattended,
-        // R44: and the run's conversation.
-        session_id.map(str::to_string),
-    ));
+    let spawn_tool = Arc::new(
+        SpawnSubagentTool::new(
+            router.clone(),
+            tool_registry.clone(),
+            shared_context.clone(),
+            bus.clone(),
+            db.clone(),
+            task_id.to_string(),
+            created_by.to_string(),
+            lead_agent.template_id.clone(),
+            daemon_config.clone(),
+            cancel_token.clone(),
+            tracker.clone(),
+            0, // depth: top-level lead agent
+            daemon_config
+                .load()
+                .execution
+                .lead_agent_defaults
+                .max_concurrent_subagents,
+            workspace.clone(),
+            confirmation_broker.clone(),
+            context_manager,
+            parent_bundle,
+            compose_engine.clone(),
+            // M6: every subagent of this run inherits the run's answer.
+            unattended,
+            // R44: and the run's conversation.
+            session_id.map(str::to_string),
+        )
+        .with_lead_models(answering_model.clone(), lead_model.clone()),
+    );
 
     let check_status_tool = Arc::new(CheckSubagentStatusTool {
         tracker: tracker.clone(),
@@ -360,7 +399,10 @@ pub async fn run_lead_agent(
         None
     };
     let batch_def = if batch_spawn_enabled {
-        Some(spawn_subagents_batch_tool_definition(&worker_templates))
+        Some(spawn_subagents_batch_tool_definition_with_models(
+            &worker_templates,
+            &model_menu,
+        ))
     } else {
         None
     };
@@ -370,18 +412,23 @@ pub async fn run_lead_agent(
         batch_tool,
         check_status_tool,
         wait_tool,
-        spawn_subagent_tool_definition_from_templates(&worker_templates),
+        spawn_subagent_tool_definition_with_models(&worker_templates, &model_menu),
         batch_def,
         check_subagent_status_tool_definition(),
         wait_for_subagents_tool_definition(),
     );
     // invoke_skill is per-request like the coordination tools — inject its
-    // backend into the per-request registry, never the global one.
+    // backend into the per-request registry, never the global one. Exempt
+    // from the per-tool time limit, as the main loop registers it
+    // (SKILL-NO-CUT): the skill's own loop bounds it.
+    let invoke_skill_def = crate::tools::builtins::invoke_skill_tool_definition();
     if let Err(e) = lead_registry.register(crate::tools::registry::RegisteredTool {
-        definition: crate::tools::builtins::invoke_skill_tool_definition(),
-        backend: crate::tools::registry::ToolBackend::BuiltIn(invoke_skill_tool),
+        exempt_from_timeout: crate::tools::builtins::builtin_is_exempt_from_timeout(
+            &invoke_skill_def.name,
+        ),
+        definition: invoke_skill_def,
+        backend: crate::tools::registry::ToolBackend::built_in_arc(invoke_skill_tool),
         provides_capabilities: vec![],
-        exempt_from_timeout: false,
         annotations: None,
         version: env!("CARGO_PKG_VERSION").to_string(),
         author: "builtin".to_string(),
@@ -429,7 +476,13 @@ pub async fn run_lead_agent(
     if let Some(ref broker) = confirmation_broker {
         sandbox.set_confirmation_broker(broker.clone());
     }
-    let mut sandbox_policy = SandboxPolicy::from_constraints(&lead_agent.id, &lead_agent.constraints);
+    // N-TOOL-1b: the lead's per-tool bound is the daemon's, read at the run's
+    // start; its template's `timeout_seconds` is not a tool's bound.
+    let mut sandbox_policy = SandboxPolicy::from_constraints(
+        &lead_agent.id,
+        &lead_agent.constraints,
+        &daemon_config.load().execution.agent_defaults,
+    );
     sandbox_policy.confirmation_timeout_secs = Some(
         daemon_config
             .load()
@@ -475,6 +528,9 @@ pub async fn run_lead_agent(
                 .user_profile_budget,
         ),
         Some(&skills_catalog_block),
+        // N-LEAD-6: the bound the spawn tool read at its construction, so the
+        // prompt names the figure enforced.
+        spawn_tool.max_subagents_per_run(),
     );
     let tool_guidance = format_tool_guidance(&tools);
     let connector_suffix = if !connector_guidance.is_empty() {
@@ -527,6 +583,9 @@ pub async fn run_lead_agent(
     }
 
     messages.push(ChatMessage::user(task_description));
+    // SA-2b-LEAD: the loop's kept head runs through the objective — the
+    // system prompt, the memory block if one was delivered, the objective.
+    let objective_head = messages.len();
 
     // Design 11 §4, owner decision CQ-6: the working state of the
     // conversation the run was started from — what the chat decided —
@@ -561,10 +620,10 @@ pub async fn run_lead_agent(
     //
     // It goes in **here**, after the persona layers and the objective and
     // before anything the loop will add, because that is the shape the loop
-    // itself produced the first time: `messages[0..=1]` is the pair every
-    // compaction is forbidden to touch, and the rounds follow it. The
-    // recorded calls arrive as messages and nothing dispatches them — a
-    // replay re-primes context, it never re-runs work.
+    // itself produced the first time: `messages[..objective_head]` is the
+    // head every compaction is forbidden to touch, and the rounds follow
+    // it. The recorded calls arrive as messages and nothing dispatches
+    // them — a replay re-primes context, it never re-runs work.
     if let Some(history) = resume {
         let plan = history.plan;
         tracing::info!(
@@ -638,6 +697,13 @@ pub async fn run_lead_agent(
     loop_config.writer =
         crate::orchestrator::working_state::WriterConfig::new(&daemon_config.load(), db.clone());
     loop_config.working_state = chat_state.map(|(state, _)| state);
+    // SA-2b-LEAD (the owner's answer of 2026-11-12, item 7, (a)): every
+    // compaction keeps the objective, which an opening memory block puts at
+    // `messages[2]`, outside the default head (the system prompt and one
+    // message). The chat's working state, the working-folder line and a
+    // replayed history stay behind it, for the loop to fold.
+    loop_config.kept_head = objective_head;
+    loop_config.answering_model = Some(answering_model);
     loop_config.event_bus = Some(bus.clone());
     loop_config.experimental_ephemeral_pressure =
         daemon_config.load().experimental.ephemeral_pressure_layer;
@@ -795,6 +861,7 @@ pub async fn run_lead_agent(
         final_content: result.final_content.clone(),
         loop_result: result,
         subagents_spawned,
+        lead_model,
     }
 }
 
@@ -874,3 +941,6 @@ fn lead_memory_delivery(
 
 #[cfg(test)]
 mod tests;
+
+#[cfg(test)]
+mod model_tests;

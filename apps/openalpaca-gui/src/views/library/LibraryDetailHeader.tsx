@@ -7,9 +7,9 @@
  *
  * `Open` opens the file in its default app, through the daemon
  * (`POST /v1/files/{id}/open`, API_MAP §2.3) — on the daemon's host. `Reveal in
- * Finder` ("Show in folder" off macOS) shows the file in its folder through the
- * Tauri shell's `reveal_path` command, so it is drawn only inside the app's own
- * window (`canReveal`); the Vite preview has no shell to ask.
+ * Finder` ("Show in folder" off macOS) shows the file in its folder, through the
+ * daemon too (`POST /v1/files/{id}/reveal`, Q06); it is drawn only inside the
+ * app's own window (`canReveal`), never in the Vite preview.
  *
  * The artifact's `summary`, when it has one, is a muted line under the name:
  * for a `file_write` artifact it is the path the file was written as

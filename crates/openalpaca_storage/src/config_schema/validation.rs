@@ -22,13 +22,7 @@ pub fn lookup(key: &str) -> Option<ConfigKeyDef> {
 
 /// Check if a key matches the dynamic connector pattern `<word>.token` or `<word>.enabled`.
 fn pattern_match(key: &str) -> Option<ConfigKeyDef> {
-    let parts: Vec<&str> = key.splitn(2, '.').collect();
-    if parts.len() != 2 {
-        return None;
-    }
-
-    let prefix = parts[0];
-    let suffix = parts[1];
+    let (prefix, suffix) = key.split_once('.')?;
 
     // Validate prefix is lowercase alphanumeric + underscore
     if prefix.is_empty() || !prefix.chars().all(|c| c.is_ascii_lowercase() || c == '_') {
