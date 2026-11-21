@@ -13,7 +13,8 @@
 //! 3. a value cut by the ring's own bound at the head masked too, or the
 //!    partial first line dropped; and the start of a value that ends an
 //!    unterminated last line (a tail read before the server finished
-//!    writing it) masked;
+//!    writing it) masked — both judged in step 2's one scan, on the text as
+//!    written, so a shorter value inside the cut part cannot hide it;
 //! 4. the generic shapes of a credential masked: a URL's userinfo, a bearer
 //!    token, an `Authorization` or `Cookie` header's value, a `key=value` or
 //!    `"key": "value"` whose name looks like a secret, a sensitive query
@@ -97,11 +98,8 @@ fn shown_tail(tail: &TailSnapshot, secrets: &[String]) -> String {
     // was read before its server finished writing it — at the settle's
     // bound, between two reads of the pipe, or ended by a respawn or the
     // reap's bound rather than by the pipe's end.
-    let mut text = mask_values(&text, secrets, !text.ends_with('\n'));
     let partial_head = tail.truncated;
-    if partial_head && !text.contains('\n') {
-        text = mask_head_fragment(&text, secrets);
-    }
+    let text = mask_values(&text, secrets, partial_head, !text.ends_with('\n'));
     let text = mask_shapes(&text);
     let text = text.trim_end_matches('\n');
     let (pieces, cut) = last_pieces(text, TAIL_BYTES);
@@ -116,22 +114,75 @@ fn shown_tail(tail: &TailSnapshot, secrets: &[String]) -> String {
     shown
 }
 
-/// Every occurrence of a `secrets` value replaced by [`MASKED`], in one pass
-/// over `text`, the longest value first at each place; with `cut_end`, also
-/// the longest start of a value that `text` ends with — judged on the text as
-/// written, before a shorter value inside it is masked, and only where no
-/// whole value begins.
-fn mask_values(text: &str, secrets: &[String], cut_end: bool) -> String {
+/// Every occurrence of a `secrets` value replaced by [`MASKED`], the longest
+/// value first at each place; with `cut_end`, also the longest start of a
+/// value that `text` ends with; with `cut_head` (the ring cut the tail's
+/// head) and no newline left outside the masked values — no whole line, so
+/// no first line for [`shown_tail`] to drop — also every end of a value that
+/// `text` begins with: each judged on the text as written, before a shorter
+/// value inside it is masked.
+///
+/// Where the head reads more than one way (no end of a value, or one of
+/// several, followed by what the scan finds after it), every reading's
+/// masked ranges are taken, and ranges that overlap are shown as one
+/// [`MASKED`].
+fn mask_values(text: &str, secrets: &[String], cut_head: bool, cut_end: bool) -> String {
     if secrets.is_empty() {
         return text.to_string();
     }
+    let mut ranges = value_ranges(text, secrets, 0, cut_end);
+    if cut_head && !newline_outside(text, &ranges) {
+        for end in head_fragments(text, secrets) {
+            ranges.push(0..end);
+            ranges.extend(value_ranges(text, secrets, end, cut_end));
+        }
+        ranges.sort_by_key(|range| (range.start, range.end));
+    }
     let mut out = String::with_capacity(text.len());
-    let mut rest = text;
-    'scan: while let Some(c) = rest.chars().next() {
+    let mut shown_to = 0;
+    let mut ranges = ranges.into_iter().peekable();
+    while let Some(range) = ranges.next() {
+        let mut end = range.end;
+        while let Some(next) = ranges.next_if(|next| next.start < end) {
+            end = end.max(next.end);
+        }
+        out.push_str(&text[shown_to..range.start]);
+        out.push_str(MASKED);
+        shown_to = end;
+    }
+    out.push_str(&text[shown_to..]);
+    out
+}
+
+/// Does `text` hold a newline outside `ranges` (sorted, apart)?
+fn newline_outside(text: &str, ranges: &[std::ops::Range<usize>]) -> bool {
+    let mut from = 0;
+    for range in ranges {
+        if text[from..range.start].contains('\n') {
+            return true;
+        }
+        from = range.end;
+    }
+    text[from..].contains('\n')
+}
+
+/// The byte ranges of `text` from `from` on that one scan masks: at each
+/// place the longest value that begins there; with `cut_end`, the rest of
+/// `text` where it is a proper start of a value and no whole value begins.
+fn value_ranges(
+    text: &str,
+    secrets: &[String],
+    from: usize,
+    cut_end: bool,
+) -> Vec<std::ops::Range<usize>> {
+    let mut ranges = Vec::new();
+    let mut at = from;
+    'scan: while let Some(c) = text[at..].chars().next() {
+        let rest = &text[at..];
         for secret in secrets {
             if !secret.is_empty() && rest.starts_with(secret.as_str()) {
-                out.push_str(MASKED);
-                rest = &rest[secret.len()..];
+                ranges.push(at..at + secret.len());
+                at += secret.len();
                 continue 'scan;
             }
         }
@@ -140,19 +191,18 @@ fn mask_values(text: &str, secrets: &[String], cut_end: bool) -> String {
                 .iter()
                 .any(|secret| secret.len() > rest.len() && secret.starts_with(rest))
         {
-            out.push_str(MASKED);
+            ranges.push(at..text.len());
             break;
         }
-        out.push(c);
-        rest = &rest[c.len_utf8()..];
+        at += c.len_utf8();
     }
-    out
+    ranges
 }
 
-/// A tail the ring cut at its head may begin with the end of a value: the
-/// longest end of any `secrets` value that `text` begins with is masked.
-fn mask_head_fragment(text: &str, secrets: &[String]) -> String {
-    let longest = secrets
+/// The length of every proper end of a `secrets` value that `text` begins
+/// with: where a value the ring cut at its head may end.
+fn head_fragments(text: &str, secrets: &[String]) -> Vec<usize> {
+    let mut ends: Vec<usize> = secrets
         .iter()
         .flat_map(|secret| {
             secret
@@ -162,11 +212,10 @@ fn mask_head_fragment(text: &str, secrets: &[String]) -> String {
         })
         .filter(|end| text.starts_with(end))
         .map(str::len)
-        .max();
-    match longest {
-        Some(len) => format!("{MASKED}{}", &text[len..]),
-        None => text.to_string(),
-    }
+        .collect();
+    ends.sort_unstable();
+    ends.dedup();
+    ends
 }
 
 /// The name a credential travels under: one of [`looks_like_a_secret`]'s five
@@ -455,6 +504,52 @@ mod tests {
             let detail = compose_detail("x", &snapshot(raw.as_bytes(), false), &repetitive);
             assert_eq!(tail_of(&detail), shown, "{raw}");
         }
+    }
+
+    /// The end of a value the ring cut at the tail's head is judged on the
+    /// text as the server wrote it: a shorter value inside it does not hide
+    /// it from the check, and where the head reads two ways — the end of a
+    /// value, or a shorter end followed by a whole value — neither shows.
+    #[test]
+    fn a_value_cut_at_the_tail_s_head_is_judged_on_the_text_as_written() {
+        let with_a_short_value = vec!["tok-0123456789".to_string(), "8".to_string()];
+        for (raw, shown) in [
+            ("56789 then more", "<masked> then more"),
+            ("56789 then tok-0123456789", "<masked> then <masked>"),
+        ] {
+            let detail = compose_detail("x", &snapshot(raw.as_bytes(), true), &with_a_short_value);
+            assert_eq!(tail_of(&detail), shown, "{raw}");
+        }
+        let repetitive = vec!["abcabc".to_string()];
+        for (raw, shown) in [
+            ("bcabc x", "<masked> x"),
+            ("abcabc x", "<masked> x"),
+            ("cabcabc x", "<masked> x"),
+            ("bcabcabc x", "<masked> x"),
+            ("c x abcabc", "<masked> x <masked>"),
+        ] {
+            let detail = compose_detail("x", &snapshot(raw.as_bytes(), true), &repetitive);
+            assert_eq!(tail_of(&detail), shown, "{raw}");
+        }
+        // Every reading counts, not only the longest end and the plain scan:
+        // "x" (the end of "qx") then the whole "yzw" is the one that masks
+        // the "w" — "xy" (the end of "qqxy") and the scan's "xyz" stop
+        // short of it.
+        let overlapping = ["qqxy", "qx", "yzw", "xyz"].map(String::from).to_vec();
+        let detail = compose_detail("x", &snapshot(b"xyzw!", true), &overlapping);
+        assert_eq!(tail_of(&detail), "<masked>!");
+        // A newline inside a value (a PEM key, a JSON credential) is not a
+        // whole line: the head is still checked.
+        let multi_line = vec!["tok-0123456789".to_string(), "l1\nl2".to_string()];
+        let detail = compose_detail("x", &snapshot(b"456789 and l1\nl2 end", true), &multi_line);
+        assert_eq!(tail_of(&detail), "<masked> and <masked> end");
+        // Without the ring's cut the head is read as it is.
+        let detail = compose_detail(
+            "x",
+            &snapshot(b"56789 then more", false),
+            &with_a_short_value,
+        );
+        assert_eq!(tail_of(&detail), "567<masked>9 then more");
     }
 
     /// A value straddling the output's cut: masking comes first, so the cut
