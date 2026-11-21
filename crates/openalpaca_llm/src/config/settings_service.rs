@@ -33,8 +33,9 @@ pub use super::settings_types::{
 /// default is the plain write this service always did, which is what a test or
 /// a caller with no core dependency gets.
 ///
-/// Called with `<config_path>.lock` already held — `file_lock` locks per
-/// descriptor, so a writer that took the lock again would deadlock.
+/// Called with `<config_path>.lock` already held — the lock is a `flock` lock,
+/// which belongs to the open file description, so a writer that took the lock
+/// again would block for ever behind its own caller.
 pub type ConfigWriter = Arc<dyn Fn(&Path, &str) -> Result<(), String> + Send + Sync>;
 
 fn default_config_writer() -> ConfigWriter {

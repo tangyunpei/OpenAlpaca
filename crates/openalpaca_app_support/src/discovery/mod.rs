@@ -216,30 +216,57 @@ pub fn is_process_alive(_pid: u32) -> bool {
 }
 
 // ============================================================================
-// Singleton Lock (POSIX Advisory Lock)
+// Singleton Lock (an advisory whole-file lock)
 // ============================================================================
 
-/// Acquires an exclusive lock on the daemon lock file.
+/// The daemon's singleton lock, held for as long as this guard lives.
 ///
-/// - `block`: If true, wait for the lock. If false, fail immediately if locked.
-/// - Returns: A `FileLock` guard. The lock is released when this guard is dropped.
+/// It is the open lock file itself: `std`'s `File::try_lock` takes a `flock`
+/// lock on Unix, which belongs to the open file description, so dropping the
+/// guard closes the file and releases the lock — no explicit unlock. Another
+/// open of the same file, in this process or another, is refused while it
+/// lives.
+#[must_use = "the singleton lock is released as soon as this guard is dropped"]
+#[derive(Debug)]
+pub struct SingleInstanceLock(
+    #[expect(dead_code, reason = "held only so that dropping it releases the lock")] fs::File,
+);
+
+/// Takes the daemon's singleton lock (`state/openalpacad.lock`) without
+/// waiting: a lock another holder already has is refused at once.
+///
+/// - Returns: A [`SingleInstanceLock`] guard. The lock is released when this
+///   guard is dropped.
 ///
 /// # Errors
-/// Returns error if the lock cannot be acquired (another daemon is running).
-pub fn acquire_single_instance_lock(block: bool) -> anyhow::Result<file_lock::FileLock> {
+/// When another holder has the lock (another daemon is running or starting,
+/// or a local verb holds the store), the error says that the lock file is
+/// held by another process. A lock file that cannot be opened (one owned by
+/// another user) or any other failure is passed through.
+pub fn acquire_single_instance_lock() -> anyhow::Result<SingleInstanceLock> {
     // `state_dir()` creates the directory (0700 on Unix) if it is missing;
     // `lock_path()` itself is a pure path query.
     paths::state_dir()?;
     let lock_path = paths::lock_path()?;
-    let lock_path_str = lock_path.to_str().context("Lock path is not valid UTF-8")?;
 
-    let options = file_lock::FileOptions::new()
-        .write(true)
+    // Opened for writing (append implies it), so a lock file this user cannot
+    // write — one a daemon run under `sudo` left owned by root — is refused
+    // here as it always was.
+    let file = fs::OpenOptions::new()
         .create(true)
-        .append(true);
-
-    let guard = file_lock::FileLock::lock(lock_path_str, block, options)
+        .append(true)
+        .open(&lock_path)
         .map_err(|e| anyhow::anyhow!("Failed to acquire singleton lock: {e}"))?;
+
+    match file.try_lock() {
+        Ok(()) => {}
+        Err(fs::TryLockError::WouldBlock) => {
+            bail!("{} is held by another process", lock_path.display());
+        }
+        Err(fs::TryLockError::Error(e)) => {
+            bail!("Failed to acquire singleton lock: {e}");
+        }
+    }
 
     // Set restrictive permissions on lock file
     #[cfg(unix)]
@@ -248,7 +275,7 @@ pub fn acquire_single_instance_lock(block: bool) -> anyhow::Result<file_lock::Fi
         let _ = fs::set_permissions(&lock_path, fs::Permissions::from_mode(0o600));
     }
 
-    Ok(guard)
+    Ok(SingleInstanceLock(file))
 }
 
 // ============================================================================

@@ -135,10 +135,11 @@ where
 /// `LlmSettingsService::persist_only` renders the document itself and writes it
 /// through here — one implementation of the crash semantics, three writers.
 ///
-/// **The caller owns `<path>.lock`.** `file_lock` locks per descriptor, so
-/// taking the lock here as well would deadlock the callers that already hold
-/// it (`atomic_write_toml`; `persist_only`, through
-/// `openalpaca_llm`'s `acquire_config_write_lock`, which names the same file).
+/// **The caller owns `<path>.lock`.** The lock is a `flock` lock, which
+/// belongs to the open file description, so taking it here as well would
+/// block for ever behind the callers that already hold it
+/// (`atomic_write_toml`; `persist_only`, through `openalpaca_llm`'s
+/// `acquire_config_write_lock`, which names the same file).
 pub fn atomic_write_with_backup(path: &Path, contents: &str) -> Result<(), ConfigWriteError> {
     let original = match std::fs::read_to_string(path) {
         Ok(text) => Some(text),
@@ -235,10 +236,21 @@ pub fn copy_unparseable_once(path: &Path) -> Option<PathBuf> {
     }
 }
 
+/// The held write lock on a config file's `<name>.lock`: the open lock file,
+/// whose drop closes it and so releases the lock.
+#[must_use = "the write lock is released as soon as this guard is dropped"]
+struct ConfigWriteLock(
+    #[expect(dead_code, reason = "held only so that dropping it releases the lock")] std::fs::File,
+);
+
 /// The lock guarding writes to `path`. It sits beside the file it guards, so
 /// every writer of the same config agrees on it without this module resolving
 /// a directory of its own.
-fn acquire_write_lock(path: &Path) -> Result<file_lock::FileLock, ConfigWriteError> {
+///
+/// It waits for the lock with no timeout (`File::lock`): a writer holding it
+/// does one read-modify-write, and another writer of the same file — in
+/// another process or on another thread of this one — waits for that.
+fn acquire_write_lock(path: &Path) -> Result<ConfigWriteLock, ConfigWriteError> {
     let mut name = std::ffi::OsString::from(file_name(path));
     name.push(".lock");
     let lock_path = path.with_file_name(name);
@@ -248,8 +260,16 @@ fn acquire_write_lock(path: &Path) -> Result<file_lock::FileLock, ConfigWriteErr
             source,
         })?;
     }
-    let options = file_lock::FileOptions::new().write(true).create(true);
-    file_lock::FileLock::lock(&lock_path, true, options).map_err(|source| ConfigWriteError::Lock {
+    let lock = || -> std::io::Result<ConfigWriteLock> {
+        let file = std::fs::OpenOptions::new()
+            .write(true)
+            .create(true)
+            .truncate(false)
+            .open(&lock_path)?;
+        file.lock()?;
+        Ok(ConfigWriteLock(file))
+    };
+    lock().map_err(|source| ConfigWriteError::Lock {
         path: lock_path,
         source,
     })

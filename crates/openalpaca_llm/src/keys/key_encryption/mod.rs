@@ -289,13 +289,26 @@ impl KeyEncryptor {
     }
 }
 
+/// The held write lock on a config file's `<name>.lock`: the open lock file,
+/// whose drop closes it and so releases the lock.
+#[must_use = "the config write lock is released as soon as this guard is dropped"]
+#[derive(Debug)]
+pub struct ConfigWriteLock(
+    #[expect(dead_code, reason = "held only so that dropping it releases the lock")] std::fs::File,
+);
+
 /// Acquire a file lock for writing `config_path`. Returns a guard that releases
 /// on drop.
 ///
 /// The lock sits beside the file it guards (`<config_path>.lock`), so every
 /// writer of the same config agrees on it without this crate resolving a
 /// directory of its own — and locking a config never creates a second root.
-pub fn acquire_config_write_lock(config_path: &Path) -> Result<file_lock::FileLock, String> {
+///
+/// It waits for the lock with no timeout (`File::lock`, a `flock` lock on
+/// Unix, which belongs to the open file description): another writer of the
+/// same file — in another process or on another thread of this one — waits
+/// until the holder drops its guard.
+pub fn acquire_config_write_lock(config_path: &Path) -> Result<ConfigWriteLock, String> {
     let mut name = config_path
         .file_name()
         .ok_or_else(|| format!("Config path has no file name: {}", config_path.display()))?
@@ -306,8 +319,16 @@ pub fn acquire_config_write_lock(config_path: &Path) -> Result<file_lock::FileLo
         std::fs::create_dir_all(parent)
             .map_err(|e| format!("Failed to create {}: {e}", parent.display()))?;
     }
-    let opts = file_lock::FileOptions::new().write(true).create(true);
-    file_lock::FileLock::lock(&lock_path, true, opts).map_err(|e| {
+    let lock = || -> std::io::Result<ConfigWriteLock> {
+        let file = std::fs::OpenOptions::new()
+            .write(true)
+            .create(true)
+            .truncate(false)
+            .open(&lock_path)?;
+        file.lock()?;
+        Ok(ConfigWriteLock(file))
+    };
+    lock().map_err(|e| {
         format!(
             "Failed to acquire config write lock at {}: {e}",
             lock_path.display()

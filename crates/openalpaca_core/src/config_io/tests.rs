@@ -241,3 +241,54 @@ fn a_store_that_does_not_exist_yet_is_created() {
     let backups = openalpaca_app_support::paths::backups_dir().unwrap();
     assert_eq!(std::fs::read_dir(&backups).unwrap().count(), 0);
 }
+
+/// M17: `<path>.lock` excludes a second writer in this same process, not only
+/// in another one. The lock is a `flock` lock, which belongs to the open file
+/// description, so a writer on another thread waits until the holder drops
+/// it — the lost-update race between two in-process writers of one file is
+/// closed. `lock()` has no timeout, so this test bounds itself: the waiting
+/// writer reports on a channel read with `recv_timeout`, never a bare join.
+#[test]
+fn a_second_writer_in_this_process_waits_for_the_lock() {
+    use std::sync::mpsc::{RecvTimeoutError, channel};
+    use std::time::Duration;
+
+    let tmp = tempfile::tempdir().unwrap();
+    let _home = HomeStoreGuard::set(&tmp.path().join("home"));
+    let path = tmp.path().join("mcp.toml");
+    std::fs::write(&path, HAND_AUTHORED).unwrap();
+
+    let held = acquire_write_lock(&path).unwrap();
+    let (done, finished) = channel();
+    let writer = {
+        let path = path.clone();
+        std::thread::spawn(move || {
+            let result = atomic_write_toml(&path, set_enabled("github", false), reparse_servers);
+            let _ = done.send(result.map_err(|e| e.to_string()));
+        })
+    };
+
+    let while_held = finished.recv_timeout(Duration::from_millis(500));
+    let untouched = std::fs::read_to_string(&path).unwrap();
+    // Released before any assert can panic, so the writer is never left
+    // blocked behind a failed test.
+    drop(held);
+
+    assert!(
+        matches!(while_held, Err(RecvTimeoutError::Timeout)),
+        "the second writer finished while the first held the lock: {while_held:?}"
+    );
+    assert_eq!(
+        untouched, HAND_AUTHORED,
+        "the file changed under a held lock"
+    );
+    let result = finished
+        .recv_timeout(Duration::from_secs(10))
+        .expect("the second writer did not finish once the lock was released");
+    result.unwrap();
+    writer.join().unwrap();
+    assert_eq!(
+        std::fs::read_to_string(&path).unwrap(),
+        HAND_AUTHORED.replacen("enabled = true", "enabled = false", 1)
+    );
+}

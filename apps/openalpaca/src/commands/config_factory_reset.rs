@@ -137,7 +137,7 @@ fn claim_store(env: &dyn ConfigEnv, state_dir: &Path) -> Result<Option<impl Size
     if !state_dir.is_dir() {
         return Ok(None);
     }
-    discovery::acquire_single_instance_lock(false)
+    discovery::acquire_single_instance_lock()
         .map(Some)
         .map_err(|e| {
             if env.daemon_is_running() {

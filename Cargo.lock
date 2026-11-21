@@ -1828,16 +1828,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "file-lock"
-version = "2.1.11"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "040b48f80a749da50292d0f47a1e2d5bf1d772f52836c07f64bfccc62ba6e664"
-dependencies = [
- "cc",
- "libc",
-]
-
-[[package]]
 name = "find-msvc-tools"
 version = "0.1.15"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -3874,7 +3864,6 @@ dependencies = [
  "anyhow",
  "base64 0.23.1",
  "chrono",
- "file-lock",
  "libc",
  "rand 0.10.3",
  "serde",
@@ -3925,7 +3914,6 @@ dependencies = [
  "chrono",
  "dashmap",
  "dynosaur",
- "file-lock",
  "futures-util",
  "infer",
  "libc",
@@ -3986,7 +3974,6 @@ dependencies = [
  "bytes",
  "dashmap",
  "dynosaur",
- "file-lock",
  "futures-util",
  "keyring-core",
  "rand 0.10.3",

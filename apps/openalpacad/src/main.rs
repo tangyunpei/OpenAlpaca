@@ -125,7 +125,7 @@ fn main() -> Result<()> {
 
     // D3: Singleton lock FIRST — prevents all multi-process races.
     // Acquired before any config I/O or key generation.
-    let _lock_guard = match discovery::acquire_single_instance_lock(false) {
+    let _lock_guard = match discovery::acquire_single_instance_lock() {
         Ok(guard) => {
             info!("Acquired singleton lock");
             guard

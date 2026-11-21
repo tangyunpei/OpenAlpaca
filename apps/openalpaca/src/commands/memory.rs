@@ -1811,7 +1811,7 @@ running daemon instead.)";
 /// two can hold the store. The lock decides; the liveness check only
 /// chooses the words.
 fn claim_store() -> Result<impl Sized> {
-    discovery::acquire_single_instance_lock(false).map_err(|e| {
+    discovery::acquire_single_instance_lock().map_err(|e| {
         if crate::manager::is_daemon_running() {
             e.context(DAEMON_RUNNING_REFUSAL)
         } else {

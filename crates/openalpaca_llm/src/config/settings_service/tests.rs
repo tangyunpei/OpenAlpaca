@@ -602,11 +602,12 @@ context = 8192
 /// through is the outcome R61 exists to prevent: a default model served by a
 /// provider nobody loaded.
 ///
-/// Staging the race needs a second **process**: the lock is POSIX `fcntl`, which
-/// is per process, so a competing lock taken in this one would not contend at
-/// all. The helper holds the lock while the default model moves under the
-/// disable that is waiting for it. No `python3` on PATH means the race cannot be
-/// staged, and the test says so rather than passing quietly.
+/// The race is staged from a second **process**, as another writer of the file
+/// would hold it: the helper takes the same `flock` lock the service takes and
+/// holds it while the default model moves under the disable that is waiting
+/// for it. (A writer in this process now contends too; the next test pins
+/// that.) No `python3` on PATH means the race cannot be staged, and the test
+/// says so rather than passing quietly.
 #[tokio::test]
 async fn the_default_model_refusal_is_read_under_the_write_lock() {
     use std::io::{BufRead, BufReader, Write};
@@ -627,7 +628,7 @@ async fn the_default_model_refusal_is_read_under_the_write_lock() {
         .arg(
             "import fcntl, sys\n\
              f = open(sys.argv[1], 'a')\n\
-             fcntl.lockf(f, fcntl.LOCK_EX)\n\
+             fcntl.flock(f, fcntl.LOCK_EX)\n\
              print('locked', flush=True)\n\
              sys.stdin.readline()\n",
         )
@@ -685,6 +686,59 @@ async fn the_default_model_refusal_is_read_under_the_write_lock() {
     assert!(
         h.router.configured_providers().contains(&ProviderType::OpenAI),
         "and nothing was unloaded"
+    );
+}
+
+/// M17: a second `llm.toml` writer in this same process waits for the write
+/// lock. The lock is a `flock` lock, which belongs to the open file
+/// description, so a lock held on one thread stops `persist_only` on another
+/// until it is dropped — two writers on one GUI screen serialise instead of
+/// losing an update. `lock()` has no timeout, so this test bounds itself with
+/// `recv_timeout`, never a bare join.
+#[test]
+fn a_second_writer_in_this_process_waits_for_the_write_lock() {
+    use std::sync::mpsc::{RecvTimeoutError, channel};
+    use std::time::Duration;
+
+    let h = Arc::new(Harness::new());
+    h.register_stub(ProviderType::Anthropic);
+    h.register_stub(ProviderType::OpenAI);
+
+    let held = crate::keys::key_encryption::acquire_config_write_lock(&h.path).unwrap();
+    let (done, finished) = channel();
+    let disabler = {
+        let h = Arc::clone(&h);
+        // Its own thread and its own runtime: the call blocks on the lock.
+        std::thread::spawn(move || {
+            let result = tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+                .unwrap()
+                .block_on(h.service.set_provider_enabled("openai", false));
+            let _ = done.send(result.map_err(|e| format!("{e:?}")));
+        })
+    };
+
+    let while_held = finished.recv_timeout(Duration::from_millis(500));
+    let written_while_held = h.writes.lock().unwrap().len();
+    // Released before any assert can panic, so the writer is never left
+    // blocked behind a failed test.
+    drop(held);
+
+    assert!(
+        matches!(while_held, Err(RecvTimeoutError::Timeout)),
+        "the second writer finished while the first held the lock: {while_held:?}"
+    );
+    assert_eq!(written_while_held, 0, "a write landed under a held lock");
+    let result = finished
+        .recv_timeout(Duration::from_secs(10))
+        .expect("the second writer did not finish once the lock was released");
+    result.unwrap();
+    disabler.join().unwrap();
+    assert_eq!(
+        h.writes.lock().unwrap().len(),
+        1,
+        "the waiting write landed once"
     );
 }
 

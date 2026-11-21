@@ -42,7 +42,6 @@ base64.workspace = true
 rand.workspace = true
 uuid.workspace = true
 keyring-core.workspace = true
-file-lock.workspace = true
 
 # Streaming support
 futures-util.workspace = true

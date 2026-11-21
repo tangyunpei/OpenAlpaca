@@ -133,7 +133,7 @@ pub fn running_daemon_pid() -> Option<u32> {
 /// acquisition, the probe creates `state/` and the lock file when they are
 /// missing, so call it only once a daemon has been found.
 pub fn singleton_lock_is_free() -> bool {
-    crate::discovery::acquire_single_instance_lock(false).is_ok()
+    crate::discovery::acquire_single_instance_lock().is_ok()
 }
 
 /// Wait for the daemon to be completely gone: first the process, then the

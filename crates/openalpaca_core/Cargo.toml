@@ -36,7 +36,6 @@ chrono.workspace = true
 regex.workspace = true
 toml.workspace = true
 toml_edit.workspace = true
-file-lock.workspace = true
 tempfile.workspace = true
 dashmap.workspace = true
 reqwest.workspace = true

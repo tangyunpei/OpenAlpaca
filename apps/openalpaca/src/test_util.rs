@@ -263,9 +263,9 @@ const LOCKED: &str = "OPENALPACA_TEST_LOCK_HELD";
 /// — what a running, or still booting, daemon looks like to anything that
 /// tries to take that lock.
 ///
-/// It has to be another process. The lock is a POSIX `fcntl` record lock, and
-/// a process never conflicts with itself on one: a second acquisition in the
-/// same process succeeds, and dropping it releases the first.
+/// It is another process, as a daemon is, so the lock is held exactly as a
+/// running daemon holds it. The lock is a `flock` lock, which belongs to the
+/// open file description.
 pub(crate) struct LockHolder {
     child: Child,
     stdout: BufReader<ChildStdout>,
@@ -345,7 +345,7 @@ fn singleton_lock_holder_process() {
         Some(root),
         "the lock holder must inherit a sandboxed store; refusing to lock anything else"
     );
-    let _lock = openalpaca_app_support::discovery::acquire_single_instance_lock(false)
+    let _lock = openalpaca_app_support::discovery::acquire_single_instance_lock()
         .expect("take the singleton lock");
     println!("{LOCKED}");
     std::io::stdout().flush().expect("flush");
