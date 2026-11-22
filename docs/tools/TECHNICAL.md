@@ -1241,7 +1241,8 @@ depends on the registry dropping the last reference.
   spawn), keeping the last 4 KB, and stops 250 ms after the reap.
   `tools::extensions::stderr` masks it (the load's values, a value's
   `\r\n` read as `\n`; a value cut at the tail's head (for one holding
-  a newline, every later line of it); a value cut at the end of an
+  a newline, every later line of it; a cut tail lying wholly inside a
+  value, whole); a value cut at the end of an
   unterminated last line (for one holding a newline, also just after
   one of its newlines); inherited
   secret-named variables, generic shapes: `<masked>`), cuts it to 4 KB

@@ -11,16 +11,21 @@
 //!    values, credential-bearing arguments, the daemon's own variables with
 //!    secret-like names — replaced by [`MASKED`], longest first, a value's
 //!    `\r\n` read as `\n` as the text's is;
-//! 3. a value cut by the ring's own bound at the head masked too, or the
-//!    partial first line dropped — and the rest of a value holding a
-//!    newline (what follows one of its newlines) masked whole where the
-//!    text begins with it, at the text's start or at its second line's
-//!    (the cut fell inside a line of the value), so the drop leaves none
-//!    of its later lines; and the start of a value that ends the text (a
-//!    tail read before the server finished writing it) masked: inside a
-//!    line of it, or, for a value holding a newline, just after one of
-//!    its newlines — all judged in step 2's one scan, on the text as
-//!    written, so a shorter value inside the cut part cannot hide it;
+//! 3. a tail the ring's own bound cut at the head that lies wholly inside
+//!    one value masked whole; else a value cut at the head masked too, or
+//!    the partial first line dropped (a cut tail of one line ending with a
+//!    newline has none to drop: the value is masked) — and the rest of
+//!    a value holding a newline (what follows one of its newlines) masked
+//!    whole where the text begins with it, at the text's start or at its
+//!    second line's (the cut fell inside a line of the value), so the drop
+//!    leaves none of its later lines; and the start of a value that ends
+//!    the text (a tail read before the server finished writing it) masked:
+//!    inside a line of it, or, for a value holding a newline, just after
+//!    one of its newlines — all judged in step 2's one scan, on the text as
+//!    written, so a shorter value inside a part cut at the head cannot hide
+//!    it (at the end one still can: a shorter value that is a prefix of a
+//!    longer one ending the text is masked whole and the longer value's cut
+//!    start after it is shown);
 //! 4. the generic shapes of a credential masked: a URL's userinfo, a bearer
 //!    token, an `Authorization` or `Cookie` header's value, a `key=value` or
 //!    `"key": "value"` whose name looks like a secret, a sensitive query
@@ -135,12 +140,14 @@ fn as_read(secrets: &[String]) -> Vec<String> {
 /// Every occurrence of a `secrets` value replaced by [`MASKED`], the longest
 /// value first at each place; also the longest start of a value that `text`
 /// ends with (see [`value_ranges`]); with `cut_head` (the ring cut the tail's
-/// head), also the rest of a value holding a newline — what follows one of
-/// its newlines — that `text` begins with, at its start or just after its
-/// first newline, and, with no newline left outside the masked values (no
-/// whole line, so no first line for [`shown_tail`] to drop), every end of a
-/// value that `text` begins with: each judged on the text as written, before
-/// a shorter value inside it is masked.
+/// head), the whole text when it lies wholly inside a value
+/// ([`lies_inside_a_value`]), else also the rest of a value holding a
+/// newline — what follows one of its newlines — that `text` begins with, at
+/// its start or just after its first newline, and, with no newline left
+/// outside the masked values once trailing newlines are trimmed (no whole
+/// line, so no first line for [`shown_tail`] to drop), every end of a value
+/// that `text` begins with: each judged on the text as written, before a
+/// shorter value inside it is masked.
 ///
 /// The rest of a value is looked for at those two places only. [`shown_tail`]
 /// drops the cut head's first line, so what is shown begins at the second
@@ -158,6 +165,9 @@ fn mask_values(text: &str, secrets: &[String], cut_head: bool) -> String {
     if secrets.is_empty() {
         return text.to_string();
     }
+    if cut_head && lies_inside_a_value(text, secrets) {
+        return MASKED.to_string();
+    }
     let mut ranges = value_ranges(text, secrets, 0);
     if cut_head {
         let second_line = text.find('\n').map(|newline| newline + 1);
@@ -168,7 +178,9 @@ fn mask_values(text: &str, secrets: &[String], cut_head: bool) -> String {
             }
         }
         ranges.sort_by_key(|range| (range.start, range.end));
-        if !newline_outside(text, &ranges) {
+        // Judged on the text the drop sees: trailing newlines are trimmed
+        // before it, so they are no whole line.
+        if !newline_outside(text.trim_end_matches('\n'), &ranges) {
             for end in head_fragments(text, secrets) {
                 ranges.push(0..end);
                 ranges.extend(value_ranges(text, secrets, end));
@@ -193,16 +205,38 @@ fn mask_values(text: &str, secrets: &[String], cut_head: bool) -> String {
 }
 
 /// Does `text` hold a newline outside `ranges` (sorted by start; they may
-/// overlap)?
+/// overlap, and may reach past `text`, a start of a longer text)?
 fn newline_outside(text: &str, ranges: &[std::ops::Range<usize>]) -> bool {
     let mut from = 0;
     for range in ranges {
-        if range.start > from && text[from..range.start].contains('\n') {
+        let start = range.start.min(text.len());
+        if start > from && text[from..start].contains('\n') {
             return true;
         }
-        from = from.max(range.end);
+        from = from.max(range.end).min(text.len());
     }
     text[from..].contains('\n')
+}
+
+/// Does `text`, which is not only newlines, lie wholly inside one of
+/// `secrets` — a piece of a value with neither of its ends, as a tail the
+/// ring cut inside a value and that ends inside it, or at one of its
+/// newlines, reads? Judged on the text as read, before a first line is
+/// dropped or trailing newlines trimmed: a first line that is not the end
+/// of a line of the value, or a newline where the value goes on, is not the
+/// value written. A read that stopped between a `\r` and its `\n` leaves a
+/// lone `\r`, read as the start of the value's newline ([`is_cut_start`]).
+fn lies_inside_a_value(text: &str, secrets: &[String]) -> bool {
+    if text.trim_end_matches('\n').is_empty() {
+        return false;
+    }
+    let cut_newline = text.strip_suffix('\r').map(|before| format!("{before}\n"));
+    secrets.iter().any(|secret| {
+        secret.contains(text)
+            || cut_newline
+                .as_deref()
+                .is_some_and(|read| secret.contains(read))
+    })
 }
 
 /// The byte ranges of `text` from `from` on that one scan masks: at each
@@ -851,6 +885,168 @@ mod tests {
         raw.extend_from_slice(b"1\nbb2\ncc3 rest\nlast");
         let detail = compose_detail("x", &snapshot(&raw, true), &wide);
         assert_eq!(tail_of(&detail), "<masked> rest\nlast");
+    }
+
+    /// A cut tail of one line that ends with a newline shows none of the end
+    /// of a value it begins with: there is no first line for the drop to
+    /// take, so the end is masked as in a tail with no newline at all — the
+    /// newline is judged on the text the drop sees, trailing newlines
+    /// trimmed.
+    #[test]
+    fn a_cut_tail_of_one_line_ending_with_a_newline_shows_no_value_s_end() {
+        let single = vec!["tok-0123456789".to_string()];
+        let failures = mismatches(
+            &single,
+            &[
+                ("456789 then more\n", true, "<masked> then more"),
+                ("456789 then more\r\n", true, "<masked> then more"),
+                ("456789 then more\n\n", true, "<masked> then more"),
+                // The cost, as for a cut tail with no newline: a one-line
+                // cut tail that begins with a one-character end of a value
+                // is masked there.
+                ("9 is a digit\n", true, "<masked> is a digit"),
+                // Regression guard (green before): with no cut at the head
+                // the text is read as it is.
+                ("456789 then more\n", false, "456789 then more"),
+                // Regression guard (green before): the end check is left
+                // alone — a single-line value is not read as cut when the
+                // text ends with a newline, head cut or not.
+                ("a word: tok\n", true, "a word: tok"),
+            ],
+        );
+        assert!(failures.is_empty(), "{failures:#?}");
+        let three = vec!["aa1\nbb2\ncc3".to_string()];
+        let failures = mismatches(
+            &three,
+            &[
+                ("c3 rest\n", true, "<masked> rest"),
+                ("c3 rest\r\n\n", true, "<masked> rest"),
+                // Regression guard (green before): a masked range that takes
+                // in the trailing newline.
+                ("x aa1\n", true, "x <masked>"),
+            ],
+        );
+        assert!(failures.is_empty(), "{failures:#?}");
+        // Regression guard (green before): a value whose first line is empty
+        // ends the text in its start "\n" (the mask set's cost), head cut.
+        let blank_start = vec!["\nXYZ".to_string()];
+        let failures = mismatches(&blank_start, &[("world\n", true, "world<masked>")]);
+        assert!(failures.is_empty(), "{failures:#?}");
+    }
+
+    /// A cut tail lying wholly inside one value — the ring cut its head
+    /// inside the value and the tail ends inside it too, or at one of its
+    /// own newlines — is masked whole: neither of its ends is an end or a
+    /// start of the value, so no other rule finds it. It is judged on the
+    /// text as read, before the first line is dropped and before trailing
+    /// newlines are trimmed.
+    #[test]
+    fn a_cut_tail_lying_wholly_inside_a_value_shows_none_of_it() {
+        let three = vec!["aa1\nbb2\ncc3".to_string()];
+        let failures = mismatches(
+            &three,
+            &[
+                // Cut inside a line, ended inside a line.
+                ("bb2\ncc", true, "<masked>"),
+                ("a1\nbb2\ncc", true, "<masked>"),
+                // A whole middle line of it.
+                ("bb2", true, "<masked>"),
+                // One line ending with one of its newlines (with the cut
+                // tail of one line ending in a newline).
+                ("b2\n", true, "<masked>"),
+                // The value read with `\n`, the text written with `\r\n`.
+                ("bb2\r\ncc", true, "<masked>"),
+                // Regression guard (green before): with no cut at the head
+                // the text is read as it is.
+                ("bb2\ncc", false, "bb2\ncc"),
+                // Regression guard (green before): a whole line not in the
+                // value is never masked by this rule.
+                ("bb2\nzz9 x\ncc", true, "zz9 x\ncc"),
+                // Judged before the drop (regression guard, green before):
+                // a first line that is not the end of a line of the value
+                // is not the value written, so what follows it is ordinary
+                // text.
+                ("zz\nbb2\ncc", true, "bb2\ncc"),
+            ],
+        );
+        assert!(failures.is_empty(), "{failures:#?}");
+        // Ending at one of the value's own newlines: shown before.
+        let four = vec!["aa1\nbb2\ncc3\ndd4".to_string()];
+        let failures = mismatches(
+            &four,
+            &[
+                ("bb2\ncc3\n", true, "<masked>"),
+                ("b2\ncc3\n", true, "<masked>"),
+                ("\ncc3\n", true, "<masked>"),
+                ("b2\nc", true, "<masked>"),
+            ],
+        );
+        assert!(failures.is_empty(), "{failures:#?}");
+        // A single-line value longer than the tail on both sides.
+        let single = vec!["abcdefgh".to_string()];
+        let failures = mismatches(
+            &single,
+            &[
+                ("cde", true, "<masked>"),
+                // Regression guard (green before): no cut at the head.
+                ("cde", false, "cde"),
+                // Judged before the trim (regression guard, green before):
+                // a newline where the value goes on is not the value
+                // written.
+                ("cde\n", true, "cde"),
+            ],
+        );
+        assert!(failures.is_empty(), "{failures:#?}");
+        // A value with CRLF line ends, read as the text is.
+        let crlf = vec!["aa1\r\nbb2\r\ncc3\r\ndd4".to_string()];
+        let failures = mismatches(
+            &crlf,
+            &[
+                ("bb2\r\ncc", true, "<masked>"),
+                ("bb2\ncc", true, "<masked>"),
+            ],
+        );
+        assert!(failures.is_empty(), "{failures:#?}");
+        // Two values, the tail inside the longer only; and a shorter value
+        // inside the tail, which does not hide it (judged before the
+        // values are masked).
+        for values in [
+            ["abcdefgh", "aa1\nbb2\ncc3\ndd4"],
+            ["aa1\nbb2\ncc3\ndd4", "2"],
+        ] {
+            let values = values.map(String::from).to_vec();
+            let failures = mismatches(&values, &[("b2\ncc", true, "<masked>")]);
+            assert!(failures.is_empty(), "{values:?}: {failures:#?}");
+        }
+        // A cut text of newlines only is still nothing to show (regression
+        // guard, green before), even inside a value with a blank line.
+        let blank = vec!["aa1\n\nbb2".to_string()];
+        let detail = compose_detail("x", &snapshot(b"\n", true), &blank);
+        assert_eq!(detail, "x");
+        // The cost: an ordinary cut tail that is a piece of a value is
+        // masked whole (in practice a cut tail is the ring's whole 4 KB).
+        let json = vec!["{\n\"k\": 1\n}".to_string()];
+        let failures = mismatches(&json, &[(": 1", true, "<masked>")]);
+        assert!(failures.is_empty(), "{failures:#?}");
+        // Regression guards (green before): a cut tail that is a whole
+        // value, or an end of one, was masked already.
+        let failures = mismatches(&json, &[("}", true, "<masked>")]);
+        assert!(failures.is_empty(), "{failures:#?}");
+        let one = vec!["1".to_string()];
+        let failures = mismatches(&one, &[("1", true, "<masked>")]);
+        assert!(failures.is_empty(), "{failures:#?}");
+    }
+
+    /// A cut tail lying wholly inside a value whose read stopped between a
+    /// `\r` and its `\n`: the lone `\r` is read as the start of the value's
+    /// newline, as at the end of any text (step 1's reading at a cut).
+    #[test]
+    fn a_cut_tail_inside_a_value_read_stopped_after_a_cr_shows_none_of_it() {
+        for value in ["aa1\nbb2\ncc3\ndd4", "aa1\r\nbb2\r\ncc3\r\ndd4"] {
+            let values = vec![value.to_string()];
+            let failures = mismatches(&values, &[("bb2\r\ncc3\r", true, "<masked>")]);
+            assert!(failures.is_empty(), "{value:?}: {failures:#?}");
+        }
     }
 
     /// A value straddling the output's cut: masking comes first, so the cut
