@@ -1244,7 +1244,9 @@ depends on the registry dropping the last reference.
   a newline, every later line of it; a cut tail lying wholly inside a
   value, whole); a value cut at the end of an
   unterminated last line (for one holding a newline, also just after
-  one of its newlines); inherited
+  one of its newlines; not when a shorter value is a prefix of it: that
+  one is masked and the rest of the cut value shown); not a value cut
+  inside a multi-byte character, at either end; inherited
   secret-named variables, generic shapes: `<masked>`), cuts it to 4 KB
   from the end and escapes it (`escape_hidden`) into a `Failed` row's
   `detail` only — at the four places a `Failed` detail is written — never
