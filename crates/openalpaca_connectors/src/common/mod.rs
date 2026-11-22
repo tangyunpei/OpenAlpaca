@@ -3,7 +3,7 @@
 use openalpaca_core::gateway::ResolvedAttachment;
 use openalpaca_core::security::policy::Principal;
 use openalpaca_storage::store::StoreScope;
-use openalpaca_storage::{Database, IdentityRepository, NewUpload, UploadStore};
+use openalpaca_storage::{Database, FileAssetStatus, IdentityRepository, NewUpload, UploadStore};
 
 /// Resolve a Principal from an external identity.
 ///
@@ -318,6 +318,9 @@ pub fn store_attachment(
         size_bytes: stored.asset.size_bytes,
         extracted_text: stored.asset.extracted_text,
         storage_path: stored.asset.storage_path,
+        // A re-sent file is de-duplicated to its existing row, which may be
+        // one whose extraction failed.
+        extraction_failed: matches!(stored.asset.status, FileAssetStatus::Error),
     })
 }
 

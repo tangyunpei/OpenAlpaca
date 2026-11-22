@@ -2001,6 +2001,11 @@ model that will **actually answer** — resolved through the same ladder as
 | audio | does not, and a transcript was extracted | the transcript as text |
 | audio | does not, and there is no transcript | a placeholder; skipped |
 
+A document that reaches the model with no extracted text carries a note: that
+its text extraction is pending while the file is still waiting or being
+extracted, or, once its extraction has failed, that it failed and no extracted
+text is available. The failure's own reason is never sent to the model.
+
 When nothing is routable, the parts are left untouched and the router's own
 "no routable model" error is what the user sees.
 

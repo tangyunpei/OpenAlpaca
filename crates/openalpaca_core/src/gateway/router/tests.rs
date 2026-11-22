@@ -1168,6 +1168,7 @@ async fn the_attachment_path_carries_the_override_as_well() {
             size_bytes: 4,
             extracted_text: Some("note".to_string()),
             storage_path: "/tmp/note.txt".to_string(),
+            extraction_failed: false,
         }],
         ..turn(Some("gpt-5.2".to_string()))
     })

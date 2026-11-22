@@ -829,6 +829,7 @@ async fn a_memory_command_skips_the_turns_attachments_with_a_reason() {
                 size_bytes: 30,
                 extracted_text: Some("the codeword is PLATYPUS".to_string()),
                 storage_path: "/dev/null".to_string(),
+                extraction_failed: false,
             }],
         )
         .await

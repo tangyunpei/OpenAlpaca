@@ -977,6 +977,36 @@ mod attachments {
         );
     }
 
+    /// ATTACH-PLACEHOLDER: a file re-sent through a connector dedups to its
+    /// existing row; when that row's extraction failed, the attachment says
+    /// so (the model then reads the failed note, not "pending"), and the
+    /// row's error text is carried nowhere. A new upload is not failed.
+    #[test]
+    fn a_resent_file_whose_extraction_failed_is_marked_failed() {
+        let home = tempdir().unwrap();
+        let _guard = HomeStoreGuard::set(&home.path().canonicalize().unwrap());
+        let db = test_db();
+
+        let first = store(&db, "owner-1", "notes.txt", b"hello");
+        assert!(!first.extraction_failed, "a new upload is pending");
+        openalpaca_storage::FileAssetRepository::new(&db)
+            .update_status(
+                &first.file_id,
+                &openalpaca_storage::FileAssetStatus::Error,
+                None,
+                Some("[attempt:2] SENTINEL-CONNECTOR failure"),
+            )
+            .unwrap();
+
+        let again = store(&db, "owner-1", "notes.txt", b"hello");
+        assert_eq!(again.file_id, first.file_id);
+        assert!(again.extraction_failed);
+        assert!(again.extracted_text.is_none());
+        let carried = format!("{again:?}");
+        assert!(!carried.contains("SENTINEL-CONNECTOR"), "{carried}");
+        assert!(!carried.contains("[attempt:"), "{carried}");
+    }
+
     #[test]
     fn validation_still_runs_before_the_writer() {
         let home = tempdir().unwrap();

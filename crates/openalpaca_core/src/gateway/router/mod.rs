@@ -19,6 +19,12 @@ pub struct ResolvedAttachment {
     pub size_bytes: i64,
     pub extracted_text: Option<String>,
     pub storage_path: String,
+    /// The file's text extraction failed: its row is `Error`, as distinct
+    /// from pending (`Uploaded`, `Processing`), whose text may still come.
+    /// Read only from the row's status, never from its `extract_error`
+    /// (a `Processing` row carries its attempt tag there too); the error's
+    /// own text is never carried, so it cannot reach the model.
+    pub extraction_failed: bool,
 }
 
 /// Structured metadata for a delegated task, carried alongside the ack text
