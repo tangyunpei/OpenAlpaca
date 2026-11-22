@@ -139,6 +139,11 @@ fn spawn_file_processing_worker_with(
                 break;
             }
 
+            // Defensive, and untested: a stop seen here would be seen by each
+            // task's check after its slot too, so leaving this out changes no
+            // row and no extraction (only a read-only listing), and no test
+            // can tell. The behaviour is held by that later check and its
+            // test, a_stop_begins_no_attempt_on_a_row_waiting_for_a_slot.
             if cancel.is_cancelled() {
                 tracing::info!("File processing worker shutting down");
                 break;
@@ -170,6 +175,8 @@ fn spawn_file_processing_worker_with(
             let mut handles = Vec::new();
 
             for asset in assets {
+                // Defensive, and untested, as the check before the listing:
+                // a task spawned after a stop returns at its own check.
                 if cancel.is_cancelled() {
                     break;
                 }
