@@ -78,11 +78,16 @@ pub fn spawn_chat_cleanup(
 /// the singleton lock keeps any other daemon off the store. A later poll
 /// never does this: a row `Processing` then is a task of this process.
 ///
-/// A stop begins no new extraction: the poll lists and spawns nothing once
-/// the stop is asked for, and a task waiting for an extraction slot checks
-/// it after taking the slot and returns without writing, so a file that had
-/// not started when the stop came keeps its row as it was. An extraction
-/// already running is left to finish or be cut as before.
+/// A stop begins no new extraction: a task waiting for an extraction slot
+/// checks for the stop once it has the slot and returns without writing, so
+/// a file that had not started when the stop came keeps its row as it was.
+/// The worker does not cut its batch short: an extraction already running
+/// when the stop comes runs to its end, and the worker's task ends only once
+/// every task of its batch has ended, so none outlives it. A result is
+/// written only while the daemon's runtime still runs; the daemon does not
+/// wait for it, so an extraction still running when the shutdown's tail
+/// ends is lost, its row left `Processing` for the next start to count as
+/// above.
 pub fn spawn_file_processing_worker(
     db: Database,
     daemon_config: Arc<ArcSwap<openalpaca_core::daemon_config::DaemonConfig>>,
@@ -139,15 +144,6 @@ fn spawn_file_processing_worker_with(
                 break;
             }
 
-            // Defensive, and untested: a stop seen here would be seen by each
-            // task's check after its slot too, so leaving this out changes no
-            // row and no extraction (only a read-only listing), and no test
-            // can tell. The behaviour is held by that later check and its
-            // test, a_stop_begins_no_attempt_on_a_row_waiting_for_a_slot.
-            if cancel.is_cancelled() {
-                tracing::info!("File processing worker shutting down");
-                break;
-            }
             let repo = FileAssetRepository::new(&db);
 
             // Collect assets to process: new uploads + retryable errors
@@ -172,27 +168,26 @@ fn spawn_file_processing_worker_with(
             }
 
             let semaphore = Arc::new(tokio::sync::Semaphore::new(max_concurrent));
-            let mut handles = Vec::new();
+            // Drained below before the next poll; nothing between here and
+            // the drain's end leaves the loop, so the worker never drops
+            // the set (which would abort its tasks) before the drain ends;
+            // only the runtime's own teardown does, as it drops every task.
+            let mut batch = tokio::task::JoinSet::new();
 
             for asset in assets {
-                // Defensive, and untested, as the check before the listing:
-                // a task spawned after a stop returns at its own check.
-                if cancel.is_cancelled() {
-                    break;
-                }
                 let sem = semaphore.clone();
                 let db2 = db.clone();
                 let max_text = max_text_chars;
                 let cancel = cancel.clone();
                 let extract = extract.clone();
 
-                handles.push(tokio::spawn(async move {
+                batch.spawn(async move {
                     let _permit = sem.acquire().await.expect("semaphore closed");
                     // A stop asked for while this task waited for its slot:
                     // begin nothing, so the row keeps its status and its
                     // attempt count.
                     if cancel.is_cancelled() {
-                        return;
+                        return Attempt::NotBegun;
                     }
                     let repo = FileAssetRepository::new(&db2);
 
@@ -200,7 +195,7 @@ fn spawn_file_processing_worker_with(
                         Ok(prev) => prev,
                         Err(e) => {
                             tracing::warn!("Failed to mark asset {} as processing: {e}", asset.id);
-                            return;
+                            return Attempt::NotBegun;
                         }
                     };
 
@@ -227,16 +222,62 @@ fn spawn_file_processing_worker_with(
                     ) {
                         tracing::warn!("Failed to update asset {} status: {e}", asset.id);
                     }
-                }));
+                    Attempt::Written
+                });
             }
 
-            let results = futures_util::future::join_all(handles).await;
-            let processed = results.len();
-            if processed > 0 {
-                tracing::info!("File processing worker: processed {processed} assets");
+            let drained = drain_batch(&mut batch).await;
+            match (drained.written, drained.not_begun) {
+                (0, 0) => {}
+                (written, 0) => {
+                    tracing::info!("File processing worker: extracted {written} assets");
+                }
+                (written, not_begun) => tracing::info!(
+                    "File processing worker: extracted {written} assets; {not_begun} not begun"
+                ),
             }
         }
     })
+}
+
+/// How one task of the worker's batch ended.
+#[derive(Debug)]
+enum Attempt {
+    /// The attempt was begun and its result written (a failed last write
+    /// is warned where it fails).
+    Written,
+    /// Nothing was begun: the stop came while the task waited for its
+    /// slot, or its `Processing` write failed.
+    NotBegun,
+}
+
+/// What [`drain_batch`] counted.
+#[derive(Debug, Default, PartialEq)]
+struct Drained {
+    written: usize,
+    not_begun: usize,
+    panicked: usize,
+}
+
+/// Waits for every task of a batch, in the order they end, and counts how
+/// each ended. A panicked task is warned about once and the others are
+/// still awaited; the set is empty when this returns.
+async fn drain_batch(batch: &mut tokio::task::JoinSet<Attempt>) -> Drained {
+    let mut drained = Drained::default();
+    while let Some(joined) = batch.join_next().await {
+        match joined {
+            Ok(Attempt::Written) => drained.written += 1,
+            Ok(Attempt::NotBegun) => drained.not_begun += 1,
+            Err(e) if e.is_panic() => {
+                drained.panicked += 1;
+                tracing::warn!("File processing worker: an extraction task panicked: {e}");
+            }
+            Err(e) => {
+                tracing::warn!("File processing worker: an extraction task ended early: {e}");
+            }
+        }
+    }
+    drained
 }
 
 /// What a row left `Processing` at a stop carries after its `[attempt:N]`
@@ -1210,5 +1251,128 @@ mod tests {
             }
         }
         assert!(differ.is_empty(), "the readers differ: {differ:#?}");
+    }
+
+    /// What a test's subscriber writes, read back as text.
+    #[derive(Clone, Default)]
+    struct LogBuf(Arc<std::sync::Mutex<Vec<u8>>>);
+
+    impl LogBuf {
+        fn text(&self) -> String {
+            String::from_utf8_lossy(&self.0.lock().expect("log buffer")).into_owned()
+        }
+    }
+
+    impl std::io::Write for LogBuf {
+        fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+            self.0.lock().expect("log buffer").extend_from_slice(buf);
+            Ok(buf.len())
+        }
+
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+
+    impl<'a> tracing_subscriber::fmt::MakeWriter<'a> for LogBuf {
+        type Writer = LogBuf;
+
+        fn make_writer(&'a self) -> Self::Writer {
+            self.clone()
+        }
+    }
+
+    /// M40: the batch is drained to its end, a panicked task included. Each
+    /// way a task can end is counted, a panic is warned about once per
+    /// task, and the tasks after a panic are still awaited (a drain that
+    /// re-raised or stopped at the first panic would lose them).
+    #[tokio::test]
+    async fn drain_batch_counts_each_end_and_warns_once_per_panicked_task() {
+        let logs = LogBuf::default();
+        let subscriber = tracing_subscriber::fmt()
+            .with_writer(logs.clone())
+            .with_ansi(false)
+            .with_max_level(tracing::Level::WARN)
+            .finish();
+        let _default = tracing::subscriber::set_default(subscriber);
+
+        let mut batch = tokio::task::JoinSet::new();
+        batch.spawn(async { panic!("the first task panics") });
+        batch.spawn(async { Attempt::Written });
+        batch.spawn(async { Attempt::NotBegun });
+        batch.spawn(async { panic!("a later task panics") });
+        batch.spawn(async { Attempt::Written });
+
+        let drained = drain_batch(&mut batch).await;
+
+        assert_eq!(
+            drained,
+            Drained {
+                written: 2,
+                not_begun: 1,
+                panicked: 2,
+            }
+        );
+        assert!(batch.is_empty(), "every task is awaited");
+        let text = logs.text();
+        let warned = text
+            .lines()
+            .filter(|line| line.contains("an extraction task panicked"))
+            .count();
+        assert_eq!(warned, 2, "one warn per panicked task: {text}");
+    }
+
+    /// Regression guard (M40): an extractor that panics is caught on its
+    /// blocking thread and written as a failed attempt, tagged like any
+    /// other. No retry here (`extraction_retry_count` 0), so the first
+    /// attempt's write is the row's last.
+    #[tokio::test]
+    async fn an_extractor_panic_is_written_as_a_failed_attempt() {
+        let home = tempfile::tempdir().unwrap();
+        let _env = crate::test_util::HomeStoreGuard::set(&home.path().join("home"));
+        let dir = tempfile::tempdir().unwrap();
+        let db = test_db(&dir);
+        upload_row(&db, dir.path(), "boom", FileAssetStatus::Uploaded);
+
+        let mut cfg = openalpaca_core::daemon_config::DaemonConfig::default();
+        cfg.upload.governance.processing_poll_interval_secs = 1;
+        cfg.upload.governance.extraction_retry_count = 0;
+        let cancel = CancellationToken::new();
+        let extract: Extractor = Arc::new(
+            |_: &str, _: &str, _: usize| -> (Option<String>, Option<String>) {
+                panic!("the extractor panics")
+            },
+        );
+        let worker = spawn_file_processing_worker_with(
+            db.clone(),
+            Arc::new(ArcSwap::from_pointee(cfg)),
+            cancel.clone(),
+            extract,
+        );
+
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
+        while status_of(&db, "boom") != FileAssetStatus::Error {
+            assert!(
+                std::time::Instant::now() < deadline,
+                "the row fails within 30 s"
+            );
+            tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+        }
+        cancel.cancel();
+        tokio::time::timeout(std::time::Duration::from_secs(30), worker)
+            .await
+            .expect("the worker ends after the stop")
+            .expect("the worker does not panic");
+
+        let row = FileAssetRepository::new(&db)
+            .get_by_id("boom")
+            .unwrap()
+            .unwrap();
+        assert_eq!(row.status, FileAssetStatus::Error);
+        assert_eq!(row.extracted_text, None);
+        assert_eq!(
+            row.extract_error.as_deref(),
+            Some("[attempt:1] Extraction task panicked")
+        );
     }
 }
