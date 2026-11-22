@@ -220,7 +220,16 @@ impl<'a> UploadStore<'a> {
     /// transaction as the dedup decision, so the worker gives it a full
     /// count of fresh tries, unless its poll had already listed the row for
     /// a retry before the reset: that retry starts from the listed
-    /// `[attempt:N]` tag and carries the old count on, N tries fewer.
+    /// `[attempt:N]` tag and carries the old count on, N tries fewer. Where
+    /// this put also re-addressed the row because its bytes were gone, that
+    /// retry reads the listed row's old path, which is missing, and, for a
+    /// file whose text is read from it (text, PDF, Office, iWork), fails;
+    /// an image, audio or other file, whose text is not read, ends `Ready`
+    /// as it would on the new copy: at the default count a row listed at
+    /// `[attempt:1]` can end `[attempt:2]` `Error` with no try on the new
+    /// copy, though this put returned it `Uploaded`, until it is attached
+    /// again or `extraction_retry_count` is raised; an untagged row loses
+    /// that one try and is then tried on the new copy.
     /// Only an `Error` row is reset: a `Processing`
     /// row is left to the extraction running on it, and a `Ready` or
     /// `Uploaded` row is returned as it is, with nothing written.
