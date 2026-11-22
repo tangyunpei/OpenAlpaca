@@ -51,6 +51,13 @@ allow = [
     "Unicode-3.0",
     "Zlib",
 ]
+# A licence allowed for one crate only, not the workspace: MIT-0 (MIT No
+# Attribution, OSI-approved) for borrow-or-share, which jsonschema brings in
+# (referencing -> fluent-uri -> borrow-or-share, none optional; M82). Not in
+# `allow`, so no other crate and no JavaScript package gains it.
+exceptions = [
+    { crate = "borrow-or-share", allow = ["MIT-0"] },
+]
 confidence-threshold = 0.8
 
 [sources]

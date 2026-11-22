@@ -28,3 +28,8 @@ ignore-dev-dependencies = true
 # The workspace's own crates (`publish = false`) are not third-party.
 [private]
 ignore = true
+
+# deny.toml's [licenses] exceptions, crate by crate: what one crate alone may
+# be accepted under (gen_notices.py checks only the top-level `accepted`).
+[borrow-or-share]
+accepted = ["MIT-0"]

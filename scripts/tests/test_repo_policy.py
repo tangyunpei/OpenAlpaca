@@ -536,6 +536,203 @@ def test_the_picomatch_versions_are_read_from_the_lock() -> None:
         assert guard.locked_picomatch_versions(lock) == [(4, 0, 7)], guard.locked_picomatch_versions(lock)
 
 
+LOCK_BOS = LOCK_WITH_ZIP8 + """
+[[package]]
+name = "borrow-or-share"
+version = "0.2.4"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+"""
+EXC_LINE = '    { crate = "borrow-or-share", allow = ["MIT-0"] },'
+DENY_LICENSES = DENY + '\n[licenses]\nallow = ["MIT"]\n'
+DENY_EXC = DENY_LICENSES + "exceptions = [\n" + EXC_LINE + "\n]\n"
+ABOUT_PLAIN = 'accepted = ["MIT"]\n\n[private]\nignore = true\n'
+ABOUT_EXC = ABOUT_PLAIN + '\n[borrow-or-share]\naccepted = ["MIT-0"]\n'
+NAMES_JSONSCHEMA = MEMBER_A + 'jsonschema = { version = "0.62.0", default-features = false }\n'
+ABOUT_REL = "scripts/release/about.toml"
+MIRROR_TAIL = " — the two files name the same crates and licences"
+
+
+def _exc(deny: str = DENY_EXC, about: str | None = ABOUT_EXC, a: str = NAMES_JSONSCHEMA,
+         lock: str = LOCK_BOS, workspace: str = WORKSPACE, extra: dict[str, str] | None = None) -> dict:
+    """A tree holding the MIT-0 exception as built: deny.toml's entry, about.toml's table,
+    borrow-or-share in Cargo.lock and a member naming jsonschema; each argument plants one change."""
+    files = {**_members(a=a, workspace=workspace), **(extra or {})}
+    if about is not None:  # None: no about.toml at all
+        files[ABOUT_REL] = about
+    return {"deny": deny, "lock": lock, "files": files}
+
+
+def _line(text: str, line: str) -> int:
+    return text.splitlines().index(line) + 1
+
+
+def _passes(**kw) -> None:
+    with tempfile.TemporaryDirectory() as d:
+        rc, out = _run(_tree(pathlib.Path(d), **kw))
+        assert rc == 0, out
+
+
+def test_a_matched_licence_exception_passes_however_a_member_names_its_crate() -> None:
+    named = {
+        "a workspace dependency": MEMBER_A + "jsonschema.workspace = true\n",
+        "a version": NAMES_JSONSCHEMA,
+        "a dev-dependency": MEMBER_A + '\n[dev-dependencies]\njsonschema = "0.62"\n',
+        "a build-dependency": MEMBER_A + '\n[build-dependencies]\njsonschema = "0.62"\n',
+        "a target's dependency": MEMBER_A + "\n[target.'cfg(unix)'.dependencies]\njsonschema = \"0.62\"\n",
+        "a renamed package": MEMBER_A + 'js = { package = "jsonschema", version = "0.62" }\n',
+    }
+    for what, a in named.items():
+        with tempfile.TemporaryDirectory() as d:
+            rc, out = _run(_tree(pathlib.Path(d), **_exc(a=a)))
+            assert rc == 0, (what, out)
+    ws = WORKSPACE + '\n[workspace.dependencies]\njsonschema = { version = "0.62.0", default-features = false }\n'
+    _passes(**_exc(a=MEMBER_A, workspace=ws))
+    # the same tree with about.toml's table taken away is read, not passed over
+    _planted("licence-exception", **_exc(about=ABOUT_PLAIN))
+
+
+def test_an_exception_only_in_deny_toml_fails() -> None:
+    want = ("deny.toml:%d: licence-exception: borrow-or-share is allowed MIT-0 here but %s has no "
+            "[borrow-or-share] table accepting it%s" % (_line(DENY_EXC, EXC_LINE), ABOUT_REL, MIRROR_TAIL))
+    for about in (ABOUT_PLAIN, None):
+        out = _planted("licence-exception", **_exc(about=about))
+        assert want in out.splitlines(), (about, out)
+
+
+def test_a_table_only_in_about_toml_fails() -> None:
+    out = _planted("licence-exception", **_exc(deny=DENY_LICENSES))
+    want = ("%s:%d: licence-exception: [borrow-or-share] accepts MIT-0 but deny.toml's [licenses] "
+            "exceptions do not%s" % (ABOUT_REL, _line(ABOUT_EXC, "[borrow-or-share]"), MIRROR_TAIL))
+    assert want in out.splitlines(), out
+
+
+def test_unequal_licence_sets_in_the_two_files_fail() -> None:
+    n = _line(DENY_EXC, EXC_LINE)
+    wider_about = ABOUT_EXC.replace('accepted = ["MIT-0"]', 'accepted = ["MIT-0", "Unlicense"]')
+    out = _planted("licence-exception", **_exc(about=wider_about))
+    want = ("deny.toml:%d: licence-exception: borrow-or-share: deny.toml allows [MIT-0] but %s "
+            "accepts [MIT-0, Unlicense]" % (n, ABOUT_REL))
+    assert want in out.splitlines(), out
+    wider_deny = DENY_EXC.replace('allow = ["MIT-0"]', 'allow = ["MIT-0", "Unlicense"]')
+    out = _planted("licence-exception", **_exc(deny=wider_deny))
+    want = ("deny.toml:%d: licence-exception: borrow-or-share: deny.toml allows [MIT-0, Unlicense] but %s "
+            "accepts [MIT-0]" % (n, ABOUT_REL))
+    assert want in out.splitlines(), out
+
+
+def test_an_exception_whose_crate_left_the_lock_fails() -> None:
+    out = _planted("licence-exception", **_exc(lock=LOCK_WITH_ZIP8))
+    want = ("deny.toml:%d: licence-exception: borrow-or-share is excepted but Cargo.lock holds no "
+            "borrow-or-share — lift the exception and its [borrow-or-share] table in %s"
+            % (_line(DENY_EXC, EXC_LINE), ABOUT_REL))
+    assert want in out.splitlines(), out
+
+
+def test_an_exception_whose_dependency_no_manifest_names_fails() -> None:
+    out = _planted("licence-exception", **_exc(a=MEMBER_A))
+    want = ("deny.toml:%d: licence-exception: borrow-or-share is excepted for jsonschema but no workspace "
+            "manifest names jsonschema — lift the exception and its about.toml table (or record a new ruling)"
+            % _line(DENY_EXC, EXC_LINE))
+    assert want in out.splitlines(), out
+
+
+def test_both_stale_conditions_give_one_violation() -> None:
+    out = _planted("licence-exception", **_exc(lock=LOCK_WITH_ZIP8, a=MEMBER_A))
+    assert "Cargo.lock holds no borrow-or-share" in out and "no workspace manifest" not in out, out
+
+
+def test_an_exception_with_no_recorded_ruling_fails() -> None:
+    deny = DENY_LICENSES + 'exceptions = [\n    { crate = "foo", allow = ["MIT-0"] },\n]\n'
+    about = ABOUT_PLAIN + '\n[foo]\naccepted = ["MIT-0"]\n'
+    lock = LOCK_WITH_ZIP8 + '\n[[package]]\nname = "foo"\nversion = "1.0.0"\n'
+    out = _planted("licence-exception", **_exc(deny=deny, about=about, lock=lock))
+    want = ("deny.toml:%d: licence-exception: foo is excepted but repo_policy.py records no dependency it "
+            "is admitted for — record the owner's ruling in EXCEPTION_BROUGHT_BY"
+            % _line(deny, '    { crate = "foo", allow = ["MIT-0"] },'))
+    assert want in out.splitlines(), out
+
+
+def test_an_exception_spelled_another_way_fails_once() -> None:
+    # the about.toml table beside it is no second violation: the entry names its crate
+    spellings = {
+        '    { name = "borrow-or-share", allow = ["MIT-0"] },': "names its crate as name = (or with a version)",
+        '    { crate = "borrow-or-share@0.2.4", allow = ["MIT-0"] },': "names its crate as name = (or with a version)",
+        '    { crate = "borrow-or-share", version = "0.2.4", allow = ["MIT-0"] },':
+            "names its crate as name = (or with a version)",
+        '    { crate = "borrow-or-share", allow = "MIT-0" },': "has an allow that is not a list of licence names",
+    }
+    for entry, what in spellings.items():
+        deny = DENY_EXC.replace(EXC_LINE, entry)
+        out = _planted("licence-exception", **_exc(deny=deny))
+        want = ('deny.toml:%d: licence-exception: an exception %s — spell it { crate = "<name>", allow = [...] }'
+                % (_line(deny, entry), what))
+        assert want in out.splitlines(), (entry, out)
+    # an entry naming no crate at all is reported at the `exceptions =` line
+    deny = DENY_EXC.replace(EXC_LINE, '    { allow = ["MIT-0"] },')
+    out = _planted("licence-exception", **_exc(deny=deny, about=ABOUT_PLAIN))
+    assert out.startswith("deny.toml:%d: licence-exception: an exception names its crate as name = "
+                          % _line(deny, "exceptions = [")), out
+
+
+def test_the_array_of_tables_form_is_read() -> None:
+    deny = DENY_LICENSES + '\n[[licenses.exceptions]]\ncrate = "borrow-or-share"\nallow = ["MIT-0"]\n'
+    _passes(**_exc(deny=deny))
+    out = _planted("licence-exception", **_exc(deny=deny, about=ABOUT_PLAIN))
+    assert out.startswith("deny.toml:%d: licence-exception: borrow-or-share is allowed MIT-0 here"
+                          % _line(deny, 'crate = "borrow-or-share"')), out
+
+
+def test_no_exception_needs_nothing_and_comments_are_not_read() -> None:
+    commented_deny = DENY_LICENSES + '# exceptions = [{ crate = "borrow-or-share", allow = ["MIT-0"] }]\n'
+    commented_about = ABOUT_PLAIN + '# [borrow-or-share]\n# accepted = ["MIT-0"]\n'
+    clarified = ABOUT_PLAIN + '\n[ring.clarify]\nlicense = "MIT AND ISC"\n'  # a clarification is no exception
+    for about in (ABOUT_PLAIN, commented_about, clarified, None):
+        _passes(**_exc(deny=commented_deny, about=about, lock=LOCK_WITH_ZIP8, a=MEMBER_A))
+    # a commented-out table does not answer a live exception
+    _planted("licence-exception", **_exc(about=commented_about))
+
+
+def test_jsonschema_named_only_where_it_is_no_dependency_does_not_count() -> None:
+    a = MEMBER_A + '# jsonschema = "0.62"\n\n[features]\njsonschema = []\n'
+    outside = {"tools/x/Cargo.toml": '[package]\nname = "x"\n[dependencies]\njsonschema = "0.62"\n'}
+    out = _planted("licence-exception", **_exc(a=a, extra=outside))
+    assert "no workspace manifest names jsonschema" in out, out
+
+
+def test_an_unreadable_licence_file_is_no_verdict() -> None:
+    cases = (
+        ({"deny": "[licenses\n"}, "deny.toml", "not TOML: "),
+        ({"about": "[borrow-or-share\n"}, ABOUT_REL, "not TOML: "),
+        ({"deny": DENY_LICENSES + 'exceptions = ["borrow-or-share"]\n'}, "deny.toml",
+         "[licenses] exceptions is not a list of tables"),
+        ({"deny": DENY_LICENSES + "exceptions = 1\n"}, "deny.toml", "[licenses] exceptions is not a list of tables"),
+        ({"about": ABOUT_PLAIN + '\n[borrow-or-share]\naccepted = "MIT-0"\n'}, ABOUT_REL,
+         "[borrow-or-share] accepted is not a list of licence names"),
+    )
+    for kw, bad, what in cases:
+        with tempfile.TemporaryDirectory() as d:
+            root = _tree(pathlib.Path(d), **_exc(**kw))
+            rc, out = _run(root)
+            assert rc == 2, (kw, out)
+            want = "repo_policy: cannot read %s: %s" % (root.resolve() / bad, what)
+            assert out.startswith(want) and len(out.splitlines()) == 1, (kw, out)
+
+
+def test_the_licence_readers_read_a_missing_file_as_empty() -> None:
+    with tempfile.TemporaryDirectory() as d:
+        root = pathlib.Path(d)
+        assert guard.deny_exceptions(root / "deny.toml") == []
+        assert guard.about_exceptions(root / ABOUT_REL) == {}
+        assert guard.locked_names(root / "Cargo.lock") == []
+        assert guard.manifests_naming(root, "jsonschema") == []
+        root = _tree(root, **_exc())
+        assert guard.deny_exceptions(root / "deny.toml") == [{"crate": "borrow-or-share", "allow": ["MIT-0"]}]
+        assert guard.about_exceptions(root / ABOUT_REL) == {"borrow-or-share": ["MIT-0"]}
+        assert ("borrow-or-share", "0.2.4") in guard.locked_names(root / "Cargo.lock")
+        assert guard.manifests_naming(root, "jsonschema") == ["crates/a/Cargo.toml"]
+        assert guard.manifests_naming(root, "chrono") == guard.chrono_manifests(root) == []
+
+
 def test_a_repository_without_workflows_checks_its_gate_scripts() -> None:
     # no remote CI (the owner, 2026-11-06): zero workflows is a tree to check, not a usage error
     with tempfile.TemporaryDirectory() as d:

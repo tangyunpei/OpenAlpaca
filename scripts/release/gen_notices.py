@@ -28,6 +28,9 @@ What it lists:
               unpublished crates left out. cargo-about chooses each crate's licence from
               about.toml's `accepted` list, which must be deny.toml's [licenses] allow list
               (the order is cargo-about's preference among the alternatives of an OR).
+              Its per-crate `[<crate>] accepted` tables, read by cargo-about and not by
+              this script, mirror deny.toml's [licenses] exceptions (a licence one crate
+              alone may carry); scripts/repo_policy.py's licence-exception rule holds that.
               Its text counts as read from the crate only when cargo-about took it from a
               licence file (by name, below; not a source file whose header it matched)
               that is the crate's own: in the crate's directory, or, as cargo-about gives
@@ -90,7 +93,8 @@ listed; an id matches in any case, an operator only in capitals, and `+` and Lic
 ids only as listed; an id is any SPDX idstring, not looked up in SPDX's licence list; a
 missing or unparseable expression is refused, never passed. The Rust lines are not read
 by this check: cargo-about's --fail holds the Rust half at generation, and cargo-deny,
-run by hand on deny.toml, holds Cargo.lock to the same list.
+run by hand on deny.toml, holds Cargo.lock to the same list, bar its [licenses]
+exceptions (one crate each).
 
 Exit: 0 written, current under --check, the tree's hashes recorded under --check-hashes,
 or every JavaScript licence allowed under --check-licences; 1 stale under --check or

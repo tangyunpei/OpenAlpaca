@@ -47,6 +47,10 @@ thiserror = "2.0.18"
 
 serde = { version = "1.0.228", features = ["derive"] }
 serde_json = "1.0.149"
+# An MCP tool's output checked against the schema its server declares (M82).
+# Default features off: resolve-http, resolve-file, tls-aws-lc-rs and idna;
+# a schema a server supplies must never fetch a URL or read a file.
+jsonschema = { version = "0.62.0", default-features = false }
 # SKILL.md frontmatter. Replaces the archived serde_yaml 0.9: maintained, pure
 # Rust, and set as close to serde_yaml's reading as its options go
 # (`yaml_options` in openalpaca_core::middleware::skill).

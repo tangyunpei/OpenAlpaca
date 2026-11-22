@@ -49,6 +49,17 @@ The rules:
              not checked. An ignore counts only in a `scripts` value that also runs
              `bun audit` (those two words, as written); the flag elsewhere in the file, or
              in a script spelling the command another way, is not read.
+  licence-exception
+             every [licenses] exceptions entry of deny.toml (a licence one crate alone
+             may carry, outside the allow list) is spelled `{ crate = "<name>", allow =
+             [...] }` (not `name =`, a version, or `crate@version`) and is mirrored by a
+             `[<name>]` table of scripts/release/about.toml accepting the same licences,
+             and every such table by an entry; cargo-about's own tables, and one with no
+             `accepted`, are no exception. And each is lifted once stale: while it
+             stands, Cargo.lock holds that crate, EXCEPTION_BROUGHT_BY records the
+             dependency the owner admitted it for, and a workspace manifest names that
+             dependency (read as the chrono rule reads chrono) — so a lifted dependency
+             lifts its exception, rather than leaving it for cargo-deny's warning.
 
 The workflows are .github/workflows/*.yml and *.yaml. The gate scripts are the *.sh,
 *.py, *.ps1, *.ts and *.mjs files under scripts/, tasks/deps-upgrade/tools/ and
@@ -85,6 +96,16 @@ BUN_AUDIT = re.compile(r"(?<![\w-])bun\s+audit(?![\w-])")
 PICOMATCH_ENTRY = re.compile(r'"picomatch@(\d+)\.(\d+)\.(\d+)')
 DEP_TABLES = ("dependencies", "dev-dependencies", "build-dependencies",
               "dev_dependencies", "build_dependencies")
+DENY_TOML = "deny.toml"
+ABOUT_TOML = "scripts/release/about.toml"
+# deny.toml's [licenses] exceptions, each a licence one crate alone may carry, by the
+# dependency whose admission brought that crate in: the owner's ruling, without which an
+# exception is refused, and what lifts it once no workspace manifest names it.
+EXCEPTION_BROUGHT_BY = {
+    "borrow-or-share": "jsonschema",  # MIT-0, through referencing and fluent-uri (2026-11-21)
+}
+ABOUT_OWN_TABLES = ("private",)  # cargo-about's own tables, never a crate's
+SPELL_EXCEPTION = '{ crate = "<name>", allow = [...] }'
 
 # Named exceptions: (rule, path, a substring of the line) -> why.
 EXCEPTIONS = {
@@ -344,8 +365,8 @@ def ignored_zip_ids(path: pathlib.Path):
     return ignored_ids(path, ZIP_IDS)
 
 
-def locked_zip_majors(lock: pathlib.Path) -> list[str]:
-    """The major of every zip Cargo.lock holds, read by tomllib; [] with no Cargo.lock."""
+def locked_names(lock: pathlib.Path) -> list[tuple[str, str]]:
+    """(name, version) of every package Cargo.lock holds, read by tomllib; [] with no Cargo.lock."""
     if not lock.is_file():
         return []
     try:
@@ -357,10 +378,15 @@ def locked_zip_majors(lock: pathlib.Path) -> list[str]:
     packages = doc.get("package", [])
     if not isinstance(packages, list) or not all(isinstance(p, dict) for p in packages):
         raise Unreadable("%s: not a Cargo.lock: [[package]] is not an array of tables" % lock)
+    return [(str(p.get("name", "")), str(p.get("version", ""))) for p in packages]
+
+
+def locked_zip_majors(lock: pathlib.Path) -> list[str]:
+    """The major of every zip Cargo.lock holds; [] with no Cargo.lock."""
     majors = []
-    for p in packages:
-        if p.get("name") == "zip":
-            m = re.match(r"(\d+)\.", str(p.get("version", "")))
+    for name, version in locked_names(lock):
+        if name == "zip":
+            m = re.match(r"(\d+)\.", version)
             if m:
                 majors.append(m.group(1))
     return majors
@@ -383,25 +409,25 @@ def load_toml(path: pathlib.Path) -> dict:
         raise Unreadable("%s: not TOML: %s" % (path, e))
 
 
-def names_chrono(table) -> bool:
-    """Whether a dependency table names chrono, under its own name or as its `package`."""
+def names_crate(table, crate: str) -> bool:
+    """Whether a dependency table names the crate, under its own name or as its `package`."""
     if not isinstance(table, dict):
         return False
-    return any(k == "chrono" or (isinstance(v, dict) and v.get("package") == "chrono")
+    return any(k == crate or (isinstance(v, dict) and v.get("package") == crate)
                for k, v in table.items())
 
 
-def manifest_names_chrono(doc: dict) -> bool:
+def manifest_names(doc: dict, crate: str) -> bool:
     tables = [doc.get(t) for t in DEP_TABLES]
     target = doc.get("target")
     if isinstance(target, dict):
         tables += [cfg.get(t) for cfg in target.values() if isinstance(cfg, dict) for t in DEP_TABLES]
-    return any(names_chrono(t) for t in tables)
+    return any(names_crate(t, crate) for t in tables)
 
 
-def chrono_manifests(root: pathlib.Path) -> list[str]:
-    """The manifests (relative paths) that name chrono as a direct dependency: the root's own
-    tables and its [workspace.dependencies], then each [workspace] member's. [] with no
+def manifests_naming(root: pathlib.Path, crate: str) -> list[str]:
+    """The manifests (relative paths) that name the crate as a direct dependency: the root's
+    own tables and its [workspace.dependencies], then each [workspace] member's. [] with no
     Cargo.toml at the root."""
     top = root / "Cargo.toml"
     if not top.is_file():
@@ -409,7 +435,7 @@ def chrono_manifests(root: pathlib.Path) -> list[str]:
     doc = load_toml(top)
     workspace = doc.get("workspace") if isinstance(doc.get("workspace"), dict) else {}
     found = []
-    if manifest_names_chrono(doc) or names_chrono(workspace.get("dependencies")):
+    if manifest_names(doc, crate) or names_crate(workspace.get("dependencies"), crate):
         found.append("Cargo.toml")
     members = workspace.get("members", [])
     if not isinstance(members, list) or not all(isinstance(m, str) for m in members):
@@ -417,9 +443,14 @@ def chrono_manifests(root: pathlib.Path) -> list[str]:
     for m in members:
         dirs = sorted(root.glob(m)) if any(c in m for c in "*?[") else [root / m]
         for d in dirs:
-            if manifest_names_chrono(load_toml(d / "Cargo.toml")):
+            if manifest_names(load_toml(d / "Cargo.toml"), crate):
                 found.append((d / "Cargo.toml").relative_to(root).as_posix())
     return found
+
+
+def chrono_manifests(root: pathlib.Path) -> list[str]:
+    """The manifests (relative paths) that name chrono as a direct dependency."""
+    return manifests_naming(root, "chrono")
 
 
 def check_chrono(root, out):
@@ -467,6 +498,116 @@ def check_picomatch(root, out):
         out.append("package.json:%d: picomatch: %s is ignored but bun.lock holds no picomatch at or below 4.0.7 — lift the ignore (a fixed picomatch has reached the lock)" % (n, PICOMATCH_ID))
 
 
+def deny_exceptions(path: pathlib.Path) -> list[dict]:
+    """deny.toml's [licenses] exceptions as tomllib reads them (inline or
+    `[[licenses.exceptions]]` alike); [] with no deny.toml or none there."""
+    if not path.is_file():
+        return []
+    licenses = load_toml(path).get("licenses", {})
+    exceptions = licenses.get("exceptions", []) if isinstance(licenses, dict) else []
+    if not isinstance(exceptions, list) or not all(isinstance(e, dict) for e in exceptions):
+        raise Unreadable("%s: [licenses] exceptions is not a list of tables" % path)
+    return exceptions
+
+
+def about_exceptions(path: pathlib.Path) -> dict[str, list[str]]:
+    """about.toml's per-crate tables that accept licences, {crate: accepted}; {} with no
+    about.toml. cargo-about's own tables and a table with no `accepted` (a `clarify`
+    alone) are not read."""
+    if not path.is_file():
+        return {}
+    found = {}
+    for key, table in load_toml(path).items():
+        if isinstance(table, dict) and key not in ABOUT_OWN_TABLES and "accepted" in table:
+            accepted = table["accepted"]
+            if not isinstance(accepted, list) or not all(isinstance(x, str) for x in accepted):
+                raise Unreadable("%s: [%s] accepted is not a list of licence names" % (path, key))
+            found[key] = accepted
+    return found
+
+
+def exception_spelling(entry: dict) -> tuple[str | None, str | None]:
+    """(the crate an exception names, or None; what is wrong with its spelling, or None)."""
+    crate, name = entry.get("crate"), entry.get("name")
+    named = crate if isinstance(crate, str) else name if isinstance(name, str) else None
+    named = named.split("@")[0] if named else None
+    if "name" in entry or not isinstance(crate, str) or "@" in crate or "version" in entry:
+        return named, "names its crate as name = (or with a version)"
+    allow = entry.get("allow")
+    if not isinstance(allow, list) or not all(isinstance(x, str) for x in allow):
+        return named, "has an allow that is not a list of licence names"
+    return named, None
+
+
+def section_line(lines: list[str], pattern: re.Pattern, section: str | None) -> int:
+    """The first line outside comments matching the pattern, within the TOML tables whose
+    header starts with the section (any table when None); 1 when none does."""
+    current = ""
+    for n, line in enumerate(lines, 1):
+        body = strip_comment(line)
+        header = re.match(r"^\s*\[\[?\s*([^\]]+?)\s*\]\]?\s*$", body)
+        if header:
+            current = header.group(1)
+        if pattern.search(body) and (section is None or current.startswith(section)):
+            return n
+    return 1
+
+
+def deny_exception_line(lines: list[str], crate: str | None) -> int:
+    if crate is None:
+        return section_line(lines, re.compile(r"^\s*exceptions\s*="), "licenses")
+    named = re.compile(r"""\b(?:crate|name)\s*=\s*["']""" + re.escape(crate) + r"""(?:@[^"']*)?["']""")
+    return section_line(lines, named, "licenses")
+
+
+def about_table_line(lines: list[str], crate: str) -> int:
+    quoted = re.escape(crate)
+    return section_line(lines, re.compile(r"""^\s*\[\s*(?:%s|"%s"|'%s')\s*\]\s*$""" % (quoted, quoted, quoted)), None)
+
+
+def check_licence_exception(root, out):
+    deny_path, about_path = root / DENY_TOML, root / ABOUT_TOML
+    exceptions, accepted = deny_exceptions(deny_path), about_exceptions(about_path)
+    deny_lines = read(deny_path) if exceptions else []
+    about_lines = read(about_path) if accepted else []
+    named, spelled = set(), []
+    for entry in exceptions:
+        crate, wrong = exception_spelling(entry)
+        if crate:
+            named.add(crate)
+        if wrong:  # one violation: its about.toml table is no second one
+            out.append("%s:%d: licence-exception: an exception %s — spell it %s"
+                       % (DENY_TOML, deny_exception_line(deny_lines, crate), wrong, SPELL_EXCEPTION))
+        else:
+            spelled.append((crate, entry["allow"], deny_exception_line(deny_lines, crate)))
+    same = " — the two files name the same crates and licences"
+    for crate, allow, n in spelled:
+        if crate not in accepted:
+            out.append("%s:%d: licence-exception: %s is allowed %s here but %s has no [%s] table accepting it%s"
+                       % (DENY_TOML, n, crate, ", ".join(allow), ABOUT_TOML, crate, same))
+        elif set(allow) != set(accepted[crate]):
+            out.append("%s:%d: licence-exception: %s: deny.toml allows [%s] but %s accepts [%s]"
+                       % (DENY_TOML, n, crate, ", ".join(sorted(set(allow))), ABOUT_TOML,
+                          ", ".join(sorted(set(accepted[crate])))))
+    for crate, licences in accepted.items():
+        if crate not in named:
+            out.append("%s:%d: licence-exception: [%s] accepts %s but deny.toml's [licenses] exceptions do not%s"
+                       % (ABOUT_TOML, about_table_line(about_lines, crate), crate, ", ".join(licences), same))
+    if not spelled:
+        return
+    locked = {name for name, _ in locked_names(root / "Cargo.lock")}
+    for crate, _, n in spelled:  # one violation per exception: the first condition that holds
+        if crate not in locked:
+            out.append("%s:%d: licence-exception: %s is excepted but Cargo.lock holds no %s — lift the exception and its [%s] table in %s"
+                       % (DENY_TOML, n, crate, crate, crate, ABOUT_TOML))
+        elif crate not in EXCEPTION_BROUGHT_BY:
+            out.append("%s:%d: licence-exception: %s is excepted but repo_policy.py records no dependency it is admitted for — record the owner's ruling in EXCEPTION_BROUGHT_BY"
+                       % (DENY_TOML, n, crate))
+        elif not manifests_naming(root, EXCEPTION_BROUGHT_BY[crate]):
+            out.append("%s:%d: licence-exception: %s is excepted for %s but no workspace manifest names %s — lift the exception and its about.toml table (or record a new ruling)"
+                       % (DENY_TOML, n, crate, EXCEPTION_BROUGHT_BY[crate], EXCEPTION_BROUGHT_BY[crate]))
+
+
 def check(root: pathlib.Path) -> list[str]:
     out: list[str] = []
     for path in workflows(root):
@@ -485,6 +626,7 @@ def check(root: pathlib.Path) -> list[str]:
     check_zip8(root, out)
     check_chrono(root, out)
     check_picomatch(root, out)
+    check_licence_exception(root, out)
     return out
 
 
