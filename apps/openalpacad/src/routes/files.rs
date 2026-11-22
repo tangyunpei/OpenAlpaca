@@ -202,14 +202,17 @@ pub async fn upload_file_handler(
     let write_name = filename.clone();
     let write_mime = content_type.clone();
     let stored = tokio::task::spawn_blocking(move || {
-        UploadStore::new(&writer_state.db).put(NewUpload {
-            owner_id: &owner_id,
-            filename: &write_name,
-            mime_type: &write_mime,
-            data: &data,
-            scope: &scope,
-            created: Utc::now(),
-        })
+        store_upload(
+            &writer_state.db,
+            NewUpload {
+                owner_id: &owner_id,
+                filename: &write_name,
+                mime_type: &write_mime,
+                data: &data,
+                scope: &scope,
+                created: Utc::now(),
+            },
+        )
     })
     .await;
 
@@ -235,6 +238,18 @@ pub async fn upload_file_handler(
     };
 
     Json(upload_answer(stored.asset)).into_response()
+}
+
+/// The route's write: a person attaching a file (the app's composer,
+/// `openalpaca chat` with files, any API client), so a file whose
+/// extraction failed, attached again, gets fresh tries
+/// ([`UploadStore::put_retrying_failed`]; the owner's ruling of
+/// 2026-11-21). A chat connector's re-send does not come here.
+pub(crate) fn store_upload(
+    db: &openalpaca_storage::Database,
+    new: NewUpload<'_>,
+) -> anyhow::Result<openalpaca_storage::StoredUpload> {
+    UploadStore::new(db).put_retrying_failed(new)
 }
 
 /// `POST /v1/files/upload`'s answer for the stored row (split out for the
@@ -823,6 +838,55 @@ pub(crate) mod tests {
     // `openalpaca_storage::uploads`. What belongs to the route is the one thing
     // it decides: the scope, read from `x-workspace-path` through the single
     // resolver.
+
+    /// REATTACH-RESET (the owner's ruling of 2026-11-21): the route's write
+    /// is a person's re-attach, so a file whose tries are spent, attached
+    /// again, is answered `"uploaded"`, not `"error"`, and its row is
+    /// pending again. Driven through the route's own write and answer
+    /// (`store_upload`, `upload_answer`): no route test builds an
+    /// `AppState` (only `main` does), so the multipart handler itself is
+    /// not driven here.
+    #[test]
+    fn a_re_attached_failed_file_is_answered_uploaded() {
+        let tmp = tempfile::tempdir().expect("create tempdir");
+        let root = tmp.path().canonicalize().expect("canonicalize");
+        let _guard = crate::test_util::HomeStoreGuard::set(&root.join("home"));
+        let (_dir, db) = test_db();
+        let put = |db: &Database| {
+            store_upload(
+                db,
+                NewUpload {
+                    owner_id: "owner-1",
+                    filename: "notes.txt",
+                    mime_type: "text/plain",
+                    data: b"hello",
+                    scope: &StoreScope::Home,
+                    created: Utc::now(),
+                },
+            )
+            .expect("stored")
+        };
+        let first = put(&db);
+        FileAssetRepository::new(&db)
+            .update_status(
+                &first.asset.id,
+                &FileAssetStatus::Error,
+                None,
+                Some("[attempt:2] Failed to read text file"),
+            )
+            .expect("fail the row");
+
+        let answer = upload_answer(put(&db).asset);
+
+        assert_eq!(answer.id, first.asset.id, "the same row");
+        assert_eq!(answer.status, "uploaded");
+        let row = FileAssetRepository::new(&db)
+            .get_by_id(&first.asset.id)
+            .unwrap()
+            .unwrap();
+        assert_eq!(row.status, FileAssetStatus::Uploaded);
+        assert_eq!(row.extract_error, None);
+    }
 
     fn headers_with(path: Option<&str>) -> HeaderMap {
         let mut headers = HeaderMap::new();

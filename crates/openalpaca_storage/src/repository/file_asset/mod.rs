@@ -140,9 +140,11 @@ impl<'a> FileAssetRepository<'a> {
     /// it starts (`[attempt:N] …`); this keeps that tag and puts `reason`
     /// after it, so the poll's retry check counts the cut attempt like any
     /// failure and a file that takes the process down with it is tried at
-    /// most `extraction_retry_count + 1` times. A row with no tag (written
-    /// before the worker tagged it) counts as attempt 1. Only `status`,
-    /// `extract_error` and `updated_at` change.
+    /// most `extraction_retry_count + 1` times per attach (a person's
+    /// re-attach resets a failed row,
+    /// [`crate::UploadStore::put_retrying_failed`]). A row with no tag
+    /// (written before the worker tagged it) counts as attempt 1. Only
+    /// `status`, `extract_error` and `updated_at` change.
     ///
     /// Only for the worker's start: a row is `Processing` while a task of the
     /// process that wrote it extracts its text, so one found at the start was

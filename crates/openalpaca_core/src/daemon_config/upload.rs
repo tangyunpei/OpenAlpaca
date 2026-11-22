@@ -32,7 +32,9 @@ pub struct UploadGovernanceConfig {
     pub orphan_grace_period_hours: u64,
     /// Maximum concurrent extraction tasks (default: 2).
     pub max_concurrent_extractions: usize,
-    /// Number of times to retry a failed extraction before giving up (default: 1).
+    /// Number of times to retry a failed extraction before giving up on that
+    /// attach (default: 1); attaching the file again through the app, the
+    /// CLI or the API (`POST /v1/files/upload`) gives it fresh tries.
     pub extraction_retry_count: u32,
     /// Max time to wait for attachment processing before chat proceeds (default: 8000ms).
     pub attachment_ready_wait_ms: u64,

@@ -32,10 +32,15 @@
 //! never the path** (R17: `project_root` is part of the query). Two uploads of
 //! the same bytes by the same owner into one store — the home store, or one
 //! project — resolve to the first row and write nothing; into two stores they
-//! are two rows and two files. The same bytes from a different owner get their
-//! own row and their own file, and a byte-identical *produced* artifact never
-//! answers at all: it is not an upload, and handing it back would put it under
-//! the upload quota and on the end of a chat message.
+//! are two rows and two files. One exception writes the row: a person's own
+//! re-attach ([`UploadStore::put_retrying_failed`], the upload route's call)
+//! of bytes whose row failed extraction (`Error`) makes that row `Uploaded`
+//! again, its error and text cleared, so it gets fresh tries. A plain
+//! [`UploadStore::put`] (a chat connector's) returns a failed row as it is.
+//! The same bytes from a different owner get their own row and their own
+//! file, and a byte-identical *produced* artifact never answers at all: it is
+//! not an upload, and handing it back would put it under the upload quota and
+//! on the end of a chat message.
 //!
 //! A match is an answer only while its bytes are still there. When the matched
 //! row's file is gone, the upload is placed and written as usual and that row is
@@ -173,8 +178,10 @@ pub struct StoredUpload {
     /// bytes were gone was re-addressed onto the bytes this call wrote.
     pub asset: FileAsset,
     /// `true` when an owner-scoped sha256 match returned an existing row whose
-    /// bytes are on disk, and nothing was written to disk or to the database.
-    /// A match whose bytes were gone is `false`: bytes were written.
+    /// bytes are on disk, and nothing was written to disk. Nothing was written
+    /// to the database either, unless [`UploadStore::put_retrying_failed`]
+    /// reset a failed row: then the row is returned as reset. A match whose
+    /// bytes were gone is `false`: bytes were written.
     pub deduped: bool,
 }
 
@@ -198,7 +205,27 @@ impl<'a> UploadStore<'a> {
     /// validation, the size cap, the storage quota): those are policy the route
     /// and the connectors already own and disagree about deliberately, and none
     /// of it decides where the bytes go.
+    ///
+    /// A matched row is returned with the status it has, failed or not (a
+    /// chat connector's re-send); [`Self::put_retrying_failed`] is the
+    /// person's re-attach.
     pub fn put(&self, new: NewUpload<'_>) -> Result<StoredUpload> {
+        self.put_with(new, OnFailedMatch::Keep)
+    }
+
+    /// [`Self::put`] for a person's own re-attach (`POST /v1/files/upload`:
+    /// the app's composer, `openalpaca chat` with files, any API client): a
+    /// matched row whose extraction failed (`Error`) is made `Uploaded`
+    /// again, `extract_error` and `extracted_text` cleared, inside the same
+    /// transaction as the dedup decision, so the worker gives it a full
+    /// count of fresh tries. Only an `Error` row is reset: a `Processing`
+    /// row is left to the extraction running on it, and a `Ready` or
+    /// `Uploaded` row is returned as it is, with nothing written.
+    pub fn put_retrying_failed(&self, new: NewUpload<'_>) -> Result<StoredUpload> {
+        self.put_with(new, OnFailedMatch::Retry)
+    }
+
+    fn put_with(&self, new: NewUpload<'_>, on_failed: OnFailedMatch) -> Result<StoredUpload> {
         let sha256 = sha256_hex(new.data);
         let size_bytes = new.data.len() as i64;
 
@@ -229,6 +256,19 @@ impl<'a> UploadStore<'a> {
             if let Some(row) = &existing
                 && Path::new(&row.storage_path).exists()
             {
+                if on_failed == OnFailedMatch::Retry && reset_failed(&tx, &row.id)? {
+                    let asset = load_by_id(&tx, &row.id)?.ok_or_else(|| {
+                        db_error(format!(
+                            "Upload {} vanished inside its own transaction",
+                            row.id
+                        ))
+                    })?;
+                    tx.commit()?;
+                    return Ok(StoredUpload {
+                        asset,
+                        deduped: true,
+                    });
+                }
                 return Ok(StoredUpload {
                     asset: row.clone(),
                     deduped: true,
@@ -283,6 +323,12 @@ impl<'a> UploadStore<'a> {
                 if let Err(e) = update {
                     remove_best_effort(&head_path);
                     return Err(db_error(format!("Failed to re-address file record: {e}")));
+                }
+                if on_failed == OnFailedMatch::Retry
+                    && let Err(e) = reset_failed(&tx, &row.id)
+                {
+                    remove_best_effort(&head_path);
+                    return Err(e);
                 }
                 let asset = load_by_id(&tx, &row.id)?.ok_or_else(|| {
                     db_error(format!("Upload {} vanished inside its own transaction", row.id))
@@ -341,6 +387,43 @@ impl<'a> UploadStore<'a> {
 // ============================================================================
 // Internals
 // ============================================================================
+
+/// What a put does with a matched row whose extraction failed.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum OnFailedMatch {
+    /// Return it as it is ([`UploadStore::put`]).
+    Keep,
+    /// Make it `Uploaded` again ([`UploadStore::put_retrying_failed`]).
+    Retry,
+}
+
+/// The re-attach's reset: the row made `Uploaded` with no error and no text,
+/// as a new upload is, only where it is `Error`; `true` when it was.
+///
+/// `Uploaded` with no `[attempt:N]` tag, not `Error` with the tag cleared:
+/// the worker lists every `Uploaded` row with no retry check, so the row gets
+/// a full count at every `extraction_retry_count`, 0 included, and the chat
+/// service reads it as pending, not failed. The text goes too: an `Error` row
+/// can carry some (a legacy Office or iWork file whose text was too short).
+///
+/// The status check is in the SQL, so a `Processing` row is never reset: the
+/// extraction running on it ends in an unconditional write that would undo
+/// the reset, and a stop cutting that run would leave its attempt uncounted.
+fn reset_failed(conn: &Connection, id: &str) -> Result<bool> {
+    conn.execute(
+        "UPDATE file_assets
+            SET status = ?1, extract_error = NULL, extracted_text = NULL,
+                updated_at = datetime('now')
+          WHERE id = ?2 AND status = ?3",
+        rusqlite::params![
+            FileAssetStatus::Uploaded.as_str(),
+            id,
+            FileAssetStatus::Error.as_str(),
+        ],
+    )
+    .map(|changed| changed > 0)
+    .map_err(|e| db_error(format!("Failed to reset failed file record: {e}")))
+}
 
 /// The dedup answer: this owner's own *upload* row for these bytes **in this
 /// store**, if it has one.

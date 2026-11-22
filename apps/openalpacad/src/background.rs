@@ -73,7 +73,9 @@ pub fn spawn_chat_cleanup(
 /// mid-extraction leaves its row there, which the poll never lists and the
 /// chat service reads as pending. Counting the cut attempt is what ends a
 /// crash loop: a file whose extraction takes the daemon down is tried at
-/// most `extraction_retry_count + 1` times in all, then stays `Error`.
+/// most `extraction_retry_count + 1` times per attach, then stays `Error`
+/// until a person attaches it again (the upload route resets a failed row:
+/// `UploadStore::put_retrying_failed`).
 /// None can be in flight then — this process has started no extraction, and
 /// the singleton lock keeps any other daemon off the store. A later poll
 /// never does this: a row `Processing` then is a task of this process.
@@ -1502,5 +1504,153 @@ mod tests {
         assert_matches!(ended, Ok(()), "the worker was not aborted");
         assert_eq!(row.status, FileAssetStatus::Ready);
         assert_eq!(row.extract_error, None);
+    }
+
+    /// REATTACH-RESET: a person's re-attach, through the upload route's own
+    /// write (`routes::files::store_upload`), of `notes.txt`'s bytes; the
+    /// row's id.
+    fn reattach(db: &Database) -> String {
+        crate::routes::files::store_upload(
+            db,
+            openalpaca_storage::NewUpload {
+                owner_id: "owner-1",
+                filename: "notes.txt",
+                mime_type: "text/plain",
+                data: b"hello",
+                scope: &openalpaca_storage::store::StoreScope::Home,
+                created: chrono::Utc::now(),
+            },
+        )
+        .expect("stored")
+        .asset
+        .id
+    }
+
+    /// The worker on a 1 s poll with `extraction_retry_count` set and the
+    /// given extraction, with its token and its task.
+    fn start_worker_with_retries(
+        db: &Database,
+        retries: u32,
+        extract: Extractor,
+    ) -> (CancellationToken, tokio::task::JoinHandle<()>) {
+        let mut cfg = openalpaca_core::daemon_config::DaemonConfig::default();
+        cfg.upload.governance.processing_poll_interval_secs = 1;
+        cfg.upload.governance.extraction_retry_count = retries;
+        let cancel = CancellationToken::new();
+        let worker = spawn_file_processing_worker_with(
+            db.clone(),
+            Arc::new(ArcSwap::from_pointee(cfg)),
+            cancel.clone(),
+            extract,
+        );
+        (cancel, worker)
+    }
+
+    /// REATTACH-RESET (the owner's ruling of 2026-11-21): a file whose
+    /// tries are spent at `retries` is passed over by the poll; attached
+    /// again through the upload route's write, it is extracted at the next
+    /// poll and ends `Ready`.
+    async fn a_re_attached_failed_file_ends_ready(retries: u32) {
+        use std::assert_matches;
+        let home = tempfile::tempdir().unwrap();
+        let _env = crate::test_util::HomeStoreGuard::set(&home.path().join("home"));
+        let dir = tempfile::tempdir().unwrap();
+        let db = test_db(&dir);
+        let id = reattach(&db);
+        let spent = format!("[attempt:{}] Failed to read text file", retries + 1);
+        tag(&db, &id, FileAssetStatus::Error, Some(&spent));
+        let (cancel, worker) =
+            start_worker_with_retries(&db, retries, Arc::new(crate::extraction::extract_text));
+
+        // A poll passes over the spent row, proven by a row it took through.
+        upload_row(&db, dir.path(), "probe", FileAssetStatus::Uploaded);
+        assert_eq!(ready(&db, "probe").await, FileAssetStatus::Ready);
+        assert_eq!(status_of(&db, &id), FileAssetStatus::Error, "spent");
+
+        assert_eq!(reattach(&db), id, "the same row");
+        let status = ready(&db, &id).await;
+        cancel.cancel();
+        let ended = tokio::time::timeout(std::time::Duration::from_secs(30), worker)
+            .await
+            .expect("the worker ends after the stop");
+
+        assert_matches!(ended, Ok(()));
+        assert_eq!(status, FileAssetStatus::Ready, "at {retries} retries");
+        let row = FileAssetRepository::new(&db)
+            .get_by_id(&id)
+            .unwrap()
+            .unwrap();
+        assert_eq!(row.extracted_text.as_deref(), Some("hello"));
+        assert_eq!(row.extract_error, None);
+    }
+
+    #[tokio::test]
+    async fn a_re_attached_failed_file_is_extracted_at_the_default_retries() {
+        a_re_attached_failed_file_ends_ready(1).await;
+    }
+
+    #[tokio::test]
+    async fn a_re_attached_failed_file_is_extracted_with_no_retries() {
+        a_re_attached_failed_file_ends_ready(0).await;
+    }
+
+    /// REATTACH-RESET: the re-attach gives a full count again, from the
+    /// first try. With no retries and an extraction that always fails, the
+    /// file fails once (`[attempt:1]`); attached again it is tried once
+    /// more, and that try is attempt 1 again, not 2.
+    #[tokio::test]
+    async fn a_re_attached_failed_file_starts_its_count_again() {
+        use std::assert_matches;
+        let home = tempfile::tempdir().unwrap();
+        let _env = crate::test_util::HomeStoreGuard::set(&home.path().join("home"));
+        let dir = tempfile::tempdir().unwrap();
+        let db = test_db(&dir);
+        let calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let counted = calls.clone();
+        let extract: Extractor = Arc::new(move |_: &str, _: &str, _: usize| {
+            counted.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            (None, Some("no text".to_string()))
+        });
+        let id = reattach(&db);
+        let error_of = |db: &Database| {
+            FileAssetRepository::new(db)
+                .get_by_id(&id)
+                .unwrap()
+                .unwrap()
+                .extract_error
+        };
+        let (cancel, worker) = start_worker_with_retries(&db, 0, extract);
+
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
+        while status_of(&db, &id) != FileAssetStatus::Error {
+            assert!(std::time::Instant::now() < deadline, "fails within 30 s");
+            tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+        }
+        assert_eq!(error_of(&db).as_deref(), Some("[attempt:1] no text"));
+        assert_eq!(calls.load(std::sync::atomic::Ordering::SeqCst), 1);
+
+        assert_eq!(reattach(&db), id);
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
+        while calls.load(std::sync::atomic::Ordering::SeqCst) < 2
+            || status_of(&db, &id) != FileAssetStatus::Error
+        {
+            assert!(
+                std::time::Instant::now() < deadline,
+                "tried again within 30 s"
+            );
+            tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+        }
+        cancel.cancel();
+        let ended = tokio::time::timeout(std::time::Duration::from_secs(30), worker)
+            .await
+            .expect("the worker ends after the stop");
+
+        assert_matches!(ended, Ok(()));
+        assert_eq!(calls.load(std::sync::atomic::Ordering::SeqCst), 2);
+        assert_eq!(
+            error_of(&db).as_deref(),
+            Some("[attempt:1] no text"),
+            "the count started again"
+        );
     }
 }
