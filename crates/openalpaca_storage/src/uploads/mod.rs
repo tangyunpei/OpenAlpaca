@@ -218,7 +218,10 @@ impl<'a> UploadStore<'a> {
     /// matched row whose extraction failed (`Error`) is made `Uploaded`
     /// again, `extract_error` and `extracted_text` cleared, inside the same
     /// transaction as the dedup decision, so the worker gives it a full
-    /// count of fresh tries. Only an `Error` row is reset: a `Processing`
+    /// count of fresh tries, unless its poll had already listed the row for
+    /// a retry before the reset: that retry starts from the listed
+    /// `[attempt:N]` tag and carries the old count on, N tries fewer.
+    /// Only an `Error` row is reset: a `Processing`
     /// row is left to the extraction running on it, and a `Ready` or
     /// `Uploaded` row is returned as it is, with nothing written.
     pub fn put_retrying_failed(&self, new: NewUpload<'_>) -> Result<StoredUpload> {

@@ -208,6 +208,26 @@ impl Fixture {
             .unwrap()
     }
 
+    /// Every column of a row by name, as stored, but those in `moved`:
+    /// what "untouched but for these" compares.
+    fn row_except(&self, id: &str, moved: &[&str]) -> Vec<(String, rusqlite::types::Value)> {
+        self.db
+            .with_connection(|conn| {
+                let mut stmt = conn.prepare("SELECT * FROM file_assets WHERE id = ?1")?;
+                let names: Vec<String> = stmt.column_names().map(str::to_owned).collect();
+                Ok(stmt.query_row(rusqlite::params![id], |row| {
+                    let mut kept = Vec::new();
+                    for (i, name) in names.iter().enumerate() {
+                        if !moved.contains(&name.as_str()) {
+                            kept.push((name.clone(), row.get(i)?));
+                        }
+                    }
+                    Ok(kept)
+                })?)
+            })
+            .unwrap()
+    }
+
     fn origin(&self, id: &str) -> String {
         self.db
             .with_connection(|conn| {
@@ -794,20 +814,31 @@ fn a_failed_upload_whose_bytes_were_gone_is_re_addressed_and_reset() {
 
 /// Regression guard: a row being extracted (`Processing`) is never reset,
 /// whether its bytes are there or gone: the extraction running on it ends
-/// in a write that would undo the reset. Only the re-address of the gone
-/// bytes' branch moves.
+/// in a write that would undo the reset. Where the bytes are there, every
+/// column is unchanged; where they were gone, every column but the five
+/// the re-address writes (`storage_path`, `rel_path`, `project_root`,
+/// `missing_since`, `updated_at`). The row carries a text, so a cleared
+/// text would show.
 #[test]
 fn a_re_attach_leaves_a_processing_row_alone() {
+    const READDRESSED: [&str; 5] = [
+        "storage_path",
+        "rel_path",
+        "project_root",
+        "missing_since",
+        "updated_at",
+    ];
     let fx = Fixture::new();
     let first = fx.put("owner-1", "notes.txt", b"hello");
     let id = first.asset.id.clone();
     fx.set_state(
         &id,
         FileAssetStatus::Processing,
-        None,
+        Some("an earlier text"),
         Some("[attempt:1] extraction in progress"),
     );
     let before = fx.raw_row(&id);
+    let before_but_address = fx.row_except(&id, &READDRESSED);
 
     let again = fx.reattach("owner-1", "notes.txt", b"hello");
 
@@ -817,10 +848,11 @@ fn a_re_attach_leaves_a_processing_row_alone() {
     std::fs::remove_file(&first.asset.storage_path).unwrap();
     let readdressed = fx.reattach("owner-1", "notes.txt", b"hello");
     assert!(!readdressed.deduped);
-    assert_eq!(readdressed.asset.status, FileAssetStatus::Processing);
+    assert_ne!(readdressed.asset.storage_path, first.asset.storage_path);
     assert_eq!(
-        readdressed.asset.extract_error.as_deref(),
-        Some("[attempt:1] extraction in progress")
+        fx.row_except(&id, &READDRESSED),
+        before_but_address,
+        "untouched but for the re-address"
     );
 }
 
