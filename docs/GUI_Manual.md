@@ -1170,7 +1170,9 @@ until that read has answered. `Cancel` is the default button and Escape
 cancels; nothing asks you to type a word. What the dialog tells you is what a
 stop does, and no more:
 
-- everything stops immediately — nothing is finished first;
+- everything stops within a few seconds — nothing is finished first, except
+  a file attachment whose text is being read, which gets up to about ten
+  seconds to finish;
 - a running workflow is cut off mid-step and comes back marked `interrupted`
   when the daemon starts again — open it in Work and choose Rerun;
 - anything you typed at a running workflow while it worked is kept and

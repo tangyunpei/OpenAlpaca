@@ -765,8 +765,9 @@ async fn async_main(
         daemon_config.clone(),
     ));
 
-    // Step 13: Spawn background tasks
-    background::spawn_file_processing_worker(
+    // Step 13: Spawn background tasks. The file worker's task is kept: the
+    // shutdown tail waits for it last (`background::await_file_worker`).
+    let mut file_worker = background::spawn_file_processing_worker(
         db.clone(),
         daemon_config.clone(),
         cancel_token.clone(),
@@ -973,6 +974,16 @@ async fn async_main(
     {
         warn!("The discovery token's rotation ended abnormally: {e}");
     }
+    // The file-processing worker, last (STOP-WAIT, the owner's ruling of
+    // 2026-11-21): an extraction running when the stop came writes its
+    // result if it ends by the stage deadline. Its extractions have run
+    // since the cancel, so waiting here gives them the most of the window
+    // and takes nothing from the stages above; and it comes before the
+    // removal, since the app's stop wait reads `discovery.json`. On the
+    // deadline the handle is left, never aborted, and dropped (detached)
+    // at the end of this function: what still runs is cut when the
+    // process ends, its row left `Processing` for the next start to count.
+    background::await_file_worker(&mut file_worker, shutdown::stage_deadline(&force_exit_at)).await;
     if let Err(e) = discovery::remove_discovery() {
         warn!("Failed to remove discovery file: {e}");
     }

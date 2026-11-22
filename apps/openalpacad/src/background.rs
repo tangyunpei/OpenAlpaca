@@ -84,21 +84,43 @@ pub fn spawn_chat_cleanup(
 /// The worker does not cut its batch short: an extraction already running
 /// when the stop comes runs to its end, and the worker's task ends only once
 /// every task of its batch has ended, so none outlives it. A result is
-/// written only while the daemon's runtime still runs; the daemon does not
-/// wait for it, so an extraction still running when the shutdown's tail
-/// ends is lost, its row left `Processing` for the next start to count as
-/// above.
+/// written while the daemon's runtime still runs. The function returns the
+/// worker's task, and the daemon's shutdown awaits it until its tail's stage
+/// deadline (`shutdown::stage_deadline`), so an extraction that ends by then
+/// writes its result; one still running then is left behind and cut when
+/// the process ends, its row left `Processing` for the next start to count
+/// as above.
 pub fn spawn_file_processing_worker(
     db: Database,
     daemon_config: Arc<ArcSwap<openalpaca_core::daemon_config::DaemonConfig>>,
     cancel: CancellationToken,
-) {
+) -> tokio::task::JoinHandle<()> {
     spawn_file_processing_worker_with(
         db,
         daemon_config,
         cancel,
         Arc::new(crate::extraction::extract_text),
-    );
+    )
+}
+
+/// The shutdown tail's wait for the file-processing worker
+/// ([`spawn_file_processing_worker`]): its task is awaited until `deadline`
+/// and no longer (`shutdown::within`), so an extraction running when the
+/// stop came writes its result if it ends by then. `Some` when the worker
+/// ended by the deadline (an abnormal end is warned about), `None` when it
+/// did not. The wait never aborts the worker: on the deadline only the wait
+/// is given up, the handle is left as it is, and an extraction still running
+/// is left to the end of the process (`shutdown::finish_runtime`), its row
+/// `Processing` for the next start to count.
+pub(crate) async fn await_file_worker(
+    worker: &mut tokio::task::JoinHandle<()>,
+    deadline: std::time::Instant,
+) -> Option<()> {
+    match crate::shutdown::within("The file-processing worker", deadline, worker).await? {
+        Ok(()) => {}
+        Err(e) => tracing::warn!("The file-processing worker ended abnormally: {e}"),
+    }
+    Some(())
 }
 
 /// How the worker extracts a file's text: `(storage_path, mime_type,
@@ -106,8 +128,8 @@ pub fn spawn_file_processing_worker(
 type Extractor = Arc<dyn Fn(&str, &str, usize) -> (Option<String>, Option<String>) + Send + Sync>;
 
 /// [`spawn_file_processing_worker`] with its extractor given, returning the
-/// worker's task: the daemon passes `extract_text` and drops the handle; a
-/// test passes an extraction it holds and awaits the worker's end.
+/// worker's task: the daemon passes `extract_text` and its shutdown awaits
+/// the handle; a test passes an extraction it holds.
 fn spawn_file_processing_worker_with(
     db: Database,
     daemon_config: Arc<ArcSwap<openalpaca_core::daemon_config::DaemonConfig>>,
@@ -1374,5 +1396,111 @@ mod tests {
             row.extract_error.as_deref(),
             Some("[attempt:1] Extraction task panicked")
         );
+    }
+
+    /// One row, `Uploaded`, its extraction held by the test and seen
+    /// started (so the worker's tagged `Processing` write is behind it),
+    /// then the stop: the shutdown's view of a stop during an extraction.
+    async fn a_stop_during_a_held_extraction(
+        db: &Database,
+        dir: &std::path::Path,
+    ) -> (HeldExtraction, tokio::task::JoinHandle<()>) {
+        upload_row(db, dir, "held", FileAssetStatus::Uploaded);
+        let (held, extract, mut started) = HeldExtraction::new();
+        let (cancel, worker) = start_held_worker(db, 1, extract);
+        assert_eq!(id_of(&next_started(&mut started).await), "held");
+        cancel.cancel();
+        (held, worker)
+    }
+
+    /// STOP-WAIT (the owner's ruling of 2026-11-21): the shutdown's wait
+    /// for the worker lets an extraction running when the stop came write
+    /// its result. Read at once when the wait returns, not polled for: a
+    /// wait that returned before the worker had ended would leave the row
+    /// `Processing` here.
+    #[tokio::test]
+    async fn the_shutdown_wait_lets_a_running_extraction_write_its_result() {
+        use std::assert_matches;
+        let home = tempfile::tempdir().unwrap();
+        let _env = crate::test_util::HomeStoreGuard::set(&home.path().join("home"));
+        let dir = tempfile::tempdir().unwrap();
+        let db = test_db(&dir);
+        let (held, mut worker) = a_stop_during_a_held_extraction(&db, dir.path()).await;
+
+        held.release();
+        let far = std::time::Instant::now() + std::time::Duration::from_secs(30);
+        let waited = await_file_worker(&mut worker, far).await;
+        let row = FileAssetRepository::new(&db)
+            .get_by_id("held")
+            .unwrap()
+            .unwrap();
+
+        assert_matches!(waited, Some(()));
+        assert!(worker.is_finished(), "the worker ended");
+        assert_eq!(row.status, FileAssetStatus::Ready, "the result is kept");
+        assert_eq!(row.extracted_text.as_deref(), Some("text of held"));
+        assert_eq!(row.extract_error, None);
+        assert_eq!(held.calls(), 1);
+    }
+
+    /// STOP-WAIT: the wait ends at its deadline. With the deadline already
+    /// past it is polled once and gives up, deterministically, as the
+    /// worker is parked on the held extraction; the row is left
+    /// `Processing` with the attempt's tag, for the next start to count.
+    #[tokio::test]
+    async fn the_shutdown_wait_cuts_at_its_deadline_and_leaves_the_row_tagged() {
+        use std::assert_matches;
+        let home = tempfile::tempdir().unwrap();
+        let _env = crate::test_util::HomeStoreGuard::set(&home.path().join("home"));
+        let dir = tempfile::tempdir().unwrap();
+        let db = test_db(&dir);
+        let (held, mut worker) = a_stop_during_a_held_extraction(&db, dir.path()).await;
+
+        let waited = await_file_worker(&mut worker, std::time::Instant::now()).await;
+
+        assert_matches!(waited, None);
+        assert!(!worker.is_finished(), "the worker still runs");
+        let row = FileAssetRepository::new(&db)
+            .get_by_id("held")
+            .unwrap()
+            .unwrap();
+        assert_eq!(row.status, FileAssetStatus::Processing);
+        assert_eq!(
+            row.extract_error.as_deref(),
+            Some("[attempt:1] extraction in progress")
+        );
+        drop(held);
+    }
+
+    /// STOP-WAIT: a wait cut at its deadline only gives the wait up; it
+    /// never aborts the worker, whose batch goes on. Once the extraction is
+    /// let go, the same handle ends normally and the row is `Ready`: a
+    /// stage that aborted the worker (or dropped its set) would leave it
+    /// `Processing`.
+    #[tokio::test]
+    async fn the_shutdown_wait_detaches_and_never_aborts_the_worker() {
+        use std::assert_matches;
+        let home = tempfile::tempdir().unwrap();
+        let _env = crate::test_util::HomeStoreGuard::set(&home.path().join("home"));
+        let dir = tempfile::tempdir().unwrap();
+        let db = test_db(&dir);
+        let (held, mut worker) = a_stop_during_a_held_extraction(&db, dir.path()).await;
+        assert_matches!(
+            await_file_worker(&mut worker, std::time::Instant::now()).await,
+            None
+        );
+
+        held.release();
+        let ended = tokio::time::timeout(std::time::Duration::from_secs(30), &mut worker)
+            .await
+            .expect("the worker ends once the extraction is let go");
+        let row = FileAssetRepository::new(&db)
+            .get_by_id("held")
+            .unwrap()
+            .unwrap();
+
+        assert_matches!(ended, Ok(()), "the worker was not aborted");
+        assert_eq!(row.status, FileAssetStatus::Ready);
+        assert_eq!(row.extract_error, None);
     }
 }

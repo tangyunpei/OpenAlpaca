@@ -153,13 +153,15 @@ drain — what it does not finish, the next start learns); stop the background j
 finished run's task extraction and learning — within 3 seconds; flush the cost
 tracker to the database; flush every session log; close every MCP connection
 and kill every plugin child; stop the connectors; stop the wake scheduler and
-file watchers; remove `discovery.json`.
+file watchers; wait, until one second before the window ends, for attachment
+extractions already running; remove `discovery.json`.
 
 A watchdog bounds the tail at **10 seconds** from the cancellation. The
 session-log flush and the extension sweep each take only what is left of that
-10-second window, and each connector's stop and the wake scheduler's what is
-left of it less one second: a stop that does not return in time is logged and
-left behind, and the steps after it still run within the window's last second,
+10-second window, and each connector's stop, the wake scheduler's and the
+wait for attachment extractions what is left of it less one second: a stop
+that does not return in time is logged and left behind, and the steps after
+it still run within the window's last second,
 so `discovery.json` is removed even when a connector hangs. If the window runs
 out all the same, the watchdog removes `discovery.json` and the process exits
 with code 1, skipping whatever else of the tail had not run — possibly
@@ -168,9 +170,11 @@ and connectors that never deregistered. Once the tail has run, work still
 running on the daemon's blocking threads gets at most **one second** more,
 and the process then exits, cutting what is left of it: a memory index
 rebuild or a learning write is redone at the next start; an attachment's text
-extraction is cut, its result not kept, and counted as an interrupted attempt
-(see [Background Tasks](#background-tasks)); and a file a tool was still
-writing is left as the cut leaves it, as a stop could already leave it. A stop
+extraction still running then, which the tail waited for until one second
+before the window ended, is cut, its result not kept, and counted as an
+interrupted attempt (see [Background Tasks](#background-tasks)); and a
+file a tool was still writing is left as the cut leaves it, as a stop could
+already leave it. A stop
 therefore ends at most about 11 seconds after it is asked for. A workflow that finishes once the shutdown has begun
 starts no queued follow-up: the follow-up stays queued on its lane.
 
@@ -184,7 +188,9 @@ but it stayed open and silent until the process died under it; it now gets a
 [WebSocket Events](#websocket-events)). Work that is still running — a chat
 turn, a workflow, a follow-up, a scheduled skill — is not drained: it stops
 when the process does, and a run left in flight is marked `interrupted` on the
-next boot (step 8).
+next boot (step 8). An attachment's text extraction is the exception: it is
+given the rest of the window, as above, and one that finishes by then keeps
+its result.
 
 ## Config Resolution
 
@@ -2261,7 +2267,7 @@ The daemon runs periodic workers, all cancelled together on shutdown (intervals 
 - memory index rebuild (once, at start, only when the search index is missing, unreadable or of another version): rebuilds it from the note files on a blocking worker while the daemon already serves, each partition under its writer slot, so a write meanwhile is never indexed with stale derived facts; recall and search — also when a rebuild starts under them — the suggestions list and a deleted conversation's episode notes answer from the note files until it is done, the timeline answers `MEMORY_INDEX_REBUILDING`, and only background learning waits for it; and a rebuild that fails is retried by the next reconciliation
 - learning sweeper (fixed 15 s interval): a conversation with turns not yet learned becomes due once it has been idle `[orchestrator.learning] idle_secs` or is no longer its lane's active conversation, and a due one is learned once no chat turn has been in flight for 20 s; a conversation with new turns becomes due for its episode note once it has been quiet 30 minutes or is no longer its lane's active conversation, and the note is written after its facts, when it has at least 4 of your turns (see [Memory](#memory))
 - learning boot catch-up (once, 30 s after start): every conversation with turns not yet learned is due, and so is the episode note of every conversation with at least 4 of your turns past its episode cursor
-- file-processing worker and asset cleanup (upload governance); at start the worker first counts every attachment a stop (or a crash) left mid-extraction as a failed attempt — `Error`, "extraction was interrupted: the daemon stopped before it finished" — instead of leaving it pending. Such a file is retried, like any failed extraction, only while it has attempts left: a file is tried at most `[upload.governance] extraction_retry_count` + 1 times in all, interrupted attempts included, so at the default of 1 it is tried twice and two stops that each cut one of its extractions leave it `Error` while that setting stands, and at 0 an interrupted file is never retried; this cap is what keeps a file whose extraction takes the daemon down from doing so at every start. Each poll takes new uploads first and retries failed files only in the room they leave in its batch (`processing_batch_size`). Once a stop is asked for, the worker begins no new extraction: a file still waiting for an extraction slot is left as it was, with no attempt counted. Present limits: the reason is visible only through `GET /v1/files/{id}`, and the status only there and in an upload's answer (neither the app nor the CLI shows them); attaching the same bytes again returns the same row (an upload is de-duplicated by its SHA-256, per owner and project, while its bytes are on disk), failed or not; and no control in the app, no CLI command and no API route deletes or retries one failed attachment: its row goes only with the asset cleanup (an upload linked to no message, after `orphan_grace_period_hours`), a project purge (`openalpaca store purge`, `POST /v1/workspaces/purge`) or a factory reset, and raising `extraction_retry_count` (read at every poll) makes a failed file retryable again once its tries fall within the new count
+- file-processing worker and asset cleanup (upload governance); at start the worker first counts every attachment a stop (or a crash) left mid-extraction as a failed attempt — `Error`, "extraction was interrupted: the daemon stopped before it finished" — instead of leaving it pending. Such a file is retried, like any failed extraction, only while it has attempts left: a file is tried at most `[upload.governance] extraction_retry_count` + 1 times in all, interrupted attempts included, so at the default of 1 it is tried twice and two stops that each cut one of its extractions leave it `Error` while that setting stands, and at 0 an interrupted file is never retried; this cap is what keeps a file whose extraction takes the daemon down from doing so at every start. A stop cuts an extraction only when it is still running at the stop window's end (one second before the window's 10 seconds are up; see [Startup and Lifecycle](#startup-and-lifecycle)): one that finishes by then keeps its result. Each poll takes new uploads first and retries failed files only in the room they leave in its batch (`processing_batch_size`). Once a stop is asked for, the worker begins no new extraction: a file still waiting for an extraction slot is left as it was, with no attempt counted. Present limits: the reason is visible only through `GET /v1/files/{id}`, and the status only there and in an upload's answer (neither the app nor the CLI shows them); attaching the same bytes again returns the same row (an upload is de-duplicated by its SHA-256, per owner and project, while its bytes are on disk), failed or not; and no control in the app, no CLI command and no API route deletes or retries one failed attachment: its row goes only with the asset cleanup (an upload linked to no message, after `orphan_grace_period_hours`), a project purge (`openalpaca store purge`, `POST /v1/workspaces/purge`) or a factory reset, and raising `extraction_retry_count` (read at every poll) makes a failed file retryable again once its tries fall within the new count
 - telemetry cleanup (fixed daily interval)
 - chat-stream cleanup (stale SSE streams)
 

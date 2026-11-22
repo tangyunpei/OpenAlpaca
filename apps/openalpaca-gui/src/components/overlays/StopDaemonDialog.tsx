@@ -2,8 +2,10 @@
  * `StopDaemonDialog` — the confirmation in front of `Stop daemon` (DESIGN_SPEC
  * §5.5's third overlay, §3.32).
  *
- * **The copy must not promise more than a stop does.** Nothing is drained: a
- * stop cuts every in-flight loop mid-round, and the only repair is the next
+ * **The copy must not promise more than a stop does.** Nothing is drained
+ * but an attachment's text extraction, which the daemon's stop waits for until
+ * a second before its 10 s window ends (STOP-WAIT): a stop cuts every
+ * in-flight loop mid-round, and the only repair is the next
  * boot's sweep, which marks each run `interrupted` (restart verb: `Rerun`) and
  * files what the user typed at a running workflow as a follow-up. A streaming
  * reply is lost, and a tool waiting for approval is dropped without running.
@@ -119,8 +121,9 @@ export function StopDaemonDialog({
         </h2>
 
         <p className={paragraph}>
-          Everything OpenAlpaca is doing stops immediately. Nothing is finished
-          first.
+          Everything OpenAlpaca is doing stops within a few seconds. Nothing is
+          finished first, except a file attachment whose text is being read: it
+          gets up to about ten seconds to finish.
         </p>
         <p className={paragraph}>
           Any workflow that is running right now is cut off mid-step. When you

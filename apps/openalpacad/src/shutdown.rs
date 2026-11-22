@@ -167,9 +167,11 @@ pub(crate) async fn within<F: Future>(stage: &str, deadline: Instant, fut: F) ->
 /// the process ends anyway ([`finish_runtime`]). What it has not finished by
 /// then is cut by the exit: an index rebuild or a learning chunk is redone
 /// at the next start, and a file a tool was still writing is left as the cut
-/// leaves it. An attachment's text extraction is cut whatever it does in
-/// that second: the task awaiting it is dropped, so its result is not kept,
-/// and the next start counts it as an interrupted attempt. A fixed second,
+/// leaves it. An attachment's text extraction still running then — the tail
+/// waited for it until its stage deadline
+/// (`background::await_file_worker`) — is cut whatever it does in that
+/// second: the task awaiting it is dropped, so its result is not kept, and
+/// the next start counts it as an interrupted attempt. A fixed second,
 /// not what is left of [`FORCE_EXIT_GRACE`](crate::FORCE_EXIT_GRACE): the
 /// tail is bounded by that window, and this is the one bound after it.
 pub(crate) const RUNTIME_END: Duration = Duration::from_secs(1);
