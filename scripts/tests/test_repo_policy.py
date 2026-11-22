@@ -552,6 +552,10 @@ ABOUT_REL = "scripts/release/about.toml"
 MIRROR_TAIL = " — the two files name the same crates and licences"
 EQUAL_TAIL = " — make them equal: the two files name the same licences for borrow-or-share"
 NO_CRATE = "names no crate (or names it with something that is not a string)"
+# the exception as built, with a bracket in a quoted string that a bracket count must skip
+QUOTED_OPEN = '    { crate = "borrow-or-share", allow = ["MIT-0"], reason = "opens [ here" },'
+QUOTED_CLOSE = "    { crate = 'borrow-or-share', allow = ['MIT-0'], reason = 'closes ] here' },"
+CLARIFY_AFTER = '\n[[licenses.clarify]]\ncrate = "borrow-or-share"\nexpression = "MIT-0"\nlicense-files = []\n'
 
 
 def _exc(deny: str = DENY_EXC, about: str | None = ABOUT_EXC, a: str = NAMES_JSONSCHEMA,
@@ -643,6 +647,10 @@ def test_a_licence_exception_is_reported_at_its_own_line() -> None:
                           'crate = "borrow-or-share"\nallow = ["GPL-3.0"]\n', None),
         # a second exception for the same crate: its own line, not the first's
         "the second of two": (DENY_EXC.replace(EXC_LINE, EXC_LINE + "\n" + gpl), gpl),
+        # a `]` in a quoted string does not close the exceptions array before the second
+        "a quoted ] before it": (DENY_EXC.replace(EXC_LINE, QUOTED_CLOSE + "\n" + gpl), gpl),
+        # nor does a `[` in one keep it open into a [[licenses.clarify]] naming the crate
+        "a quoted [ before it": (DENY_EXC.replace(EXC_LINE, QUOTED_OPEN + "\n" + gpl) + CLARIFY_AFTER, gpl),
     }
     for what, (deny, line) in cases.items():
         n = _line(deny, line) if line else len(deny.splitlines()) - 1  # the table's `crate =` line
@@ -660,6 +668,17 @@ def test_a_licence_exception_is_reported_at_its_own_line() -> None:
             "accepts [MIT-0]%s" % (_line(deny, gpl), ABOUT_REL, EQUAL_TAIL))
     assert rc == 1 and out.count(": licence-exception: ") == 2, out
     assert want in out.splitlines(), out
+
+
+def test_a_quoted_bracket_does_not_move_the_exceptions_end() -> None:
+    # the exceptions end at the array's own `]`: a bracket inside a quoted string is text
+    for entry, after in ((QUOTED_OPEN, CLARIFY_AFTER), (QUOTED_CLOSE + "\n" + EXC_LINE, "")):
+        deny = DENY_EXC.replace(EXC_LINE, entry) + after
+        lines = deny.splitlines()
+        start, dotted, region = guard.exceptions_region(lines)
+        first = _line(deny, "exceptions = [")
+        assert (start, dotted) == (first, False), (entry, start, dotted)
+        assert [n for n, _ in region] == list(range(first, lines.index("]", first) + 2)), (entry, region)
 
 
 def test_a_dotted_exception_is_at_its_key_and_an_unread_form_at_line_1() -> None:
