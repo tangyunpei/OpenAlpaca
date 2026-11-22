@@ -1132,7 +1132,11 @@ impl LearningQueue {
 
     /// Cancels every flush and waits up to `grace` for them to stop. A
     /// chunk's store loop already running on the blocking pool finishes with
-    /// its cursor advance; nothing else is written. `true` when they all did.
+    /// its cursor advance if it ends before the daemon's shutdown tail and
+    /// its last second (`openalpacad`'s `RUNTIME_END`) are over, and is
+    /// otherwise cut by the process exit and repeated harmlessly at the next
+    /// start (see `extractor::store_and_advance`); nothing else is written.
+    /// `true` when they all stopped.
     pub async fn shutdown(&self, grace: Duration) -> bool {
         self.jobs.shutdown(grace).await
     }

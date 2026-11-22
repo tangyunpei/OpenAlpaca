@@ -6,8 +6,10 @@
 //! **Waiting on the port is wrong.** The daemon drops its listener when
 //! `axum::serve` resolves, which is *before* it flushes the cost tracker and
 //! the session logs, sweeps MCP and plugin children, stops the connectors and
-//! removes `discovery.json` — a tail bounded at 10 s. The singleton lock is
-//! held for all of it and is released by the OS when the process exits,
+//! removes `discovery.json` — a tail bounded at 10 s, after which blocking
+//! work still running gets at most 1 s more before the process ends. The
+//! singleton lock is held for all of it and is released by the OS when the
+//! process exits,
 //! whether it exited cleanly or was force-exited by its own watchdog (which
 //! skips the `discovery.json` removal, so a stale file is normal after a
 //! forced exit). The daemon takes that lock without blocking and exits 1 when
@@ -21,10 +23,12 @@ use std::time::{Duration, Instant};
 
 /// The default budget for a daemon to be completely gone.
 ///
-/// The daemon's own force-exit watchdog is 10 s (`openalpacad`'s
-/// `FORCE_EXIT_GRACE`), so this is that plus 5 s for process teardown and for
-/// the OS to release the advisory lock. A stop that has not finished by then
-/// is not slow, it is stuck.
+/// The daemon's own force-exit watchdog bounds its shutdown tail at 10 s
+/// (`openalpacad`'s `FORCE_EXIT_GRACE`), and the blocking work still running
+/// after the tail gets at most 1 s more (`RUNTIME_END`), so this is the 10 s
+/// plus 5 s for that second, for process teardown and for the OS to release
+/// the advisory lock. A stop that has not finished by then is not slow, it
+/// is stuck.
 pub const STOP_TIMEOUT: Duration = Duration::from_secs(15);
 
 /// How often the two conditions are re-read.

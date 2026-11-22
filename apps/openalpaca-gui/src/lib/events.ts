@@ -45,8 +45,8 @@ export type ServerEvent =
   | { type: "heartbeat"; ts: string; instance_id: string; _id: number }
   // The daemon is going away. Sent per socket, immediately before a close with
   // code 1001 — never broadcast, and never replayed. `grace_secs` is the
-  // daemon's force-exit window, so a window can say how long it will be before
-  // the process is gone for certain.
+  // daemon's force-exit window, which bounds its shutdown tail; the process is
+  // gone for certain at most one second after it.
   | { type: "daemon_shutting_down"; grace_secs: number; ts: string; instance_id: string; _id: number }
   | { type: "command_received"; request_id: string; command: string; ts: string; instance_id: string; _id: number }
   | { type: "wake"; wake: unknown; ts: string; instance_id: string; _id: number }

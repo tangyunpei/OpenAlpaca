@@ -446,8 +446,9 @@ impl From<StopOutcome> for DaemonStopReport {
 ///
 /// The webview stops a daemon over HTTP (`POST /v1/command {"command":
 /// "shutdown"}`), and that route's `200 shutting_down` is an acceptance, not a
-/// completion: the daemon still has up to 10 s of shutdown tail to run, and a
-/// replacement started inside it loses the non-blocking lock race and exits.
+/// completion: the daemon still has up to 10 s of shutdown tail to run, then
+/// at most 1 s for the blocking work still running, and a replacement
+/// started inside that loses the non-blocking lock race and exits.
 /// So the GUI never reports "stopped" on the strength of the 200 — it asks
 /// this command, which is a thin wrapper over the same
 /// `daemon_lifecycle::wait_for_daemon_exit` the CLI's `daemon stop|restart`

@@ -81,8 +81,9 @@ pub enum ServerEvent {
     /// only by watching its socket die cannot tell a deliberate stop from a
     /// crash. Nothing persists it (`events/persistence.rs` answers `Ok(0)`).
     ///
-    /// `grace_secs` is the daemon's force-exit window, so a client can say
-    /// how long it will be before the process is gone for certain.
+    /// `grace_secs` is the daemon's force-exit window, which bounds its
+    /// shutdown tail; the process is gone for certain at most one second
+    /// after it, so a client can say how long that will be.
     DaemonShuttingDown {
         grace_secs: u64,
         ts: DateTime<Utc>,

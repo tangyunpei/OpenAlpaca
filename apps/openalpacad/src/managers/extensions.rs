@@ -303,7 +303,7 @@ impl Extensions {
     ///   literal;
     /// * `window` is what is left of the daemon's force-exit watchdog
     ///   (`main.rs`: `process::exit` after `FORCE_EXIT_GRACE`), which is the
-    ///   only bound the whole shutdown has, minus what the connector and wake
+    ///   only bound the shutdown tail has, minus what the connector and wake
     ///   shutdowns after the sweep need.
     ///
     /// It is one deadline across **both** supervisors, not one each: two

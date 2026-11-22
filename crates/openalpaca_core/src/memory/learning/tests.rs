@@ -4335,6 +4335,61 @@ async fn a_rerun_never_duplicates_an_inferred_candidate() {
     assert_eq!(scene.candidates().len(), 1);
 }
 
+/// Guard (b) over a suggestion for a note the user saved (LQ11): a crash
+/// after the store loop and before the cursor moves — which a daemon stop
+/// is too, for a loop still running a second after its shutdown tail —
+/// re-runs the chunk, and the repeat raises no second suggestion. The saved
+/// note stays as it was, and the cursor moves once.
+#[tokio::test]
+async fn a_rerun_never_duplicates_a_suggestion_for_a_saved_note() {
+    let change = || {
+        items(&[full_item(serde_json::json!({
+            "title": "Commute",
+            "content": "Since March 2026 the user cycles to the office; before that, the bus.",
+            "kind": "fact",
+            "fact_key": "user.commute",
+        }))])
+    };
+    let scene = Scene::new(vec![change(), change()]);
+    let saved = scene.save("Commute", "The user commutes by bus.", Some("user.commute"));
+    let s = scene.session();
+    let (_, answer) = scene.turn(&s, "Since March I cycle to the office.", "Noted.");
+    scene.queue.set_store_hooks(StoreHooks {
+        skip_advance: true,
+        ..StoreHooks::default()
+    });
+    let first = scene.queue.flush_session(&s).await;
+    assert_eq!((first.suggestions, first.stored), (1, 1), "{first:?}");
+    assert_eq!(scene.cursor(&s), 0, "the cut left the cursor behind");
+    let candidates = scene.candidates();
+    assert_eq!(candidates.len(), 1, "{candidates:?}");
+    let suggestion = candidates[0].id;
+
+    scene.queue.set_store_hooks(StoreHooks::default());
+    let rerun = scene.queue.flush_session(&s).await;
+    assert_eq!(
+        (
+            rerun.stored,
+            rerun.suggestions,
+            rerun.dropped_already_learned
+        ),
+        (0, 0, 1),
+        "{rerun:?}"
+    );
+    assert_eq!(
+        scene.candidates().iter().map(|c| c.id).collect::<Vec<_>>(),
+        vec![suggestion],
+        "one suggestion for the one saved note"
+    );
+    let active = scene.active();
+    assert_eq!(active.len(), 1, "{active:?}");
+    assert_eq!(
+        (active[0].id, &active[0].revision),
+        (saved.id, &saved.revision)
+    );
+    assert_eq!(scene.cursor(&s), answer);
+}
+
 /// Rule 13's target clause (§1.4(b)): a re-run whose answer rewords an
 /// inferred item — new title, new content, the same key — is held by this
 /// window's candidate that already names the same target. Identity alone

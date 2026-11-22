@@ -426,3 +426,105 @@ async fn graceful_shutdown_the_watchdog_removes_the_discovery_file_before_it_exi
         "the published instant is the window from the cancellation"
     );
 }
+
+/// The end of `main` is bounded: once `async_main` has returned,
+/// [`finish_runtime`] ends the runtime within its bound while a blocking
+/// task still runs — an attachment's extraction, an index rebuild — where a
+/// dropped `Runtime` waits for it with no bound. And the workers drop every
+/// async task during that bounded wait, so a destructor a task holds runs
+/// before `main` goes on: the guard here stands for `KillGuard`'s `killpg`
+/// of a running shell group and a plugin child's `kill_on_drop`, which a
+/// thread watchdog or a `process::exit` would skip and a zero bound
+/// (`shutdown_background`) leaves no time for. That makes the flag's assert
+/// a timing one: it holds while the workers drop the parked task within the
+/// bound, which a heavily loaded machine could exceed.
+///
+/// A plain `#[test]` with its own runtime, in real time with wide margins:
+/// the runtime under test is the one being ended. Both the blocking task and
+/// the async task are seen running before the clock starts, since a
+/// blocking task not yet started is dropped unrun at a shutdown and would
+/// let an unbounded drop pass. The latch has its own fallback, so a
+/// regression fails at the elapsed assert instead of hanging the run.
+///
+/// [`finish_runtime`]: crate::shutdown::finish_runtime
+#[test]
+fn graceful_shutdown_the_runtime_ends_within_its_bound_while_blocking_work_runs() {
+    use std::sync::atomic::{AtomicBool, Ordering};
+    use std::sync::{Arc, Condvar, Mutex, mpsc};
+
+    /// Holds the blocking task until it is opened or its fallback passes.
+    struct Latch(Arc<(Mutex<bool>, Condvar)>);
+    impl Latch {
+        fn open(&self) {
+            let (open, cvar) = &*self.0;
+            *open.lock().unwrap_or_else(|p| p.into_inner()) = true;
+            cvar.notify_all();
+        }
+    }
+    impl Drop for Latch {
+        fn drop(&mut self) {
+            self.open();
+        }
+    }
+
+    /// Records that its owner's destructors ran.
+    struct DropFlag(Arc<AtomicBool>);
+    impl Drop for DropFlag {
+        fn drop(&mut self) {
+            self.0.store(true, Ordering::SeqCst);
+        }
+    }
+
+    const FALLBACK: Duration = Duration::from_secs(5);
+    const BOUND: Duration = Duration::from_millis(100);
+    const MUST_END_WITHIN: Duration = Duration::from_secs(2);
+
+    let runtime = tokio::runtime::Builder::new_multi_thread()
+        .worker_threads(2)
+        .enable_all()
+        .build()
+        .expect("a runtime");
+
+    let latch = Latch(Arc::new((Mutex::new(false), Condvar::new())));
+    let held = Arc::clone(&latch.0);
+    let (started_tx, started_rx) = mpsc::channel::<()>();
+    runtime.spawn_blocking(move || {
+        let _ = started_tx.send(());
+        let (open, cvar) = &*held;
+        let guard = open.lock().unwrap_or_else(|p| p.into_inner());
+        let _ = cvar
+            .wait_timeout_while(guard, FALLBACK, |open| !*open)
+            .unwrap_or_else(|p| p.into_inner());
+    });
+
+    let dropped = Arc::new(AtomicBool::new(false));
+    let flag = DropFlag(Arc::clone(&dropped));
+    let (polled_tx, polled_rx) = mpsc::channel::<()>();
+    runtime.spawn(async move {
+        let _flag = flag;
+        let _ = polled_tx.send(());
+        std::future::pending::<()>().await;
+    });
+
+    started_rx
+        .recv_timeout(FALLBACK)
+        .expect("the blocking task started");
+    polled_rx
+        .recv_timeout(FALLBACK)
+        .expect("the async task was polled");
+
+    let began = std::time::Instant::now();
+    crate::shutdown::finish_runtime(runtime, BOUND);
+    let elapsed = began.elapsed();
+    let guard_dropped = dropped.load(Ordering::SeqCst);
+
+    assert!(
+        elapsed < MUST_END_WITHIN,
+        "the runtime took {elapsed:?} to end with a blocking task running; its bound is {BOUND:?}"
+    );
+    assert!(
+        guard_dropped,
+        "the runtime ended without dropping its async tasks, so their destructors never ran"
+    );
+    latch.open();
+}

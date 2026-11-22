@@ -67,7 +67,9 @@ use uuid::Uuid;
 
 /// How long graceful shutdown gets before the process is forced out.
 ///
-/// It is the only bound the whole shutdown sequence has, which is why
+/// It bounds the shutdown tail; once the tail has run, the blocking work
+/// still running gets [`shutdown::RUNTIME_END`] more, then the process ends
+/// ([`shutdown::finish_runtime`]). It is the tail's only bound, which is why
 /// [`Extensions::shutdown_all`](crate::managers::extensions::Extensions::shutdown_all)
 /// derives its sweep budget from what is left of it rather than from a literal
 /// of its own, and the connector and wake stages end
@@ -125,7 +127,7 @@ fn main() -> Result<()> {
 
     // D3: Singleton lock FIRST — prevents all multi-process races.
     // Acquired before any config I/O or key generation.
-    let _lock_guard = match discovery::acquire_single_instance_lock() {
+    let lock_guard = match discovery::acquire_single_instance_lock() {
         Ok(guard) => {
             info!("Acquired singleton lock");
             guard
@@ -203,11 +205,25 @@ fn main() -> Result<()> {
 
     // Start the tokio runtime AFTER the master key is installed (and the
     // environment cleaned of it) and the signal handlers are set.
-    tokio::runtime::Builder::new_multi_thread()
+    let runtime = tokio::runtime::Builder::new_multi_thread()
         .enable_all()
         .build()
-        .context("Failed to build tokio runtime")?
-        .block_on(async_main(config_base_dir, shutdown_flag, path_source))
+        .context("Failed to build tokio runtime")?;
+    let result = runtime.block_on(async_main(config_base_dir, shutdown_flag, path_source));
+
+    // The end of a stop is bounded: the tail has run, and the blocking work
+    // still running — an extraction, an index rebuild — gets
+    // `shutdown::RUNTIME_END` more, not the unbounded wait a dropped runtime
+    // gives it (`shutdown::finish_runtime`).
+    shutdown::finish_runtime(runtime, shutdown::RUNTIME_END);
+
+    // A blocking thread `finish_runtime` left behind may still be writing
+    // until the process dies. Dropping the guard here would release the lock
+    // first, in the moment between `main`'s return and the exit, so a
+    // replacement could take it while this process still writes; forgotten,
+    // the lock is released by the kernel when the process ends.
+    std::mem::forget(lock_guard);
+    result
 }
 
 async fn async_main(

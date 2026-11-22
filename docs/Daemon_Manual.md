@@ -155,16 +155,23 @@ tracker to the database; flush every session log; close every MCP connection
 and kill every plugin child; stop the connectors; stop the wake scheduler and
 file watchers; remove `discovery.json`.
 
-A watchdog bounds all of it at **10 seconds** from the cancellation. The
+A watchdog bounds the tail at **10 seconds** from the cancellation. The
 session-log flush and the extension sweep each take only what is left of that
-window, and each connector's stop and the wake scheduler's what is left of it
-less one second: a stop that does not return in time is logged and left
-behind, and the steps after it still run within that last second, so
-`discovery.json` is removed even when a connector hangs. If the window runs
+10-second window, and each connector's stop and the wake scheduler's what is
+left of it less one second: a stop that does not return in time is logged and
+left behind, and the steps after it still run within the window's last second,
+so `discovery.json` is removed even when a connector hangs. If the window runs
 out all the same, the watchdog removes `discovery.json` and the process exits
 with code 1, skipping whatever else of the tail had not run — possibly
 unflushed spend, dropped session-log records, orphaned MCP and plugin children
-and connectors that never deregistered. A workflow that finishes once the shutdown has begun
+and connectors that never deregistered. Once the tail has run, work still
+running on the daemon's blocking threads gets at most **one second** more,
+and the process then exits, cutting what is left of it: a memory index
+rebuild or a learning write is redone at the next start; an attachment's text
+extraction is cut, its result not kept, and counted as an interrupted attempt
+(see [Background Tasks](#background-tasks)); and a file a tool was still
+writing is left as the cut leaves it, as a stop could already leave it. A stop
+therefore ends at most about 11 seconds after it is asked for. A workflow that finishes once the shutdown has begun
 starts no queued follow-up: the follow-up stays queued on its lane.
 
 Open connections no longer run that window out. An open
@@ -2295,7 +2302,8 @@ The answer — `200 {"request_id", "status": "shutting_down"}` — is an
 **acceptance, not a completion.** The daemon replies first and raises the
 shutdown about 100 ms later, so that the reply can leave; the process is gone
 only once the shutdown tail has run, which can take up to the 10-second window
-described in [Startup and Lifecycle](#startup-and-lifecycle). Nothing in the
+described in [Startup and Lifecycle](#startup-and-lifecycle), and at most one
+second more for work still running. Nothing in the
 answer says the daemon has stopped. A client that needs to know waits on the
 daemon's **process**, then on its **single-instance lock** — never on the port,
 which closes first while the lock is still held — as `openalpaca daemon stop`,

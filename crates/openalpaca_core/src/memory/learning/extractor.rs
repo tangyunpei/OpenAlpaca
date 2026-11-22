@@ -806,8 +806,10 @@ pub(crate) struct StoreJob {
 /// Steps 3 and 4 of §1.4, as **one** blocking task: the chunk's store loop
 /// and its cursor advance. A cancellation or a shutdown that lands after the
 /// model answered can drop the async half that awaits this, but not this —
-/// only a process exit mid-closure can leave the cursor behind the writes,
-/// and the four guards of §1.4 make that repeat harmless.
+/// only a process exit mid-closure can leave the cursor behind the writes
+/// (which a daemon stop now is, for a loop still running a second after
+/// its shutdown tail), and the four guards of §1.4 make that repeat
+/// harmless.
 pub(crate) fn store_and_advance(job: StoreJob) -> (StoreCounts, StoreEnd) {
     let mut counts = StoreCounts::default();
     // LQ4: a deleted conversation's unlearned turns are dropped. A flush
