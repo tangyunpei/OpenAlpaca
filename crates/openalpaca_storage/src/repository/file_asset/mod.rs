@@ -173,6 +173,14 @@ impl<'a> FileAssetRepository<'a> {
     /// retries, oldest first: those whose `[attempt:N]` tag has
     /// `N <= max_attempts`, a row with no tag counting as attempt 0.
     ///
+    /// The daemon's worker reads the same tag in Rust when it begins the
+    /// retry. The two readers agree on every string a writer produces: a
+    /// canonical tag (`[attempt:` then ASCII digits within `u32` then `]`,
+    /// the only form written) and NULL, empty or untagged text. They are not
+    /// equal on other strings: this query reads `[ATTEMPT:3] x` as 3 (LIKE
+    /// ignores ASCII case) and `[attempt:2x] x` as 2 (CAST takes the leading
+    /// digits), where the worker reads both as 0.
+    ///
     /// The check is in the query, before the limit, so rows that have spent
     /// their retries never crowd out one that has not.
     pub fn list_retryable_errors(&self, max_attempts: u32, limit: usize) -> Result<Vec<FileAsset>> {

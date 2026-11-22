@@ -77,11 +77,38 @@ pub fn spawn_chat_cleanup(
 /// None can be in flight then — this process has started no extraction, and
 /// the singleton lock keeps any other daemon off the store. A later poll
 /// never does this: a row `Processing` then is a task of this process.
+///
+/// A stop begins no new extraction: the poll lists and spawns nothing once
+/// the stop is asked for, and a task waiting for an extraction slot checks
+/// it after taking the slot and returns without writing, so a file that had
+/// not started when the stop came keeps its row as it was. An extraction
+/// already running is left to finish or be cut as before.
 pub fn spawn_file_processing_worker(
     db: Database,
     daemon_config: Arc<ArcSwap<openalpaca_core::daemon_config::DaemonConfig>>,
     cancel: CancellationToken,
 ) {
+    spawn_file_processing_worker_with(
+        db,
+        daemon_config,
+        cancel,
+        Arc::new(crate::extraction::extract_text),
+    );
+}
+
+/// How the worker extracts a file's text: `(storage_path, mime_type,
+/// max_chars)` to `(text, error)`, as [`crate::extraction::extract_text`].
+type Extractor = Arc<dyn Fn(&str, &str, usize) -> (Option<String>, Option<String>) + Send + Sync>;
+
+/// [`spawn_file_processing_worker`] with its extractor given, returning the
+/// worker's task: the daemon passes `extract_text` and drops the handle; a
+/// test passes an extraction it holds and awaits the worker's end.
+fn spawn_file_processing_worker_with(
+    db: Database,
+    daemon_config: Arc<ArcSwap<openalpaca_core::daemon_config::DaemonConfig>>,
+    cancel: CancellationToken,
+    extract: Extractor,
+) -> tokio::task::JoinHandle<()> {
     tokio::spawn(async move {
         match FileAssetRepository::new(&db).fail_interrupted_processing(INTERRUPTED_REASON) {
             Ok(0) => {}
@@ -112,6 +139,10 @@ pub fn spawn_file_processing_worker(
                 break;
             }
 
+            if cancel.is_cancelled() {
+                tracing::info!("File processing worker shutting down");
+                break;
+            }
             let repo = FileAssetRepository::new(&db);
 
             // Collect assets to process: new uploads + retryable errors
@@ -139,12 +170,23 @@ pub fn spawn_file_processing_worker(
             let mut handles = Vec::new();
 
             for asset in assets {
+                if cancel.is_cancelled() {
+                    break;
+                }
                 let sem = semaphore.clone();
                 let db2 = db.clone();
                 let max_text = max_text_chars;
+                let cancel = cancel.clone();
+                let extract = extract.clone();
 
                 handles.push(tokio::spawn(async move {
                     let _permit = sem.acquire().await.expect("semaphore closed");
+                    // A stop asked for while this task waited for its slot:
+                    // begin nothing, so the row keeps its status and its
+                    // attempt count.
+                    if cancel.is_cancelled() {
+                        return;
+                    }
                     let repo = FileAssetRepository::new(&db2);
 
                     let prev_attempts = match begin_attempt(&repo, &asset) {
@@ -158,7 +200,7 @@ pub fn spawn_file_processing_worker(
                     let storage_path = asset.storage_path.clone();
                     let mime_type = asset.mime_type.clone();
                     let (text, error) = tokio::task::spawn_blocking(move || {
-                        crate::extraction::extract_text(&storage_path, &mime_type, max_text)
+                        extract(&storage_path, &mime_type, max_text)
                     })
                     .await
                     .unwrap_or((None, Some("Extraction task panicked".to_string())));
@@ -187,7 +229,7 @@ pub fn spawn_file_processing_worker(
                 tracing::info!("File processing worker: processed {processed} assets");
             }
         }
-    });
+    })
 }
 
 /// What a row left `Processing` at a stop carries after its `[attempt:N]`
@@ -219,6 +261,15 @@ fn processing_tag(prev_attempts: u32) -> String {
 }
 
 /// Parse the retry attempt count from an annotated error string like "[attempt:2] PDF extraction failed".
+///
+/// The poll's retry listing reads the same tag in SQL
+/// ([`FileAssetRepository::list_retryable_errors`]). The two agree on every
+/// string a writer produces — a canonical tag, `[attempt:` then ASCII
+/// digits within `u32` then `]`, and NULL, empty or untagged text — which
+/// `the_sql_retry_listing_reads_every_written_tag_as_this_does` holds. They
+/// are not equal on other strings: `[ATTEMPT:3] x` is 3 to the SQL (its
+/// LIKE ignores ASCII case) and 0 here; `[attempt:2x] x` is 2 to the SQL
+/// (CAST takes the leading digits) and 0 here.
 fn parse_retry_count(error: Option<&str>) -> u32 {
     error
         .and_then(|e| e.strip_prefix("[attempt:"))
@@ -899,5 +950,258 @@ mod tests {
                 "{id} stays spent"
             );
         }
+    }
+
+    /// An extraction the test holds: each call reports its storage path on
+    /// the channel, then waits for the latch the test opens, then extracts
+    /// the file for real. The wait is bounded (30 s) and the latch opens on
+    /// drop, so a failed assert never leaves a blocking thread the test
+    /// runtime's drop would wait for.
+    struct HeldExtraction {
+        latch: Arc<(std::sync::Mutex<bool>, std::sync::Condvar)>,
+        calls: Arc<std::sync::atomic::AtomicUsize>,
+    }
+
+    impl HeldExtraction {
+        fn new() -> (
+            Self,
+            Extractor,
+            tokio::sync::mpsc::UnboundedReceiver<String>,
+        ) {
+            let latch = Arc::new((std::sync::Mutex::new(false), std::sync::Condvar::new()));
+            let calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+            let (started, rx) = tokio::sync::mpsc::unbounded_channel();
+            let (held_latch, held_calls) = (latch.clone(), calls.clone());
+            let extract: Extractor = Arc::new(move |path: &str, mime: &str, max: usize| {
+                held_calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                let _ = started.send(path.to_string());
+                let (lock, opened) = &*held_latch;
+                let guard = lock.lock().unwrap_or_else(|p| p.into_inner());
+                drop(
+                    opened
+                        .wait_timeout_while(guard, std::time::Duration::from_secs(30), |open| {
+                            !*open
+                        })
+                        .unwrap_or_else(|p| p.into_inner()),
+                );
+                crate::extraction::extract_text(path, mime, max)
+            });
+            (Self { latch, calls }, extract, rx)
+        }
+
+        fn release(&self) {
+            let (lock, opened) = &*self.latch;
+            *lock.lock().unwrap_or_else(|p| p.into_inner()) = true;
+            opened.notify_all();
+        }
+
+        fn calls(&self) -> usize {
+            self.calls.load(std::sync::atomic::Ordering::SeqCst)
+        }
+    }
+
+    impl Drop for HeldExtraction {
+        fn drop(&mut self) {
+            self.release();
+        }
+    }
+
+    /// The worker on a 1 s poll with `max_concurrent` extraction slots and
+    /// the given extraction, with its token and its task.
+    fn start_held_worker(
+        db: &Database,
+        max_concurrent: usize,
+        extract: Extractor,
+    ) -> (CancellationToken, tokio::task::JoinHandle<()>) {
+        let mut cfg = openalpaca_core::daemon_config::DaemonConfig::default();
+        cfg.upload.governance.processing_poll_interval_secs = 1;
+        cfg.upload.governance.max_concurrent_extractions = max_concurrent;
+        let cancel = CancellationToken::new();
+        let worker = spawn_file_processing_worker_with(
+            db.clone(),
+            Arc::new(ArcSwap::from_pointee(cfg)),
+            cancel.clone(),
+            extract,
+        );
+        (cancel, worker)
+    }
+
+    /// The row id `upload_row` gave the file at `path`.
+    fn id_of(path: &str) -> String {
+        std::path::Path::new(path)
+            .file_stem()
+            .expect("a file name")
+            .to_string_lossy()
+            .into_owned()
+    }
+
+    async fn next_started(rx: &mut tokio::sync::mpsc::UnboundedReceiver<String>) -> String {
+        tokio::time::timeout(std::time::Duration::from_secs(30), rx.recv())
+            .await
+            .expect("an extraction starts within 30 s")
+            .expect("the extraction channel is open")
+    }
+
+    /// ATTACH-MECH: a stop begins no new extraction. One slot, four listed
+    /// rows: one extracts, held by the test; three wait for the slot. The
+    /// stop comes, then the held extraction ends. A waiting task takes the
+    /// slot after the stop and must write nothing — no `Processing` write,
+    /// so the next start counts no attempt for a file that had not started
+    /// when the stop came — and extract nothing. Deterministic: the test
+    /// holds the extraction (no sleep race) and awaits the worker's end.
+    #[tokio::test]
+    async fn a_stop_begins_no_attempt_on_a_row_waiting_for_a_slot() {
+        let home = tempfile::tempdir().unwrap();
+        let _env = crate::test_util::HomeStoreGuard::set(&home.path().join("home"));
+        let dir = tempfile::tempdir().unwrap();
+        let db = test_db(&dir);
+        for id in ["a", "b", "c", "d"] {
+            upload_row(&db, dir.path(), id, FileAssetStatus::Uploaded);
+        }
+        // A row on its retry, so a tagged error is held byte for byte too.
+        tag(
+            &db,
+            "d",
+            FileAssetStatus::Error,
+            Some("[attempt:1] Failed to read text file"),
+        );
+        let repo = FileAssetRepository::new(&db);
+        let before: Vec<_> = ["a", "b", "c", "d"]
+            .iter()
+            .map(|id| repo.get_by_id(id).unwrap().unwrap())
+            .collect();
+
+        let (held, extract, mut started) = HeldExtraction::new();
+        let (cancel, worker) = start_held_worker(&db, 1, extract);
+        let running = id_of(&next_started(&mut started).await);
+        cancel.cancel();
+        held.release();
+        tokio::time::timeout(std::time::Duration::from_secs(30), worker)
+            .await
+            .expect("the worker ends after the stop")
+            .expect("the worker does not panic");
+
+        assert_eq!(held.calls(), 1, "nothing is extracted after the stop");
+        for row in &before {
+            let now = repo.get_by_id(&row.id).unwrap().unwrap();
+            if row.id == running {
+                assert_eq!(now.status, FileAssetStatus::Ready, "left to finish");
+                continue;
+            }
+            assert_eq!(now.status, row.status, "{} keeps its status", row.id);
+            assert_eq!(
+                now.extract_error, row.extract_error,
+                "{} keeps its error",
+                row.id
+            );
+            assert_eq!(now.updated_at, row.updated_at, "{} is not written", row.id);
+            assert_eq!(now.extracted_text, row.extracted_text);
+        }
+    }
+
+    /// Regression guard (ATTACH-MECH): the worker's own `Processing` write
+    /// carries the attempt it begins, read while the extraction is held. A
+    /// worker that wrote `Processing` with no tag (`begin_attempt` left
+    /// unused) would let a crash loop's row be counted as attempt 1 at every
+    /// start; the seam test alone does not see the worker's call.
+    #[tokio::test]
+    async fn the_worker_tags_the_attempt_it_begins_while_it_extracts() {
+        let home = tempfile::tempdir().unwrap();
+        let _env = crate::test_util::HomeStoreGuard::set(&home.path().join("home"));
+        let dir = tempfile::tempdir().unwrap();
+        let db = test_db(&dir);
+        upload_row(&db, dir.path(), "new", FileAssetStatus::Uploaded);
+        upload_row(&db, dir.path(), "retried", FileAssetStatus::Uploaded);
+        tag(
+            &db,
+            "retried",
+            FileAssetStatus::Error,
+            Some("[attempt:1] Failed to read text file"),
+        );
+
+        let (held, extract, mut started) = HeldExtraction::new();
+        let (cancel, worker) = start_held_worker(&db, 2, extract);
+        let mut seen = vec![
+            id_of(&next_started(&mut started).await),
+            id_of(&next_started(&mut started).await),
+        ];
+        seen.sort();
+        assert_eq!(seen, ["new", "retried"]);
+        let repo = FileAssetRepository::new(&db);
+        for (id, tag) in [
+            ("new", "[attempt:1] extraction in progress"),
+            ("retried", "[attempt:2] extraction in progress"),
+        ] {
+            let row = repo.get_by_id(id).unwrap().unwrap();
+            assert_eq!(row.status, FileAssetStatus::Processing, "{id}");
+            assert_eq!(row.extract_error.as_deref(), Some(tag), "{id}");
+        }
+        cancel.cancel();
+        held.release();
+        tokio::time::timeout(std::time::Duration::from_secs(30), worker)
+            .await
+            .expect("the worker ends after the stop")
+            .expect("the worker does not panic");
+        for id in ["new", "retried"] {
+            assert_eq!(status_of(&db, id), FileAssetStatus::Ready, "{id}");
+        }
+    }
+
+    /// Regression guard (ATTACH-MECH): the poll's retry listing reads the
+    /// attempt tag in SQL, the worker in Rust (`parse_retry_count`); for
+    /// every string a writer can leave in `extract_error` they must pick the
+    /// same rows, at every retry count. Strings no writer produces (another
+    /// letter case, a non-digit tag) are outside this: the two are not equal
+    /// on them, as both doc comments say.
+    #[test]
+    fn the_sql_retry_listing_reads_every_written_tag_as_this_does() {
+        let dir = tempfile::tempdir().unwrap();
+        let db = test_db(&dir);
+        let repo = FileAssetRepository::new(&db);
+        let texts = [
+            "",
+            "PDF extraction failed",
+            "a ] b",
+            "100% done",
+            "_x_",
+            "line\nbreak",
+            "\u{fc}n\u{ef}c\u{f8}d\u{e9}",
+            "[attempt:9] second tag",
+            "extraction in progress",
+            INTERRUPTED_REASON,
+        ];
+        let mut written: Vec<Option<String>> = vec![
+            None,
+            Some(String::new()),
+            Some("Failed to read text file".to_string()),
+        ];
+        for n in [1u32, 2, 3, 4, 5, 6, 10, 100] {
+            for e in texts {
+                written.push(Some(format!("[attempt:{n}] {e}")));
+            }
+            written.push(Some(processing_tag(n - 1)));
+        }
+        let ids: Vec<String> = (0..written.len()).map(|i| format!("w{i}")).collect();
+        for (id, error) in ids.iter().zip(&written) {
+            upload_row(&db, dir.path(), id, FileAssetStatus::Uploaded);
+            tag(&db, id, FileAssetStatus::Error, error.as_deref());
+        }
+
+        let mut differ = Vec::new();
+        for retries in 0u32..=3 {
+            let listed: std::collections::HashSet<String> = repo
+                .list_retryable_errors(retries, 100_000)
+                .unwrap()
+                .into_iter()
+                .map(|row| row.id)
+                .collect();
+            for (id, error) in ids.iter().zip(&written) {
+                let rust = parse_retry_count(error.as_deref()) <= retries;
+                if rust != listed.contains(id) {
+                    differ.push(format!("retries {retries}: {error:?} rust {rust}"));
+                }
+            }
+        }
+        assert!(differ.is_empty(), "the readers differ: {differ:#?}");
     }
 }
