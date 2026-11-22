@@ -531,7 +531,11 @@ def exception_spelling(entry: dict) -> tuple[str | None, str | None]:
     crate, name = entry.get("crate"), entry.get("name")
     named = crate if isinstance(crate, str) else name if isinstance(name, str) else None
     named = named.split("@")[0] if named else None
-    if "name" in entry or not isinstance(crate, str) or "@" in crate or "version" in entry:
+    if "name" in entry:
+        return named, "names its crate as name = (or with a version)"
+    if not isinstance(crate, str):
+        return named, "names no crate (or names it with something that is not a string)"
+    if "@" in crate or "version" in entry:
         return named, "names its crate as name = (or with a version)"
     allow = entry.get("allow")
     if not isinstance(allow, list) or not all(isinstance(x, str) for x in allow):
@@ -553,11 +557,61 @@ def section_line(lines: list[str], pattern: re.Pattern, section: str | None) -> 
     return 1
 
 
-def deny_exception_line(lines: list[str], crate: str | None) -> int:
-    if crate is None:
-        return section_line(lines, re.compile(r"^\s*exceptions\s*="), "licenses")
+def brackets(body: str) -> int:
+    """How far a line opens TOML brackets (`[` less `]`), outside quotes."""
+    quote, depth = None, 0
+    for c in body:
+        if quote:
+            if c == quote:
+                quote = None
+        elif c in "\"'":
+            quote = c
+        elif c in "[]":
+            depth += 1 if c == "[" else -1
+    return depth
+
+
+def exceptions_region(lines: list[str]) -> tuple[int | None, bool, list[tuple[int, str]]]:
+    """Where deny.toml's [licenses] exceptions are written: (the first line of them, or
+    None when no form below is found; whether that line is a top-level `licenses.exceptions`
+    key; the lines inside them, comments cut). Read: `exceptions = [...]` in [licenses],
+    `[[licenses.exceptions]]` tables, and the top-level dotted key; never `clarify`."""
+    start, dotted, region, current, depth = None, False, [], "", 0
+    for n, line in enumerate(lines, 1):
+        body = strip_comment(line)
+        if depth > 0:  # inside the exceptions array, to its closing bracket
+            region.append((n, body))
+            depth += brackets(body)
+            continue
+        header = re.match(r"^\s*(\[\[?)\s*([^\]]+?)\s*\]\]?\s*$", body)
+        if header:
+            current = re.sub(r"\s*\.\s*", ".", header.group(2))
+            if header.group(1) == "[[" and current == "licenses.exceptions":
+                start = start or n
+            continue
+        if current == "licenses.exceptions":
+            region.append((n, body))
+        elif ((current == "licenses" and re.match(r"^\s*exceptions\s*=", body))
+              or (current == "" and re.match(r"^\s*licenses\s*\.\s*exceptions\s*=", body))):
+            start, dotted = start or n, current == ""
+            region.append((n, body))
+            depth = brackets(body)
+    return start, dotted, region
+
+
+def deny_exception_line(lines: list[str], crate: str | None, k: int = 0) -> int:
+    """The line of the k-th `crate =` or `name =` naming the crate in the exceptions (from
+    0; an entry with both names it twice): that exception's own line;
+    the top-level `licenses.exceptions` key's line for that form, and the exceptions' first
+    line for an entry naming no crate; 1 when the exceptions are written in no form read."""
+    start, dotted, region = exceptions_region(lines)
+    if start is None:
+        return 1
+    if crate is None or dotted:
+        return start
     named = re.compile(r"""\b(?:crate|name)\s*=\s*["']""" + re.escape(crate) + r"""(?:@[^"']*)?["']""")
-    return section_line(lines, named, "licenses")
+    hits = [n for n, body in region for _ in named.finditer(body)]
+    return hits[k] if k < len(hits) else start
 
 
 def about_table_line(lines: list[str], crate: str) -> int:
@@ -570,16 +624,20 @@ def check_licence_exception(root, out):
     exceptions, accepted = deny_exceptions(deny_path), about_exceptions(about_path)
     deny_lines = read(deny_path) if exceptions else []
     about_lines = read(about_path) if accepted else []
-    named, spelled = set(), []
+    named, spelled, seen = set(), [], {}
     for entry in exceptions:
         crate, wrong = exception_spelling(entry)
+        k = seen.get(crate, 0)  # a second exception naming the crate is on its own line
+        seen[crate] = k + max(1, sum(isinstance(v, str) and v.split("@")[0] == crate
+                                     for v in (entry.get("crate"), entry.get("name"))))
+        n = deny_exception_line(deny_lines, crate, k)
         if crate:
             named.add(crate)
         if wrong:  # one violation: its about.toml table is no second one
             out.append("%s:%d: licence-exception: an exception %s — spell it %s"
-                       % (DENY_TOML, deny_exception_line(deny_lines, crate), wrong, SPELL_EXCEPTION))
+                       % (DENY_TOML, n, wrong, SPELL_EXCEPTION))
         else:
-            spelled.append((crate, entry["allow"], deny_exception_line(deny_lines, crate)))
+            spelled.append((crate, entry["allow"], n))
     same = " — the two files name the same crates and licences"
     for crate, allow, n in spelled:
         if crate not in accepted:
@@ -587,8 +645,9 @@ def check_licence_exception(root, out):
                        % (DENY_TOML, n, crate, ", ".join(allow), ABOUT_TOML, crate, same))
         elif set(allow) != set(accepted[crate]):
             out.append("%s:%d: licence-exception: %s: deny.toml allows [%s] but %s accepts [%s]"
+                       " — make them equal: the two files name the same licences for %s"
                        % (DENY_TOML, n, crate, ", ".join(sorted(set(allow))), ABOUT_TOML,
-                          ", ".join(sorted(set(accepted[crate])))))
+                          ", ".join(sorted(set(accepted[crate]))), crate))
     for crate, licences in accepted.items():
         if crate not in named:
             out.append("%s:%d: licence-exception: [%s] accepts %s but deny.toml's [licenses] exceptions do not%s"

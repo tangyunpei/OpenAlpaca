@@ -550,6 +550,8 @@ ABOUT_EXC = ABOUT_PLAIN + '\n[borrow-or-share]\naccepted = ["MIT-0"]\n'
 NAMES_JSONSCHEMA = MEMBER_A + 'jsonschema = { version = "0.62.0", default-features = false }\n'
 ABOUT_REL = "scripts/release/about.toml"
 MIRROR_TAIL = " — the two files name the same crates and licences"
+EQUAL_TAIL = " — make them equal: the two files name the same licences for borrow-or-share"
+NO_CRATE = "names no crate (or names it with something that is not a string)"
 
 
 def _exc(deny: str = DENY_EXC, about: str | None = ABOUT_EXC, a: str = NAMES_JSONSCHEMA,
@@ -611,13 +613,83 @@ def test_unequal_licence_sets_in_the_two_files_fail() -> None:
     wider_about = ABOUT_EXC.replace('accepted = ["MIT-0"]', 'accepted = ["MIT-0", "Unlicense"]')
     out = _planted("licence-exception", **_exc(about=wider_about))
     want = ("deny.toml:%d: licence-exception: borrow-or-share: deny.toml allows [MIT-0] but %s "
-            "accepts [MIT-0, Unlicense]" % (n, ABOUT_REL))
+            "accepts [MIT-0, Unlicense]%s" % (n, ABOUT_REL, EQUAL_TAIL))
     assert want in out.splitlines(), out
     wider_deny = DENY_EXC.replace('allow = ["MIT-0"]', 'allow = ["MIT-0", "Unlicense"]')
     out = _planted("licence-exception", **_exc(deny=wider_deny))
     want = ("deny.toml:%d: licence-exception: borrow-or-share: deny.toml allows [MIT-0, Unlicense] but %s "
-            "accepts [MIT-0]" % (n, ABOUT_REL))
+            "accepts [MIT-0]%s" % (n, ABOUT_REL, EQUAL_TAIL))
     assert want in out.splitlines(), out
+
+
+def test_unequal_licence_sets_say_what_to_do() -> None:
+    other_about = ABOUT_EXC.replace('accepted = ["MIT-0"]', 'accepted = ["Unlicense"]')
+    out = _planted("licence-exception", **_exc(about=other_about))
+    want = ("deny.toml:%d: licence-exception: borrow-or-share: deny.toml allows [MIT-0] but %s accepts "
+            "[Unlicense] — make them equal: the two files name the same licences for borrow-or-share"
+            % (_line(DENY_EXC, EXC_LINE), ABOUT_REL))
+    assert out.splitlines()[0] == want, out
+
+
+def test_a_licence_exception_is_reported_at_its_own_line() -> None:
+    gpl = '    { crate = "borrow-or-share", allow = ["GPL-3.0"] },'
+    clarify = 'clarify = [{ crate = "borrow-or-share", expression = "MIT-0", license-files = [] }]'
+    cases = {
+        # a [licenses] clarify entry naming the same crate, inline, above the exception
+        "inline clarify": (DENY_LICENSES + clarify + "\nexceptions = [\n" + gpl + "\n]\n", gpl),
+        # the same as [[licenses.clarify]] above [[licenses.exceptions]]
+        "clarify table": (DENY_LICENSES + '\n[[licenses.clarify]]\ncrate = "borrow-or-share"\n'
+                          'expression = "MIT-0"\nlicense-files = []\n\n[[licenses.exceptions]]\n'
+                          'crate = "borrow-or-share"\nallow = ["GPL-3.0"]\n', None),
+        # a second exception for the same crate: its own line, not the first's
+        "the second of two": (DENY_EXC.replace(EXC_LINE, EXC_LINE + "\n" + gpl), gpl),
+    }
+    for what, (deny, line) in cases.items():
+        n = _line(deny, line) if line else len(deny.splitlines()) - 1  # the table's `crate =` line
+        out = _planted("licence-exception", **_exc(deny=deny))
+        want = ("deny.toml:%d: licence-exception: borrow-or-share: deny.toml allows [GPL-3.0] but %s "
+                "accepts [MIT-0]%s" % (n, ABOUT_REL, EQUAL_TAIL))
+        assert out.splitlines()[0] == want, (what, out)
+    # an exception naming the crate twice (crate = and name =; itself misspelled, reported
+    # first): the next exception for the crate is still at its own line
+    both = '    { crate = "borrow-or-share", name = "borrow-or-share", allow = ["MIT-0"] },'
+    deny = DENY_EXC.replace(EXC_LINE, both + "\n" + gpl)
+    with tempfile.TemporaryDirectory() as d:
+        rc, out = _run(_tree(pathlib.Path(d), **_exc(deny=deny)))
+    want = ("deny.toml:%d: licence-exception: borrow-or-share: deny.toml allows [GPL-3.0] but %s "
+            "accepts [MIT-0]%s" % (_line(deny, gpl), ABOUT_REL, EQUAL_TAIL))
+    assert rc == 1 and out.count(": licence-exception: ") == 2, out
+    assert want in out.splitlines(), out
+
+
+def test_a_dotted_exception_is_at_its_key_and_an_unread_form_at_line_1() -> None:
+    gpl = '[{ crate = "borrow-or-share", allow = ["GPL-3.0"] }]'
+    want = ("deny.toml:%d: licence-exception: borrow-or-share: deny.toml allows [GPL-3.0] but %s "
+            "accepts [MIT-0]%s")
+    # top-level dotted keys: the `licenses.exceptions` line
+    dotted = 'licenses.allow = ["MIT"]\nlicenses.exceptions = ' + gpl + "\n\n" + DENY
+    out = _planted("licence-exception", **_exc(deny=dotted))
+    assert out.splitlines()[0] == want % (2, ABOUT_REL, EQUAL_TAIL), out
+    # an inline [licenses] table is a form not located: line 1, though it sits on line 3
+    inline = '# licences\n\nlicenses = { allow = ["MIT"], exceptions = ' + gpl + " }\n\n" + DENY
+    out = _planted("licence-exception", **_exc(deny=inline))
+    assert out.splitlines()[0] == want % (1, ABOUT_REL, EQUAL_TAIL), out
+
+
+def test_an_exception_naming_no_crate_says_so() -> None:
+    for entry in ('    { crate = 5, allow = ["MIT-0"] },', '    { allow = ["MIT-0"] },'):
+        deny = DENY_EXC.replace(EXC_LINE, entry)
+        out = _planted("licence-exception", **_exc(deny=deny, about=ABOUT_PLAIN))
+        want = ('deny.toml:%d: licence-exception: an exception names no crate (or names it with something '
+                'that is not a string) — spell it { crate = "<name>", allow = [...] }'
+                % _line(deny, "exceptions = ["))
+        assert out.splitlines()[0] == want, (entry, out)
+    # in the array-of-tables form: at its [[licenses.exceptions]] header
+    deny = DENY_LICENSES + '\n[[licenses.exceptions]]\nallow = ["MIT-0"]\n'
+    out = _planted("licence-exception", **_exc(deny=deny, about=ABOUT_PLAIN))
+    want = ('deny.toml:%d: licence-exception: an exception %s — spell it { crate = "<name>", allow = [...] }'
+            % (_line(deny, "[[licenses.exceptions]]"), NO_CRATE))
+    assert out.splitlines()[0] == want, out
 
 
 def test_an_exception_whose_crate_left_the_lock_fails() -> None:
@@ -670,8 +742,8 @@ def test_an_exception_spelled_another_way_fails_once() -> None:
     # an entry naming no crate at all is reported at the `exceptions =` line
     deny = DENY_EXC.replace(EXC_LINE, '    { allow = ["MIT-0"] },')
     out = _planted("licence-exception", **_exc(deny=deny, about=ABOUT_PLAIN))
-    assert out.startswith("deny.toml:%d: licence-exception: an exception names its crate as name = "
-                          % _line(deny, "exceptions = [")), out
+    assert out.startswith("deny.toml:%d: licence-exception: an exception %s — "
+                          % (_line(deny, "exceptions = ["), NO_CRATE)), out
 
 
 def test_the_array_of_tables_form_is_read() -> None:
