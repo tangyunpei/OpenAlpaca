@@ -351,6 +351,11 @@ pub enum ToolBackend {
         /// compares names, so a server changing it under a live name keeps
         /// the old one until a reload or reconnect.
         output_schema: Option<Arc<serde_json::Map<String, serde_json::Value>>>,
+        /// The check of a successful result's structured output against
+        /// `output_schema` (M82), on the server's one validation thread;
+        /// `Some` exactly when `output_schema` is, set by
+        /// `rmcp_tool_to_registered`.
+        output_check: Option<crate::tools::mcp::OutputCheck>,
     },
 }
 
@@ -517,6 +522,10 @@ pub struct ToolRegistry {
     /// carried into every clone, so a per-request registry keeps them too.
     /// `None` — every test registry — keeps nothing and says so.
     by_product_sink: Option<Arc<crate::tools::builtins::ByProductSink>>,
+    /// The MCP servers' output-check threads, one per server name (M82):
+    /// shared by every clone, so the daemon's one production registry holds
+    /// at most one per server for the life of the process.
+    output_checks: Arc<crate::tools::mcp::OutputChecks>,
 }
 
 impl Clone for ToolRegistry {
@@ -548,6 +557,7 @@ impl Clone for ToolRegistry {
             ),
             provider_mutex: std::sync::Mutex::new(()),
             by_product_sink: self.by_product_sink.clone(),
+            output_checks: Arc::clone(&self.output_checks),
         }
     }
 }
@@ -605,6 +615,7 @@ impl ToolRegistry {
             next_provider_handle: AtomicU64::new(0),
             provider_mutex: std::sync::Mutex::new(()),
             by_product_sink: None,
+            output_checks: Arc::default(),
         };
 
         // Install the default AnnotationCapabilityProvider.
@@ -619,6 +630,13 @@ impl ToolRegistry {
     /// boot, before the registry is shared; every clone carries it.
     pub fn set_by_product_sink(&mut self, sink: crate::tools::builtins::ByProductSink) {
         self.by_product_sink = Some(Arc::new(sink));
+    }
+
+    /// The MCP servers' output-check threads (M82), which
+    /// [`crate::tools::mcp::rmcp_tool_to_registered`] hands a tool's
+    /// declared output schema to.
+    pub fn output_checks(&self) -> &crate::tools::mcp::OutputChecks {
+        &self.output_checks
     }
 
     /// This registry with `client` as its `Http`-backend tools' client — a
@@ -942,6 +960,7 @@ impl ToolRegistry {
                 server_name,
                 generation,
                 output_schema: _,
+                output_check,
             } => {
                 match ctx {
                     Some(ctx) => tracing::debug!(
@@ -971,14 +990,21 @@ impl ToolRegistry {
                     None => client.call_tool(remote_name, arguments.clone(), None).await,
                 };
                 match called {
-                    Ok(result) => crate::tools::mcp::bridge::serialize_call_result(
-                        result,
-                        &crate::tools::mcp::bridge::SerializeOptions::for_call(
-                            tool_name,
-                            self.by_product_sink.as_deref(),
-                            ctx,
-                        ),
-                    ),
+                    // M82: a successful result's structured output is checked
+                    // on the server's validation thread, waited for at most
+                    // `OUTPUT_CHECK_WAIT`, inside the sandbox's one clock.
+                    Ok(result) => {
+                        crate::tools::mcp::bridge::finish_call_result(
+                            result,
+                            &crate::tools::mcp::bridge::SerializeOptions::for_call(
+                                tool_name,
+                                self.by_product_sink.as_deref(),
+                                ctx,
+                            ),
+                            output_check.as_ref(),
+                        )
+                        .await
+                    }
                     Err(e) => {
                         tracing::warn!(
                             server = %server_name,

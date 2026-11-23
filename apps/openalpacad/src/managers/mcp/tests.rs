@@ -215,6 +215,14 @@ impl Stub {
         std::fs::write(&self.tools_file, tools_json(tools)).expect("write tools file");
     }
 
+    /// Replace the tool list the next `tools/list` answers with `tools`, a
+    /// JSON array of MCP `Tool`s on one line — for a tool that declares an
+    /// `outputSchema` (M82).
+    fn set_tools_json(&self, tools: &serde_json::Value) {
+        assert!(tools.is_array(), "a tool list is an array");
+        std::fs::write(&self.tools_file, tools.to_string()).expect("write tools file");
+    }
+
     /// Answer every later `tools/call` with `result`, a `CallToolResult` as
     /// JSON on one line.
     fn set_call_result(&self, result: &str) {
@@ -1849,6 +1857,71 @@ async fn an_mcp_tools_images_audio_and_blobs_are_kept_as_by_products() {
     }
     assert_eq!(store.list(&ArtifactQuery::new(owner)).expect("list").1, 3);
     h.supervisor.shutdown_all().await;
+}
+
+/// M82, end to end through a real stdio server and a per-request clone of
+/// the registry, as a turn calls it: a tool that declares an output schema
+/// gets nothing added to a result whose structured output matches it, and
+/// the one fixed line to one that does not. The compile runs on the
+/// server's thread after registration, so a call that comes first is "not
+/// checked"; the test asks again until the schema is ready.
+#[tokio::test]
+async fn an_mcp_tools_structured_output_is_checked_against_its_schema() {
+    const NOT_CHECKED: &str =
+        "[The structured output was not checked against the output schema this tool declares.]";
+    const MISMATCH: &str =
+        "[The structured output does not match the output schema this tool declares.]";
+    let h = Harness::new(1);
+    let stub = stub_server(h.path(), "output-check", StubOpts::default());
+    stub.set_tools_json(&serde_json::json!([{
+        "name": "count",
+        "description": "stub count",
+        "inputSchema": {"type": "object", "properties": {}},
+        "outputSchema": {
+            "type": "object",
+            "properties": {"n": {"type": "integer"}},
+            "required": ["n"]
+        }
+    }]));
+    stub.set_call_result(
+        &serde_json::json!({"content": [], "structuredContent": {"n": 3}, "isError": false})
+            .to_string(),
+    );
+    h.declare(&stub, true);
+    h.supervisor.reconcile_all().await;
+    assert_eq!(h.state("srv"), Some(ExtensionState::Enabled));
+
+    let per_request = (*h.registry).clone();
+    let call = || async {
+        per_request
+            .execute_with_context(
+                "srv__count",
+                &serde_json::json!({}),
+                &openalpaca_core::tools::ToolContext::default(),
+            )
+            .await
+            .expect("the call succeeds")
+    };
+    let pretty = serde_json::to_string_pretty(&serde_json::json!({"n": 3})).unwrap();
+    let started = std::time::Instant::now();
+    let mut out = call().await;
+    while out.ends_with(NOT_CHECKED) {
+        assert!(
+            started.elapsed() < std::time::Duration::from_secs(10),
+            "the schema never compiled: {out}"
+        );
+        tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        out = call().await;
+    }
+    assert_eq!(out, pretty, "a matching value gets no line");
+
+    stub.set_call_result(
+        &serde_json::json!({"content": [], "structuredContent": {"n": "three"}, "isError": false})
+            .to_string(),
+    );
+    let out = call().await;
+    let pretty = serde_json::to_string_pretty(&serde_json::json!({"n": "three"})).unwrap();
+    assert_eq!(out, format!("{pretty}\n{MISMATCH}"));
 }
 
 // ============================================================================

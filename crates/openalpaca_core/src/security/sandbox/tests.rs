@@ -687,6 +687,7 @@ async fn a_withheld_capability_never_opens_the_circuit_breaker() {
                 server_name: "github".to_string(),
                 generation,
                 output_schema: None,
+                output_check: None,
             },
             provides_capabilities: vec!["github__create_issue".to_string()],
             exempt_from_timeout: false,
@@ -1743,6 +1744,7 @@ fn traversal_sandbox(skill_dir: &std::path::Path) -> SandboxManager {
                 server_name: "srv".to_string(),
                 generation: 0,
                 output_schema: None,
+                output_check: None,
             },
         ))
         .unwrap();

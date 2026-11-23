@@ -3100,6 +3100,7 @@ fn mcp_backend() -> crate::tools::registry::ToolBackend {
         server_name: "srv".to_string(),
         generation: 0,
         output_schema: None,
+        output_check: None,
     }
 }
 

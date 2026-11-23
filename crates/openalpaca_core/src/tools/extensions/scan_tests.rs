@@ -53,6 +53,7 @@ fn mcp_tool(name: &str, caps: &[&str], server: &str) -> RegisteredTool {
         server_name: server.into(),
         generation: 1,
         output_schema: None,
+        output_check: None,
     };
     t
 }

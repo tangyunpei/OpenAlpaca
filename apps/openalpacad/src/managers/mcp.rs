@@ -1253,12 +1253,15 @@ impl McpSupervisor {
         let mut registered: Vec<String> = Vec::new();
         let mut skipped: Vec<String> = Vec::new();
         for (_, tool) in bridge::map_tool_list(name, tools).tools {
+            // M82: a declared output schema's compile is queued on the
+            // server's validation thread; this does not wait for it.
             let registered_tool = bridge::rmcp_tool_to_registered(
                 name,
                 &server_version,
                 tool,
                 Arc::clone(&client),
                 generation,
+                self.tool_registry.output_checks(),
             );
             let tool_name = registered_tool.definition.name.clone();
             if self.is_live_incumbent(&ext, &tool_name) {
@@ -1607,6 +1610,7 @@ impl McpSupervisor {
                 tool,
                 Arc::clone(client),
                 generation,
+                self.tool_registry.output_checks(),
             );
             restored_caps.extend(registered.provides_capabilities.iter().cloned());
             match self.tool_registry.replace(registered) {

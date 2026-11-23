@@ -79,6 +79,7 @@ under `crates/openalpaca_core/src/`.
 |------|---------|
 | `tools/mcp/config.rs` | `McpConfig` — `config/mcp.toml` parsing, `is_valid_server_name()` |
 | `tools/mcp/bridge.rs` | `rmcp_tool_to_registered()`, `serialize_call_result()` |
+| `tools/mcp/output_check.rs` | `OutputChecks`, `OutputCheck` — a tool's structured output checked against its declared output schema, one validation thread per server (M82) |
 | `tools/mcp/classify.rs` | `classify_bringup_failure()`, `classify_call_failure()` — which errors mark a server `failed` |
 | `tools/mcp/fingerprint.rs` | `config_fingerprint()` — detects a real edit to a server block |
 | `crates/openalpaca_mcp/` | `McpClient` wrapper around the `rmcp` SDK (stdio + streamable-HTTP transports, reconnect/retry, change notifications). Re-exports `Tool`, `ToolAnnotations`, `CallToolResult`, etc. |
@@ -291,6 +292,9 @@ pub enum ToolBackend {
                                               // Its declared outputSchema, served
                                               // by GET /v1/tools, never sent to
                                               // a provider
+        output_check: Option<OutputCheck>,    // Its check on the server's one
+                                              // validation thread (M82); Some
+                                              // exactly when output_schema is
     },
 }
 ```
@@ -487,7 +491,9 @@ argument errors early with clear messages.
 
 ### MCP Backend Execution
 
-`client.call_tool(remote_name, args)`, then `serialize_call_result()`.  On an
+`client.call_tool(remote_name, args)`, then `finish_call_result()`:
+`serialize_call_result()`'s text plus, for a tool that declares an output
+schema, the output check's one line (M82, §9).  On an
 error the registry classifies it (`classify_call_failure`); a terminal
 class marks the server `failed` in the ledger — guarded so that only the
 current generation of an `Enabled` server can be flipped.  A client sealed
@@ -1138,8 +1144,78 @@ depends on the registry dropping the last reference.
   `null` one is read as absent; `is_error = true` becomes a tool error.
 - The tool's declared `outputSchema` is carried on `ToolBackend::Mcp` and
   served by `GET /v1/tools` as `output_schema` (`null` when none); it never
-  enters the provider's tool definition, and nothing validates a result
-  against it yet.
+  enters the provider's tool definition. A successful result's structured
+  output is checked against it (M82, below).
+- **The output schema check (M82).** The MCP specification says a client
+  SHOULD check a tool's structured result against the tool's declared
+  output schema. The check is built in-process, on the owner's ruling of
+  2026-11-22, in its least harmful form (`tools/mcp/output_check.rs`):
+  - *What is checked:* a successful result's `structuredContent` (JSON
+    `null` counts as absent), against the schema compiled by `jsonschema`
+    0.62.0 with `options().offline()` and its defaults otherwise — draft
+    2020-12 unless `$schema` names another, the fancy-regex engine, and
+    `format` an annotation under 2019-09 and 2020-12 (asserted under drafts
+    4, 6 and 7). The check is `Validator::is_valid`, yes or no, and nothing
+    else: no error detail is ever computed or shown.
+  - *What the model sees*, one fixed bracketed line appended after the
+    result, or nothing: a matching value — nothing; a mismatch —
+    `[The structured output does not match the output schema this tool
+    declares.]`; not checked — `[The structured output was not checked
+    against the output schema this tool declares.]` (the schema not
+    compiled yet, the server's thread busy or stopped, its queue full, or
+    no answer within the wait); no structured output on a successful result —
+    `[This tool declares an output schema, but its result has no
+    structured output.]`; an error result (`isError`) — no check and no
+    line. A tool with no schema is unchanged. Nothing is refused and no call
+    fails because of the check, and no third-party text enters a result
+    from it. The line closes the full result, before the agentic loop's
+    spill or cut: the model reads it inline only when the result is under
+    `tool_result_inline_bytes`; a larger result reaches it as a stub (or
+    a cut), and the line is then at the end of the spilled file.
+  - *A schema that does not compile* (a remote, relative or file `$ref`, an
+    unknown `$schema`, a malformed schema, a pattern the engine refuses):
+    the tool is registered and works as before, its results get no line,
+    and one warning in the log names the tool and the reason, cut to 200
+    characters and escaped (`<U+XXXX>`). Nothing is ever fetched: the build
+    is offline and the crate's HTTP and file retrievers are not compiled in.
+  - *One thread per server:* every `jsonschema` call of a server's tools,
+    compiling and checking alike, runs on one OS thread named
+    `mcp-output-check:<server>`, owned by the registry's `OutputChecks`
+    (one per daemon) — never on a runtime worker, the blocking pool or the
+    caller. At most one works per server name, across reconnects, reloads,
+    a disable/enable cycle and a list refresh: while it is busy no second
+    one is started, and that server's results read "not checked". A thread
+    whose server has no registered tool left ends when idle (one that is
+    ending may overlap for an instant with its successor; it holds no job
+    and does no work). A panic on it
+    stops that server's checks until the daemon restarts (logged once; no
+    new thread). Registration hands the schema to the thread and returns;
+    it never waits for a compile. The daemon's stop never waits for the
+    thread: the process exit ends it.
+  - *The wait:* a call waits at most `OUTPUT_CHECK_WAIT`, 2 seconds (a
+    constant, not a config key), asynchronously and inside the sandbox's
+    one clock. At most `CHECK_QUEUE_MAX`, 8, calls of a server are inside
+    a check at once — the one its thread runs and those waiting their turn,
+    each holding its own structured value for at most the wait; one more
+    is not accepted and reads "not checked" at once. Beyond that, a thread
+    stuck on a check keeps the one value it is checking until the process
+    ends, after its caller has given up. One job at a time is
+    handed to the thread; a caller that stops waiting takes its job back,
+    and once the thread has been busy longer than the wait, a call does not
+    queue behind it. The value is handed over, never deep-copied. A tool
+    dropped before its compile ran takes the queued compile with it.
+  - *Known limits:* a hostile or broken remote server can make a check or
+    a compile run for a very long time (measured: tens of seconds and
+    more), keeping one processor core busy until the daemon restarts; its
+    own tools' outputs then go unchecked. Compiling such a schema can take
+    a large amount of memory (measured: 1.6 GB), which the check does not
+    bound — only the check itself keeps its memory flat. A stack overflow
+    on the thread is not caught and ends the whole daemon process; `jsonschema`
+    0.62.0 has no general recursion limit, so a hostile schema (a deep
+    `$ref` chain, say) might cause one — not probed, since no hostile input
+    is fed to the engine. A server that changes a live tool's
+    `outputSchema` under the same name keeps the old validator until a
+    reload or reconnect (below).
 - **Images, audio and embedded blobs are by-products (M85).** The
   registry's MCP arm passes `SerializeOptions::for_call(<registry name>,
   <sink>, <context>)`; the sink (`builtins::ByProductSink`: the database
@@ -1178,8 +1254,9 @@ depends on the registry dropping the last reference.
   (above); a block of a kind a later rmcp adds is a bracketed placeholder.
 - **A live tool's definition is read once per load**: the tool-list
   refresh compares names only, so a server that changes a listed tool's
-  `outputSchema`, input schema or description under the same name keeps
-  the old one until a reload or reconnect.
+  `outputSchema` (and with it the validator M82 checks against), input
+  schema or description under the same name keeps the old one until a
+  reload or reconnect.
 - **MCP resources and prompts are not implemented**: the client has no
   resource or prompt methods at all — it imports tools and nothing else.
   A future phase would add the methods rather than fill in placeholders,

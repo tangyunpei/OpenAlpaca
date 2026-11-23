@@ -28,6 +28,7 @@ fn mcp_tool(server: &str, name: &str) -> RegisteredTool {
             server_name: server.to_string(),
             generation: 1,
             output_schema: None,
+            output_check: None,
         },
         provides_capabilities: vec![name.to_string()],
         exempt_from_timeout: false,

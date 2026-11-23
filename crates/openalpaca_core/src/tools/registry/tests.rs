@@ -1989,6 +1989,7 @@ fn mcp_backend() -> ToolBackend {
         server_name: "srv".to_string(),
         generation: 0,
         output_schema: None,
+        output_check: None,
     }
 }
 
@@ -2078,6 +2079,7 @@ fn mcp_tool(name: &str, server: &str, generation: u64) -> RegisteredTool {
         server_name: server.to_string(),
         generation,
         output_schema: None,
+        output_check: None,
     };
     tool.author = format!("mcp:{server}");
     tool
