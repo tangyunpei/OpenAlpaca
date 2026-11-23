@@ -59,10 +59,11 @@ pub struct ExtArgs {
     pub command: ExtCommands,
 }
 
-// `mcp add` carries thirteen options, so the `Mcp` variant is much larger than
-// the two-string ones. clap builds exactly one of these per process, from argv,
-// and its derive cannot take a boxed subcommand field — so the size is the
-// argument surface, not a cost anything pays.
+// `mcp add` takes a server name and fourteen options, so the `Mcp` variant is
+// much larger than the two-string ones. At most one `ExtCommands` is parsed
+// from argv per run of the CLI, so the size is the argument surface, not a
+// cost anything pays. The derive of clap would take the field boxed (`Box<T>`
+// implements `Subcommand` and `FromArgMatches`); boxing it buys nothing here.
 #[expect(
     clippy::large_enum_variant,
     reason = "Mcp holds `mcp add`'s options; one is parsed from argv per run"

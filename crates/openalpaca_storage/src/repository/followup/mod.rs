@@ -92,8 +92,11 @@ impl<'a> FollowupRepository<'a> {
     /// The row is pinned to the lane's active session as it is written (§5.3):
     /// the conversation the promise was made in is knowable now and not later.
     ///
-    /// Eight columns, because the row is the contract: every one of them is a
-    /// column of `lane_followups` and none can be derived from the others.
+    /// Seven arguments, because the row is the contract: each one is its own
+    /// column of `lane_followups`. The INSERT writes eight; the eighth,
+    /// `session_id`, is not an argument but derived from `lane_key` as above:
+    /// the lane's active session in `session`, looked up as the row is
+    /// written, or NULL when the lane has none.
     #[expect(
         clippy::too_many_arguments,
         reason = "each argument is its own column of lane_followups"
