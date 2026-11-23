@@ -223,7 +223,6 @@ async fn a_disabled_extensions_tool_raises_no_card() {
                 server_name: "github".to_string(),
                 generation,
                 output_schema: None,
-                output_check: None,
             },
         ))
         .unwrap();

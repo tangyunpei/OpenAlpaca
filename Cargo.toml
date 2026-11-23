@@ -47,7 +47,8 @@ thiserror = "2.0.18"
 
 serde = { version = "1.0.228", features = ["derive"] }
 serde_json = "1.0.149"
-# An MCP tool's output checked against the schema its server declares (M82).
+# Unused, kept until the subagent result-schema work (SA-4) is decided: an
+# MCP tool's output check (M82) was built and withdrawn on 2026-11-22.
 # Default features off: resolve-http, resolve-file, tls-aws-lc-rs and idna;
 # a schema a server supplies must never fetch a URL or read a file.
 jsonschema = { version = "0.62.0", default-features = false }

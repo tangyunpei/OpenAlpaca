@@ -793,7 +793,6 @@ mod a_list_change_mid_turn {
             server_name: "srv".to_string(),
             generation: 1,
             output_schema: None,
-            output_check: None,
         };
         tool.author = "mcp:srv".to_string();
         tool
@@ -4111,7 +4110,6 @@ fn registry_with_a_disabled_server(bus: &EventBus) -> Arc<ToolRegistry> {
         server_name: "github".to_string(),
         generation: 1,
         output_schema: None,
-        output_check: None,
     };
     tool.author = "mcp:github".to_string();
     registry.register(tool).unwrap();

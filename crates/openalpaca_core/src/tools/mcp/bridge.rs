@@ -9,8 +9,6 @@
 //!   `Result<String, String>` shape the rest of the tool-call path consumes,
 //!   under one [`SerializeOptions`]; an image, audio clip or embedded blob is
 //!   kept as a by-product and named by a line (M85).
-//! - `finish_call_result` — the same, with the tool's output check's one
-//!   line appended (M82, [`super::output_check`]).
 
 use std::sync::Arc;
 
@@ -18,7 +16,6 @@ use openalpaca_mcp::{CallToolResult, ContentBlock, McpClient, Resource, Resource
 use serde_json::Value;
 
 use crate::tools::builtins::{ByProductSink, ToolBlob, save_tool_by_product};
-use crate::tools::mcp::output_check::{OutputCheck, OutputChecks, with_line};
 use crate::tools::registry::{RegisteredTool, ToolBackend, ToolContext};
 
 /// The longest tool name every provider accepts: OpenAI's documented limit
@@ -132,17 +129,12 @@ pub fn map_tool_list(server_name: &str, tools: Vec<Tool>) -> MappedTools {
 /// stamping site for MCP. Until the MCP supervisor lands, its one production
 /// caller passes `0`, which is inert: with no ledger record the gate fails open
 /// and never compares it.
-///
-/// `output_checks` is the registry's ([`crate::tools::ToolRegistry::output_checks`]):
-/// a declared output schema is handed to the server's validation thread to
-/// compile, and this returns without waiting for it (M82, I6).
 pub fn rmcp_tool_to_registered(
     server_name: &str,
     server_version: &str,
     tool: Tool,
     client: Arc<McpClient>,
     generation: u64,
-    output_checks: &OutputChecks,
 ) -> RegisteredTool {
     let remote_name = tool.name.to_string();
     let namespaced_name = mcp_tool_name(server_name, &remote_name);
@@ -166,19 +158,13 @@ pub fn rmcp_tool_to_registered(
 
     // M14: the declared output schema is carried on the backend and served
     // by `GET /v1/tools`; it never enters the provider's `ToolDefinition`
-    // above (`strict_mode_compatible` stays the rule there). M82: its
-    // compile is queued on the server's validation thread, not run here.
-    let output_check = tool
-        .output_schema
-        .as_ref()
-        .map(|schema| output_checks.register(server_name, &namespaced_name, schema));
+    // above (`strict_mode_compatible` stays the rule there).
     let backend = ToolBackend::Mcp {
         client,
         remote_name: remote_name.clone(),
         server_name: server_name.to_string(),
         generation,
         output_schema: tool.output_schema.clone(),
-        output_check,
     };
 
     RegisteredTool {
@@ -199,9 +185,7 @@ pub fn rmcp_tool_to_registered(
 
 /// How [`serialize_call_result`] reads one result: the one place an entry
 /// adds what the serializer must know (M85 the by-product sink and the call's
-/// context), so the signature keeps one parameter. M82's output check is
-/// not here: it is the tool's own (`ToolBackend::Mcp`'s `output_check`),
-/// applied by `finish_call_result` after the result is rendered.
+/// context, M82 the output schema), so the signature keeps one parameter.
 /// `SerializeOptions::default()` has no sink and no context: an image, audio
 /// clip or embedded blob is then named by a "nothing was saved" line.
 #[derive(Debug, Clone, Default)]
@@ -254,34 +238,6 @@ pub(crate) struct ByProducts<'a> {
 /// path treats it as a tool error.
 pub fn serialize_call_result(
     result: CallToolResult,
-    options: &SerializeOptions<'_>,
-) -> Result<String, String> {
-    render_call_result(&result, options)
-}
-
-/// [`serialize_call_result`] for a dispatched call of a tool that may carry
-/// an output check (M82): a successful result gets the check's one line,
-/// waited for at most `OUTPUT_CHECK_WAIT`; an error result (`is_error`) is
-/// neither checked nor given a line. The structured value is moved to the
-/// check, never cloned.
-pub(crate) async fn finish_call_result(
-    result: CallToolResult,
-    options: &SerializeOptions<'_>,
-    check: Option<&OutputCheck>,
-) -> Result<String, String> {
-    let body = render_call_result(&result, options)?;
-    let Some(check) = check else {
-        return Ok(body);
-    };
-    let structured = result
-        .structured_content
-        .filter(|value| !value.is_null())
-        .map(Arc::new);
-    Ok(with_line(body, check.line_for(structured).await))
-}
-
-fn render_call_result(
-    result: &CallToolResult,
     options: &SerializeOptions<'_>,
 ) -> Result<String, String> {
     let by_products = options.by_products;
@@ -419,12 +375,6 @@ fn content_kind_name(c: &ContentBlock) -> &'static str {
 mod tests {
     use super::*;
     use openalpaca_mcp::ContentBlock;
-
-    /// [`rmcp_tool_to_registered`] at version `1.0`, generation 0, with a
-    /// registry's own output checks.
-    fn register(server: &str, tool: Tool, client: Arc<McpClient>) -> RegisteredTool {
-        rmcp_tool_to_registered(server, "1.0", tool, client, 0, &OutputChecks::default())
-    }
 
     fn text_content(s: &str) -> ContentBlock {
         ContentBlock::text(s.to_string())
@@ -608,7 +558,7 @@ mod tests {
         let client = Arc::new(McpClient::disconnected_for_tests("srv"));
         let tool = Tool::new("get", "Get an issue", serde_json::Map::new())
             .with_raw_output_schema(Arc::new(schema.clone()));
-        let registered = register("srv", tool, client);
+        let registered = rmcp_tool_to_registered("srv", "1.0", tool, client, 0);
         match &registered.backend {
             ToolBackend::Mcp { output_schema, .. } => {
                 assert_eq!(output_schema.as_deref(), Some(&schema));
@@ -625,7 +575,7 @@ mod tests {
 
         let client = Arc::new(McpClient::disconnected_for_tests("srv"));
         let tool = Tool::new("ping", "Ping", serde_json::Map::new());
-        let registered = register("srv", tool, client);
+        let registered = rmcp_tool_to_registered("srv", "1.0", tool, client, 0);
         match &registered.backend {
             ToolBackend::Mcp { output_schema, .. } => assert!(output_schema.is_none()),
             _ => panic!("an MCP tool has an MCP backend"),
@@ -636,7 +586,7 @@ mod tests {
     fn registered_mcp_tool_provides_capability_per_name() {
         let client = Arc::new(McpClient::disconnected_for_tests("srv"));
         let tool = Tool::new("echo", "Echo tool", serde_json::Map::new());
-        let registered = register("srv", tool, client);
+        let registered = rmcp_tool_to_registered("srv", "1.0", tool, client, 0);
         assert_eq!(registered.definition.name, "srv__echo");
         assert_eq!(registered.provides_capabilities, vec!["srv__echo".to_string()]);
     }
@@ -651,7 +601,7 @@ mod tests {
 
         let client = Arc::new(McpClient::disconnected_for_tests("srv"));
         let tool = Tool::new("echo", "Echo tool", serde_json::Map::new());
-        let registered = register("srv", tool, client);
+        let registered = rmcp_tool_to_registered("srv", "1.0", tool, client, 0);
 
         let registry = Arc::new(ToolRegistry::default());
         registry.register(registered).expect("register MCP tool");
@@ -693,7 +643,7 @@ mod tests {
      {
         let client = Arc::new(McpClient::disconnected_for_tests("srv"));
         let tool = Tool::new("read.file", "Read a file", serde_json::Map::new());
-        let registered = register("srv", tool, client);
+        let registered = rmcp_tool_to_registered("srv", "1.0", tool, client, 0);
         assert_eq!(registered.definition.name, "srv__read_file");
         assert_eq!(
             registered.provides_capabilities,
@@ -708,7 +658,7 @@ mod tests {
     fn a_name_already_in_the_alphabet_is_unchanged() {
         let client = Arc::new(McpClient::disconnected_for_tests("srv"));
         let tool = Tool::new("Read_file-2", "Read a file", serde_json::Map::new());
-        let registered = register("srv", tool, client);
+        let registered = rmcp_tool_to_registered("srv", "1.0", tool, client, 0);
         assert_eq!(registered.definition.name, "srv__Read_file-2");
         assert_eq!(backend_remote_name(&registered), "Read_file-2");
     }
@@ -724,7 +674,7 @@ mod tests {
             .map(|remote| {
                 let client = Arc::new(McpClient::disconnected_for_tests("filesystem"));
                 let tool = Tool::new(remote.to_string(), "long", serde_json::Map::new());
-                let registered = register("filesystem", tool, client);
+                let registered = rmcp_tool_to_registered("filesystem", "1.0", tool, client, 0);
                 assert_eq!(
                     backend_remote_name(&registered),
                     *remote,

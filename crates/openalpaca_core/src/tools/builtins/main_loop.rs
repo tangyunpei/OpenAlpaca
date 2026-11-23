@@ -812,7 +812,6 @@ mod tests {
             server_name: "srv".to_string(),
             generation: 0,
             output_schema: None,
-            output_check: None,
         }
     }
 
