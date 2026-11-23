@@ -124,12 +124,18 @@ Systems (`OPENALPACA_MEMORY_EVAL_SYSTEM`):
 - **Both fictional projects share one project partition**: every question is
   asked from one workspace, so project notes about Lantern and Moss sit side
   by side, as they did (in one global pile) for A and B.
-- **Validity is evaluated at run time.** A search that is not historical
-  keeps only notes whose `valid_from`/`valid_to` interval holds now
-  (`memory_index/search.rs`), and one gold note — the Stockholm trip,
-  2026-10-05 to 2026-10-19 — is outside that interval before and after those
-  dates, so the per-turn recall does not deliver it then; seven held-out
-  questions rely on it. `run_started_at` is recorded.
+- **Validity is evaluated at run time.** A search that is not historical and
+  has no `as_of` drops a note whose `valid_to` has passed and keeps one whose
+  `valid_from` has not come (`memory_index/search.rs`, `Filter::build`); a
+  window that holds now also earns a ranking bonus. One gold note, the
+  Stockholm trip (2026-10-05 to 2026-10-19), was therefore delivered by the
+  per-turn recall of runs made from 2026-09-24 to 2026-10-19, and by none
+  since (a model's own dated or historical search still reaches it). Seven
+  held-out questions and one tuning question rely on it; the retrieval
+  proxy's totals lose five held-out rows and one tuning row to it (the other
+  two held-out rows stay incomplete either way). Compare a proxy figure only
+  with a parent run made the same day, never with a figure recorded earlier.
+  `run_started_at` is recorded.
 - **The reader's temperature is not pinned.** The main loop sets no
   temperature (`runner/agentic_loop/backend.rs`), so the reader runs at the
   provider's default; the report records `reader_temperature: null`. The judge
