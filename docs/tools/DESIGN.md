@@ -506,7 +506,7 @@ collides.
 | LLM crafts malicious arguments | InputSanitizer: path traversal, command injection, null bytes |
 | LLM spoofs owner_id | Identity comes only from trusted `ToolContext`; owner-scoped tools overwrite LLM-supplied identity args |
 | Tool endpoint returns hostile data | Result spill/cut (32 KB to the LLM by default; backend-level caps), no code execution on results |
-| MCP server declares a hostile output schema or returns a hostile value | The check runs on that server's one validation thread, never a runtime worker; a call waits at most 2 s and keeps its result; no second thread for a busy server. Known limits: one core may stay busy until the daemon restarts, a schema's compile memory is not bounded, and a stack overflow on that thread would end the daemon (M82) |
+| MCP server declares a hostile output schema or returns a hostile value | The check runs on that server's one validation thread, never a runtime worker; a call waits at most 2 s and keeps its result (that wait counts against the tool's time limit, so a result at the very end of it can still be cut as a timeout); no second thread for a busy server. Known limits: one core may stay busy until the daemon restarts, a schema's compile memory is not bounded, and a stack overflow on that thread would end the daemon (M82) |
 | External tool endpoint is down | Circuit breaker prevents runaway retries/costs |
 | Tool performs destructive action | Confirmation gate on `destructive_hint` tools (or explicit list), fail-closed, refused at once when nobody can answer |
 | Owner switched an extension off | Extension gate refuses its tools even for a run that captured them earlier |

@@ -1166,8 +1166,9 @@ depends on the registry dropping the last reference.
     no answer within the wait); no structured output on a successful result —
     `[This tool declares an output schema, but its result has no
     structured output.]`; an error result (`isError`) — no check and no
-    line. A tool with no schema is unchanged. Nothing is refused and no call
-    fails because of the check, and no third-party text enters a result
+    line. A tool with no schema is unchanged. Nothing is refused because of
+    the check, and no call fails because of it except through the call's
+    time limit (the wait, below); no third-party text enters a result
     from it. The line closes the full result, before the agentic loop's
     spill or cut: the model reads it inline only when the result is under
     `tool_result_inline_bytes`; a larger result reaches it as a stub (or
@@ -1194,7 +1195,12 @@ depends on the registry dropping the last reference.
     thread: the process exit ends it.
   - *The wait:* a call waits at most `OUTPUT_CHECK_WAIT`, 2 seconds (a
     constant, not a config key), asynchronously and inside the sandbox's
-    one clock. At most `CHECK_QUEUE_MAX`, 8, calls of a server are inside
+    one clock: the wait counts against the call's time limit (the server's
+    own request timeout when it is below the per-tool bound, else the
+    bound), so a result that arrives at the very end of that limit can
+    still be cut there — reported as `Tool '…' timed out after Ns` with the
+    reason `timeout`, and counted toward the tool's circuit breaker as any
+    timeout is. At most `CHECK_QUEUE_MAX`, 8, calls of a server are inside
     a check at once — the one its thread runs and those waiting their turn,
     each holding its own structured value for at most the wait; one more
     is not accepted and reads "not checked" at once. Beyond that, a thread

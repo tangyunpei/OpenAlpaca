@@ -1924,6 +1924,69 @@ async fn an_mcp_tools_structured_output_is_checked_against_its_schema() {
     assert_eq!(out, format!("{pretty}\n{MISMATCH}"));
 }
 
+/// M82's I1 in the daemon: both registration sites — the bring-up (at
+/// first, and again on a reload) and the tool-list refresh — hand a tool
+/// that declares an output schema the registry's one `OutputChecks`, so a
+/// server's checks run on its one thread across every reload and refresh.
+/// A pool of a site's own would give that site's tools a thread of their
+/// own (one per registration or per reconnect), and this test fails.
+#[tokio::test]
+async fn every_registration_site_shares_the_registrys_output_checks() {
+    let schema_tool = |name: &str| {
+        serde_json::json!({
+            "name": name,
+            "description": format!("stub {name}"),
+            "inputSchema": {"type": "object", "properties": {}},
+            "outputSchema": {"type": "object"}
+        })
+    };
+    let h = Harness::new(1);
+    let stub = stub_server(
+        h.path(),
+        "output-check-pool",
+        StubOpts {
+            notifier: true,
+            ..StubOpts::default()
+        },
+    );
+    stub.set_tools_json(&serde_json::json!([schema_tool("first")]));
+    h.declare(&stub, true);
+    h.supervisor.reconcile_all().await;
+    assert_eq!(h.state("srv"), Some(ExtensionState::Enabled));
+
+    let shares_the_registrys = |name: &str| {
+        let tool = h.registry.get(name).expect("the tool is registered");
+        let ToolBackend::Mcp { output_check, .. } = &tool.backend else {
+            panic!("{name} is an MCP tool");
+        };
+        let check = output_check
+            .as_ref()
+            .expect("a tool that declares a schema carries its check");
+        h.registry.output_checks().owns(check)
+    };
+    assert!(shares_the_registrys("srv__first"), "the bring-up's pool");
+
+    stub.set_tools_json(&serde_json::json!([
+        schema_tool("first"),
+        schema_tool("second")
+    ]));
+    stub.notify();
+    assert!(
+        wait_for_tools(&h, &["first", "second"]).await,
+        "the refresh registers the added tool"
+    );
+    assert!(shares_the_registrys("srv__second"), "the refresh's pool");
+
+    h.supervisor.reload(&mcp("srv")).await.expect("reload");
+    assert!(
+        wait_for_tools(&h, &["first", "second"]).await,
+        "the reload registers both again"
+    );
+    assert!(shares_the_registrys("srv__first"), "the reload's pool");
+    assert!(shares_the_registrys("srv__second"), "the reload's pool");
+    h.supervisor.shutdown_all().await;
+}
+
 // ============================================================================
 // Write-first
 // ============================================================================

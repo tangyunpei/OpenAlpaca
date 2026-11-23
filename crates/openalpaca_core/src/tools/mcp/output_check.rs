@@ -23,7 +23,9 @@
 //!   its answer, asynchronously; past it, while the thread has been busy
 //!   longer than that, or before the tool's schema is compiled, the result
 //!   is kept unchanged with [`NOT_CHECKED_LINE`]. Nothing is refused because
-//!   of a check.
+//!   of a check. The wait runs inside the sandbox's cut of the call, so a
+//!   result that arrives at the very end of the call's time limit can still
+//!   be cut there, as a timeout (counted toward the tool's circuit breaker).
 //! - **Yes or no** (I3). A check is `Validator::is_valid` and nothing else; a
 //!   mismatch is one fixed line, [`MISMATCH_LINE`], with no detail, so no
 //!   third-party text enters a result from here and there is nothing to
@@ -356,6 +358,14 @@ impl OutputChecks {
         }
         servers.insert(name.to_string(), Arc::clone(&server));
         server
+    }
+
+    /// Whether `check` was registered through this pool, so its compile and
+    /// its checks run on this pool's one thread per server (I1). The daemon's
+    /// tests read it to prove that every registration site hands a tool the
+    /// registry's pool, not one of its own.
+    pub fn owns(&self, check: &OutputCheck) -> bool {
+        Arc::ptr_eq(&self.inner, &check.handle.pool)
     }
 
     /// Threads started by this pool, ever.

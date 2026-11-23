@@ -13,8 +13,16 @@ use std::sync::atomic::AtomicBool;
 /// production two seconds; the production figure is pinned separately.
 const TEST_WAIT: Duration = Duration::from_millis(300);
 
-/// What no test may take longer than to get a call's answer: a call that
-/// hangs fails here instead of hanging the suite.
+/// What no test may take longer than to get a call's answer: a call whose
+/// future stays pending (a wait that never ends) fails here instead of
+/// hanging the suite. It cannot catch a call that blocks its thread inside
+/// a poll — a check run inline on the caller, a registration that waits
+/// for its compile: `timeout` polls the call first and never gets its turn,
+/// so such a regression hangs the tests it reaches, and the module's run
+/// with them. Run filtered, it fails the tests that do not block on it:
+/// `two_calls_at_once_are_checked_on_the_servers_one_thread`,
+/// `the_stop_path_never_waits_on_a_stuck_thread` and
+/// `registration_returns_while_a_compile_is_stuck` among them.
 const OUTER: Duration = Duration::from_secs(10);
 
 /// A door the injected engine waits at until the test opens it.
@@ -304,6 +312,37 @@ async fn a_declared_schema_with_no_structured_output_gets_its_line() {
         NO_STRUCTURED_LINE,
         "[This tool declares an output schema, but its result has no structured output.]"
     );
+}
+
+/// (d) also while the schema's compile is still pending: a result with no
+/// structured content (none, or JSON `null`) gets line (d), not the "not
+/// checked" line, at once and with nothing checked.
+#[tokio::test]
+async fn no_structured_output_gets_its_line_while_the_compile_is_pending() {
+    let (probe, _release) = probe();
+    let checks = pool(&probe);
+    let check = checks.register("srv-dp", "srv-dp__get", &blocking_schema());
+    probe.gate.await_waiter();
+
+    let start = Instant::now();
+    let out = finish(
+        CallToolResult::success(vec![ContentBlock::text("Done.".to_string())]),
+        Some(&check),
+    )
+    .await
+    .unwrap();
+    assert_eq!(out, format!("Done.\n{NO_STRUCTURED_LINE}"));
+
+    let mut null = CallToolResult::success(vec![]);
+    null.structured_content = Some(Value::Null);
+    assert_eq!(
+        finish(null, Some(&check)).await.unwrap(),
+        NO_STRUCTURED_LINE
+    );
+    assert!(start.elapsed() < TEST_WAIT, "{:?}", start.elapsed());
+
+    assert_matches!(*lock(&check.handle.slot.status), Status::Pending);
+    assert_eq!(probe.checks.load(Ordering::SeqCst), 0);
 }
 
 /// (e) An error result is not checked and gets no line.
