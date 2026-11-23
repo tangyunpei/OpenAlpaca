@@ -22,17 +22,38 @@ enum ServerEvent {
         request_id: String,
         command: String,
         ts: DateTime<Utc>,
-        #[allow(dead_code)]
+        #[expect(
+            dead_code,
+            reason = "the daemon's instance; tail shows one only on a heartbeat"
+        )]
         instance_id: String,
     },
     /// A produced artifact (plan §4.9). `task_id`/`agent_id` are absent for a
     /// loose artifact — a chat turn that ran no workflow.
     ArtifactWritten {
-        #[allow(dead_code)]
+        #[cfg_attr(
+            not(test),
+            expect(
+                dead_code,
+                reason = "read only by tail's tests; the line shows name, tag and path"
+            )
+        )]
         artifact_id: String,
-        #[allow(dead_code)]
+        #[cfg_attr(
+            not(test),
+            expect(
+                dead_code,
+                reason = "read only by tail's tests; the artifact line names no run"
+            )
+        )]
         task_id: Option<String>,
-        #[allow(dead_code)]
+        #[cfg_attr(
+            not(test),
+            expect(
+                dead_code,
+                reason = "read only by tail's tests; the artifact line names no agent"
+            )
+        )]
         agent_id: Option<String>,
         name: String,
         kind: String,
@@ -42,48 +63,90 @@ enum ServerEvent {
         /// a frame from an older daemon.
         #[serde(default)]
         in_project: bool,
-        #[allow(dead_code)]
+        #[expect(
+            dead_code,
+            reason = "the open flag; the artifact line is the same either way"
+        )]
         #[serde(default = "openable_by_default")]
         openable: bool,
         ts: DateTime<Utc>,
-        #[allow(dead_code)]
+        #[expect(
+            dead_code,
+            reason = "the daemon's instance; tail shows one only on a heartbeat"
+        )]
         instance_id: String,
     },
     /// One subagent lane of a run opening or closing (GAP-09).
     SubagentSpan {
-        #[allow(dead_code)]
+        #[expect(dead_code, reason = "the span's run; the lane line shows its label")]
         task_id: String,
-        #[allow(dead_code)]
+        #[cfg_attr(
+            not(test),
+            expect(
+                dead_code,
+                reason = "read only by tail's tests; the lane line shows the label"
+            )
+        )]
         span_id: String,
         label: String,
-        #[allow(dead_code)]
+        #[expect(
+            dead_code,
+            reason = "the span's template; the lane line shows its label"
+        )]
         template_id: String,
-        #[allow(dead_code)]
+        #[expect(
+            dead_code,
+            reason = "the subagent's instance; the lane line shows its label"
+        )]
         agent_instance_id: String,
         state: String,
         detail: Option<String>,
-        #[allow(dead_code)]
+        #[expect(
+            dead_code,
+            reason = "the span's start; the lane line shows the frame's time"
+        )]
         started_at: String,
-        #[allow(dead_code)]
+        #[cfg_attr(
+            not(test),
+            expect(
+                dead_code,
+                reason = "read only by tail's tests; the lane line shows the duration"
+            )
+        )]
         ended_at: Option<String>,
         duration_ms: Option<i64>,
-        #[allow(dead_code)]
+        #[expect(
+            dead_code,
+            reason = "the answer preview; the lane line shows state and detail"
+        )]
         output_preview: Option<String>,
         ts: DateTime<Utc>,
-        #[allow(dead_code)]
+        #[expect(
+            dead_code,
+            reason = "the daemon's instance; tail shows one only on a heartbeat"
+        )]
         instance_id: String,
     },
     /// A conversation was created, activated, archived or deleted (§5.7) — or
     /// one of its runs was found interrupted at boot (§5.6b), in which case
     /// `task_id` names the run.
     SessionChanged {
-        #[allow(dead_code)]
+        #[cfg_attr(
+            not(test),
+            expect(
+                dead_code,
+                reason = "read only by tail's tests; the session line shows the lane"
+            )
+        )]
         session_id: String,
         lane_key: String,
         status: String,
         task_id: Option<String>,
         ts: DateTime<Utc>,
-        #[allow(dead_code)]
+        #[expect(
+            dead_code,
+            reason = "the daemon's instance; tail shows one only on a heartbeat"
+        )]
         instance_id: String,
     },
     /// A queued follow-up was cancelled before it ran (GAP-03).
@@ -91,7 +154,10 @@ enum ServerEvent {
         lane_key: String,
         followup_id: i64,
         ts: DateTime<Utc>,
-        #[allow(dead_code)]
+        #[expect(
+            dead_code,
+            reason = "the daemon's instance; tail shows one only on a heartbeat"
+        )]
         instance_id: String,
     },
     /// An extension's observed state changed — T5, E5, `mark_failed`, T5-deny,
@@ -100,13 +166,22 @@ enum ServerEvent {
         kind: String,
         id: String,
         state: String,
-        #[allow(dead_code)]
+        #[cfg_attr(
+            not(test),
+            expect(
+                dead_code,
+                reason = "read only by tail's tests; the extension line shows the state"
+            )
+        )]
         generation: u64,
         /// Only a server-driven `tools/list_changed` refresh sets it.
         #[serde(default)]
         tools_changed: bool,
         ts: DateTime<Utc>,
-        #[allow(dead_code)]
+        #[expect(
+            dead_code,
+            reason = "the daemon's instance; tail shows one only on a heartbeat"
+        )]
         instance_id: String,
     },
     /// S4 moments 1 and 2 — a capability was withheld from a caller.
@@ -116,11 +191,17 @@ enum ServerEvent {
         subject: String,
         moment: String,
         state: String,
-        #[allow(dead_code)]
+        #[expect(
+            dead_code,
+            reason = "the withholding's scope; the withheld line shows the subject"
+        )]
         scope: String,
         stale: bool,
         ts: DateTime<Utc>,
-        #[allow(dead_code)]
+        #[expect(
+            dead_code,
+            reason = "the daemon's instance; tail shows one only on a heartbeat"
+        )]
         instance_id: String,
     },
     /// S4 moment 3 — T1 step 3's dependent scan, one per transition.
@@ -136,10 +217,16 @@ enum ServerEvent {
         /// The cron-scheduled subset — the half that fires unattended, so it is
         /// named separately rather than folded into the skills count.
         affected_cron_skills: Vec<String>,
-        #[allow(dead_code)]
+        #[expect(
+            dead_code,
+            reason = "the notice's lane; the withdrawn line shows the dependents"
+        )]
         notice_lane: String,
         ts: DateTime<Utc>,
-        #[allow(dead_code)]
+        #[expect(
+            dead_code,
+            reason = "the daemon's instance; tail shows one only on a heartbeat"
+        )]
         instance_id: String,
     },
     #[serde(other)]
@@ -559,14 +646,14 @@ mod tests {
             "instance_id": "inst-1"
         }"#;
         let event = serde_json::from_str::<ServerEvent>(frame).unwrap();
-        assert!(matches!(
+        std::assert_matches!(
             event,
             ServerEvent::ArtifactWritten {
                 task_id: None,
                 agent_id: None,
                 ..
             }
-        ));
+        );
         // The print arm must survive both halves being absent.
         print_event(&event);
     }
@@ -593,13 +680,13 @@ mod tests {
             "instance_id": "inst-1"
         }"#;
         let event = serde_json::from_str::<ServerEvent>(frame).unwrap();
-        assert!(matches!(
+        std::assert_matches!(
             event,
             ServerEvent::ArtifactWritten {
                 in_project: true,
                 ..
             }
-        ));
+        );
         print_event(&event);
     }
 
@@ -644,13 +731,13 @@ mod tests {
             "ts": "2026-10-08T10:00:00Z",
             "instance_id": "inst-1"
         }"#;
-        assert!(matches!(
+        std::assert_matches!(
             serde_json::from_str::<ServerEvent>(frame).unwrap(),
             ServerEvent::ArtifactWritten {
                 in_project: false,
                 ..
             }
-        ));
+        );
     }
 
     /// GAP-09 — a lane transition has its own arm, so `openalpaca tail` shows
@@ -715,7 +802,7 @@ mod tests {
             "instance_id": "inst-1"
         }"#;
         let event = serde_json::from_str::<ServerEvent>(frame).unwrap();
-        assert!(matches!(
+        std::assert_matches!(
             event,
             ServerEvent::SubagentSpan {
                 ended_at: None,
@@ -723,7 +810,7 @@ mod tests {
                 detail: None,
                 ..
             }
-        ));
+        );
         print_event(&event);
     }
 
@@ -831,13 +918,13 @@ mod tests {
             "instance_id": "inst-1"
         }"#;
         let event = serde_json::from_str::<ServerEvent>(frame).unwrap();
-        assert!(matches!(
+        std::assert_matches!(
             event,
             ServerEvent::ExtensionStateChanged {
                 tools_changed: false,
                 ..
             }
-        ));
+        );
         print_event(&event);
 
         let refreshed = serde_json::from_str::<ServerEvent>(
@@ -966,10 +1053,7 @@ mod tests {
             "instance_id": "inst-1"
         }"#;
         let event = serde_json::from_str::<ServerEvent>(frame).unwrap();
-        assert!(matches!(
-            event,
-            ServerEvent::SessionChanged { task_id: None, .. }
-        ));
+        std::assert_matches!(event, ServerEvent::SessionChanged { task_id: None, .. });
         print_event(&event);
     }
 }

@@ -774,11 +774,9 @@ async fn the_extractor_asks_for_no_reasoning() {
     );
     scene.queue.flush_session(&s).await;
     let request = scene.model.first_request();
-    assert!(
-        matches!(
-            request.thinking,
-            Some(openalpaca_llm::ThinkingConfig::Disabled)
-        ),
+    std::assert_matches!(
+        request.thinking,
+        Some(openalpaca_llm::ThinkingConfig::Disabled),
         "{:?}",
         request.thinking
     );

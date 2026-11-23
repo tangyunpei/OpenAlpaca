@@ -309,10 +309,10 @@ async fn a_server_still_asking_after_ten_rounds_ends_the_call_with_the_caps_erro
     let (client, seen) = modern_client(Arc::new(|n| elicitation(&format!("e{n}")))).await;
 
     let outcome = call(&client).await;
-    assert!(
-        matches!(outcome, Err(McpError::InputRoundsExceeded(10))),
-        "the cap's error, got {:?}",
-        outcome.map(|_| "a result")
+    std::assert_matches!(
+        outcome,
+        Err(McpError::InputRoundsExceeded(10)),
+        "the cap's error",
     );
     // Give an eleventh request the time it would take to land.
     tokio::time::sleep(Duration::from_millis(300)).await;
@@ -336,10 +336,8 @@ async fn a_task_answer_is_an_unexpected_response_sent_once() {
     let (client, seen) = modern_client(Arc::new(|_| task())).await;
 
     let outcome = call(&client).await;
-    assert!(
-        matches!(&outcome, Err(McpError::ServerInternal(text)) if text.contains("unexpected response")),
-        "an unexpected response, got {:?}",
-        outcome.map(|_| "a result")
+    std::assert_matches!(&outcome, Err(McpError::ServerInternal(text)) if text.contains("unexpected response"),
+        "an unexpected response",
     );
     tokio::time::sleep(Duration::from_millis(300)).await;
     assert_eq!(seen.calls().len(), 1, "sent once");
@@ -368,10 +366,10 @@ async fn a_sampling_request_the_client_does_not_serve_ends_the_call_sent_once() 
     .await;
 
     let outcome = call(&client).await;
-    assert!(
-        matches!(outcome, Err(McpError::JsonRpc { .. })),
-        "the handler's refusal, got {:?}",
-        outcome.map(|_| "a result")
+    std::assert_matches!(
+        outcome,
+        Err(McpError::JsonRpc { .. }),
+        "the handler's refusal",
     );
     tokio::time::sleep(Duration::from_millis(300)).await;
     assert_eq!(seen.calls().len(), 1, "no round after the refusal");
@@ -438,10 +436,10 @@ async fn a_call_dropped_in_its_second_round_cancels_that_round_alone() {
             Duration::from_millis(500),
         )
         .await;
-    assert!(
-        matches!(outcome, Err(McpError::Timeout(_))),
-        "cut by its deadline in round 2, got {:?}",
-        outcome.map(|_| "a result")
+    std::assert_matches!(
+        outcome,
+        Err(McpError::Timeout(_)),
+        "cut by its deadline in round 2",
     );
     // Give the notification the time it would take to land.
     tokio::time::sleep(Duration::from_millis(300)).await;
@@ -605,10 +603,10 @@ done
         let first = tokio::time::timeout(Duration::from_secs(10), call(&client))
             .await
             .expect("the call ends within its own deadline");
-        assert!(
-            matches!(first, Err(McpError::TransportClosed)),
-            "the dead transport is the caller's failure, got {:?}",
-            first.map(|_| "a result")
+        std::assert_matches!(
+            first,
+            Err(McpError::TransportClosed),
+            "the dead transport is the caller's failure",
         );
         let calls = stub.calls();
         assert_eq!(calls.len(), 2, "two rounds, each sent once");

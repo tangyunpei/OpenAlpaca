@@ -267,8 +267,9 @@ async fn start_runs_the_stored_row_under_its_own_id() {
     let outcome = orchestrator.start_task("t1", None).expect("dispatched");
     assert_eq!(outcome.task_id, "t1", "D5: the id does not change");
     assert_eq!(outcome.title, "Ship the release");
-    assert!(
-        matches!(outcome.status.as_str(), "queued" | "running"),
+    std::assert_matches!(
+        outcome.status.as_str(),
+        "queued" | "running",
         "a dispatched run is queued or already running, got {}",
         outcome.status,
     );
@@ -443,10 +444,10 @@ async fn a_start_that_could_not_dispatch_releases_the_run_slot() {
     store_task(&db, "t1", TaskStatus::Queued, Some("write the changelog"));
     let (orchestrator, ctx) = make_orchestrator(&db, vec![], true);
 
-    assert!(matches!(
+    std::assert_matches!(
         orchestrator.start_task("t1", None),
         Err(TaskLaunchError::Dispatch(_))
-    ));
+    );
     assert!(
         ctx.claim_run_slot("t1").is_some(),
         "the slot must be free again after a dispatch that never started"
@@ -630,8 +631,9 @@ async fn resume_relaunches_the_run_under_its_own_id() {
     assert_eq!(outcome.to_seq, Some(2));
 
     let row = TaskRepository::new(&db).get("t1").unwrap().expect("the row");
-    assert!(
-        matches!(row.status, TaskStatus::Queued | TaskStatus::Running),
+    std::assert_matches!(
+        row.status,
+        TaskStatus::Queued | TaskStatus::Running,
         "interrupted → live again, not a new row: {:?}",
         row.status
     );

@@ -570,10 +570,10 @@ async fn an_expired_confirmation_announces_itself_as_timed_out() {
     assert!(result.unwrap_err().contains("timed out"));
 
     // The request frame first, then its twin.
-    assert!(matches!(
+    std::assert_matches!(
         rx.try_recv().unwrap(),
         SystemEvent::ToolConfirmationRequested { .. }
-    ));
+    );
     match rx.try_recv().unwrap() {
         SystemEvent::ToolConfirmationResolved {
             outcome,
@@ -630,10 +630,10 @@ async fn an_answered_confirmation_announces_the_answer() {
 
         let _ = sandbox.execute_tool(&tc, &policy, &ctx).await;
 
-        assert!(matches!(
+        std::assert_matches!(
             rx.try_recv().unwrap(),
             SystemEvent::ToolConfirmationRequested { .. }
-        ));
+        );
         match rx.try_recv().unwrap() {
             SystemEvent::ToolConfirmationResolved { outcome, .. } => {
                 assert_eq!(outcome, expected);

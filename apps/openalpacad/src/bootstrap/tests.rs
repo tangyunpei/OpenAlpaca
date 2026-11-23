@@ -909,11 +909,9 @@ mod create_skill {
             std::fs::create_dir_all(target.parent().unwrap()).unwrap();
             std::fs::copy(fixture.join(name), &target).unwrap();
         }
-        assert!(
-            matches!(
-                openalpaca_core::bundled::classify_skill_dir("create-skill", &seeded),
-                Some(openalpaca_core::bundled::SkillFolder::UneditedCopy(_))
-            ),
+        std::assert_matches!(
+            openalpaca_core::bundled::classify_skill_dir("create-skill", &seeded),
+            Some(openalpaca_core::bundled::SkillFolder::UneditedCopy(_)),
             "the fixture is no longer an unedited copy"
         );
 

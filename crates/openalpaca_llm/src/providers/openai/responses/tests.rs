@@ -1012,12 +1012,12 @@ async fn a_call_and_the_completion_in_one_frame_both_survive() {
             .any(|e| matches!(e, StreamEvent::ToolUseStart { id, .. } if id == "call_1"))
     );
     assert!(events.iter().any(|e| matches!(e, StreamEvent::Usage(u) if u.input_tokens == 120 && u.output_tokens == 50 && u.cache_read_input_tokens == 100)));
-    assert!(matches!(
+    std::assert_matches!(
         events.last(),
         Some(StreamEvent::Done {
             finish_reason: FinishReason::ToolUse
         })
-    ));
+    );
 }
 
 /// A completion whose items no event announced still yields them: the

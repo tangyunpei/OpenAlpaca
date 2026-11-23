@@ -1225,7 +1225,7 @@ fn lifecycle(mode: ProtocolMode, negotiated: Option<&ProtocolVersion>) -> Client
 /// connection, and every test that stands one up, goes through — and, when
 /// the session is in the 2026-07-28 lifecycle, open its change subscription
 /// ([`ChangeListener`]).
-#[allow(
+#[expect(
     clippy::result_large_err,
     reason = "rmcp's error, read once by handshake_error; a Box buys nothing"
 )]
@@ -1511,6 +1511,7 @@ mod tests {
             ..Default::default()
         };
         let t = build_transport(&stdio, Arc::clone(&observer)).expect("a stdio transport");
+        // Not assert_matches!: `Transport` has no Debug (env, auth headers).
         assert!(matches!(t, Transport::Stdio(_)));
         assert_eq!((t.kind(), t.server_name()), ("stdio", "local"));
 
@@ -1524,6 +1525,7 @@ mod tests {
             ..Default::default()
         };
         let t = build_transport(&http, observer).expect("an http transport");
+        // Not assert_matches!: `Transport` has no Debug (env, auth headers).
         assert!(matches!(t, Transport::Http(_)));
         assert_eq!((t.kind(), t.server_name()), ("streamable-http", "remote"));
     }
@@ -1775,10 +1777,7 @@ mod tests {
             .call_tool("any", serde_json::json!({}), None)
             .await
             .expect_err("a sealed client must refuse");
-        assert!(
-            matches!(err, McpError::Closed),
-            "expected Closed, got {err:?}"
-        );
+        std::assert_matches!(err, McpError::Closed, "expected Closed, got {err:?}");
         assert!(!err.is_retriable(), "Closed must never be retriable");
         assert_eq!(
             spawn_count(&log),
@@ -1801,10 +1800,7 @@ mod tests {
             .list_tools(None)
             .await
             .expect_err("a sealed client must refuse");
-        assert!(
-            matches!(err, McpError::Closed),
-            "expected Closed, got {err:?}"
-        );
+        std::assert_matches!(err, McpError::Closed, "expected Closed, got {err:?}");
         assert_eq!(
             spawn_count(&log),
             0,
@@ -1839,10 +1835,7 @@ mod tests {
             live.closed.load(std::sync::atomic::Ordering::SeqCst),
             "the sealed install must close the service it was handed, not merely drop it"
         );
-        assert!(
-            matches!(err, McpError::Closed),
-            "expected Closed, got {err:?}"
-        );
+        std::assert_matches!(err, McpError::Closed, "expected Closed, got {err:?}");
         assert!(
             client.inner.service.lock().await.is_none(),
             "a sealed client must hold no service"
@@ -1946,8 +1939,9 @@ mod tests {
             .disconnect()
             .await
             .expect_err("the rigged close must fail");
-        assert!(
-            matches!(err, McpError::Sdk(_)),
+        std::assert_matches!(
+            err,
+            McpError::Sdk(_),
             "expected Sdk(close failed), got {err:?}"
         );
         assert_eq!(
@@ -1982,10 +1976,7 @@ mod tests {
                 )),
             };
             let err = client.reconnect().await.expect_err("reconnect must refuse");
-            assert!(
-                matches!(err, McpError::Closed),
-                "expected Closed, got {err:?}"
-            );
+            std::assert_matches!(err, McpError::Closed, "expected Closed, got {err:?}");
         }
     }
 
@@ -2089,8 +2080,9 @@ mod tests {
             .list_tools_once()
             .await
             .expect_err("no service is installed");
-        assert!(
-            matches!(err, McpError::TransportClosed),
+        std::assert_matches!(
+            err,
+            McpError::TransportClosed,
             "expected the typed error, got {err:?}"
         );
         assert_eq!(
@@ -2130,8 +2122,9 @@ mod tests {
         // so avoid `.unwrap_err()` and match manually.
         match McpClient::connect(cfg).await {
             Ok(_) => panic!("expected connect() to fail for nonexistent command"),
-            Err(err) => assert!(
-                matches!(err, McpError::Transport(_) | McpError::HandshakeFailed(_)),
+            Err(err) => std::assert_matches!(
+                err,
+                McpError::Transport(_) | McpError::HandshakeFailed(_),
                 "unexpected error: {err:?}"
             ),
         }
@@ -2148,8 +2141,9 @@ mod tests {
             .call_tool("any", serde_json::json!([1, 2, 3]), None)
             .await
             .expect_err("expected error");
-        assert!(
-            matches!(err, McpError::InvalidArguments(_)),
+        std::assert_matches!(
+            err,
+            McpError::InvalidArguments(_),
             "expected InvalidArguments, got {err:?}"
         );
     }
@@ -2175,8 +2169,9 @@ mod tests {
         let err = client.list_tools(None).await.expect_err("expected error");
         // Accept either: pre-Task-11 returns TransportClosed; post-Task-11 returns
         // ReconnectExhausted(0) because max_attempts=0 means "don't retry at all".
-        assert!(
-            matches!(err, McpError::TransportClosed | McpError::ReconnectExhausted(0)),
+        std::assert_matches!(
+            err,
+            McpError::TransportClosed | McpError::ReconnectExhausted(0),
             "unexpected error: {err:?}"
         );
     }
@@ -2195,8 +2190,9 @@ mod tests {
             .expect_err("expected error");
         // Either Cancelled (if select chose cancel first) or TransportClosed (if service check ran first).
         // Biased select should prefer Cancelled.
-        assert!(
-            matches!(err, McpError::Cancelled | McpError::TransportClosed),
+        std::assert_matches!(
+            err,
+            McpError::Cancelled | McpError::TransportClosed,
             "unexpected error: {err:?}"
         );
     }
@@ -2231,13 +2227,18 @@ mod tests {
         let _ = client.reconnect().await;
         // Attempt 3: exceeds max=2, should return ReconnectExhausted.
         let err = client.reconnect().await.expect_err("expected error");
-        assert!(
-            matches!(err, McpError::ReconnectExhausted(2)),
+        std::assert_matches!(
+            err,
+            McpError::ReconnectExhausted(2),
             "unexpected error: {err:?}"
         );
         // State should be Failed.
         let state = client.inner.state.read().await;
-        assert!(matches!(&*state, ConnectionState::Failed { .. }), "expected Failed state");
+        std::assert_matches!(
+            &*state,
+            ConnectionState::Failed { .. },
+            "expected Failed state"
+        );
     }
 
     /// DU-25 (m-a), (m-c): a client's first handshake follows `protocol`;
@@ -2355,11 +2356,9 @@ mod tests {
             ),
         ];
         for (error, lifecycle) in &other {
-            assert!(
-                matches!(
-                    handshake_error(error, lifecycle, false),
-                    McpError::HandshakeFailed(_)
-                ),
+            std::assert_matches!(
+                handshake_error(error, lifecycle, false),
+                McpError::HandshakeFailed(_),
                 "{error:?} under {lifecycle:?}"
             );
         }

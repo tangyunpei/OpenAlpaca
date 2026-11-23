@@ -841,7 +841,10 @@ impl SandboxManager {
     ///
     /// `reason` says why a failed run failed, where the sandbox knows:
     /// `Timeout` for a call its clock cut (TIMEOUT-ONE-CLOCK).
-    #[allow(clippy::too_many_arguments)]
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "the tool_executed event's fields and its session"
+    )]
     fn emit_tool_executed(
         &self,
         agent_id: &str,

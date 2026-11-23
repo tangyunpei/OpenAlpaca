@@ -77,7 +77,7 @@ async fn test_all_keys_limited() {
     .await;
 
     let result = pool.acquire().await;
-    assert!(matches!(result, Err(KeyPoolError::AllKeysRateLimited)));
+    std::assert_matches!(result, Err(KeyPoolError::AllKeysRateLimited));
 }
 
 #[tokio::test]
@@ -129,7 +129,7 @@ async fn test_success_clears_cooldown() {
 async fn test_empty_pool() {
     let pool = KeyPool::new(vec![], SelectionStrategy::RoundRobin);
     assert!(pool.is_empty());
-    assert!(matches!(pool.acquire().await, Err(KeyPoolError::NoKeys)));
+    std::assert_matches!(pool.acquire().await, Err(KeyPoolError::NoKeys));
 }
 
 #[test]
@@ -207,7 +207,7 @@ async fn test_primary_fallback_all_limited() {
     .await;
 
     let result = pool.acquire().await;
-    assert!(matches!(result, Err(KeyPoolError::AllKeysRateLimited)));
+    std::assert_matches!(result, Err(KeyPoolError::AllKeysRateLimited));
 }
 
 #[test]
@@ -312,7 +312,7 @@ async fn test_acquire_skips_claude_code_source() {
         SelectionStrategy::RoundRobin,
     );
     let result = pool.acquire().await;
-    assert!(matches!(result, Err(KeyPoolError::NoApiCompatibleKeys)));
+    std::assert_matches!(result, Err(KeyPoolError::NoApiCompatibleKeys));
 }
 
 #[tokio::test]
@@ -322,7 +322,7 @@ async fn test_acquire_skips_mislabeled_oat_key() {
         SelectionStrategy::RoundRobin,
     );
     let result = pool.acquire().await;
-    assert!(matches!(result, Err(KeyPoolError::NoApiCompatibleKeys)));
+    std::assert_matches!(result, Err(KeyPoolError::NoApiCompatibleKeys));
 }
 
 #[tokio::test]
@@ -373,10 +373,7 @@ async fn test_acquire_any_returns_managed_keys() {
         SelectionStrategy::RoundRobin,
     );
     // acquire() should fail
-    assert!(matches!(
-        pool.acquire().await,
-        Err(KeyPoolError::NoApiCompatibleKeys)
-    ));
+    std::assert_matches!(pool.acquire().await, Err(KeyPoolError::NoApiCompatibleKeys));
     // acquire_any() should succeed
     let guard = pool.acquire_any().await.unwrap();
     assert_eq!(guard.id, "managed1");

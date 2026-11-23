@@ -68,7 +68,10 @@ impl TaskDispatcher {
     /// the loop's LLM round re-homed the completion report, its artifact links
     /// and the run's JSONL into whichever conversation happened to be active by
     /// the time the dispatch ran.
-    #[allow(clippy::too_many_arguments)]
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "the run's row fields and its session, from the caller"
+    )]
     pub(crate) fn dispatch_lead_agent(
         &self,
         description: &str,
@@ -103,7 +106,10 @@ impl TaskDispatcher {
     /// A re-run is a second run of the same work, and both rows have to survive
     /// — the original's result is the thing the user is comparing against — so
     /// it gets a new id and answers `201`.
-    #[allow(clippy::too_many_arguments)]
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "as dispatch_lead_agent, with the source run for the session"
+    )]
     pub(crate) fn dispatch_lead_agent_rerun(
         &self,
         description: &str,
@@ -141,7 +147,10 @@ impl TaskDispatcher {
     /// ([`SharedContext::claim_run_slot`](crate::context::SharedContext::claim_run_slot))
     /// and must release it if this returns `Err` — the claim is what stops two
     /// simultaneous `start`s from putting two lead agents on one task id.
-    #[allow(clippy::too_many_arguments)]
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "as dispatch_lead_agent, under an id the caller holds"
+    )]
     pub(crate) fn dispatch_lead_agent_with_id(
         &self,
         task_id: &str,
@@ -180,7 +189,10 @@ impl TaskDispatcher {
     /// caller holds the id, the row is re-queued in place, and the run slot was
     /// claimed before this was called. The seed is what the lead's loop reads
     /// to rebuild its messages instead of starting from the objective alone.
-    #[allow(clippy::too_many_arguments)]
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "as dispatch_lead_agent_with_id, with the resume seed"
+    )]
     pub(crate) fn dispatch_lead_agent_resume(
         &self,
         task_id: &str,
@@ -211,7 +223,10 @@ impl TaskDispatcher {
         )
     }
 
-    #[allow(clippy::too_many_arguments)]
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "the inputs of the four dispatch entries it serves"
+    )]
     fn dispatch_lead_agent_inner(
         &self,
         task_id: String,
@@ -497,7 +512,10 @@ impl TaskDispatcher {
 
     /// Spawn the lead agent execution in a background tokio task.
     /// The lead agent runs a full agentic loop with `spawn_subagent` tool access.
-    #[allow(clippy::too_many_arguments)]
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "everything the spawned run's task owns, moved in"
+    )]
     fn spawn_lead_agent_execution(
         &self,
         task_id: String,

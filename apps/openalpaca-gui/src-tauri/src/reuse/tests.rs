@@ -114,7 +114,7 @@ fn a_wrong_server_at_the_old_address_spawns() {
     let health = parse_health_response(
         b"HTTP/1.1 404 Not Found\r\ncontent-type: text/html\r\ncontent-length: 9\r\n\r\nNot Found",
     );
-    assert!(matches!(health, Health::Unanswered(_)), "{health:?}");
+    std::assert_matches!(health, Health::Unanswered(_), "{health:?}");
     assert_eq!(decide(&look(parsed(&d), health, false)), Row::Spawn);
 }
 
@@ -357,8 +357,9 @@ fn what_is_not_a_daemon_s_health_is_no_answer() {
         Vec::new(),
     ] {
         let health = parse_health_response(&bytes);
-        assert!(
-            matches!(health, Health::Unanswered(_)),
+        std::assert_matches!(
+            health,
+            Health::Unanswered(_),
             "{:?} read as {health:?}",
             String::from_utf8_lossy(&bytes)
         );
@@ -399,7 +400,7 @@ fn a_health_body_is_read_to_its_length() {
         )
         .as_bytes(),
     );
-    assert!(matches!(health, Health::Answered { .. }), "{health:?}");
+    std::assert_matches!(health, Health::Answered { .. }, "{health:?}");
 }
 
 // ============================================================================

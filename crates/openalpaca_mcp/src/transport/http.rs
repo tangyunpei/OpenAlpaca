@@ -266,7 +266,7 @@ mod tests {
         let t = StreamableHttpTransport::new("srv", Url::parse("https://example.com/mcp").unwrap())
             .with_header("invalid header", "x"); // space is invalid
         let err = t.build_headers().unwrap_err();
-        assert!(matches!(err, McpError::HandshakeFailed(_)));
+        std::assert_matches!(err, McpError::HandshakeFailed(_));
     }
 
     #[test]

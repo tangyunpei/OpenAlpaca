@@ -286,7 +286,7 @@ mod tests {
             || now.get(),
             || now.set(now.get() + POLL),
         );
-        assert!(matches!(outcome, StopOutcome::StillAlive { .. }));
+        std::assert_matches!(outcome, StopOutcome::StillAlive { .. });
         assert_eq!(lock_reads.get(), 0);
     }
 

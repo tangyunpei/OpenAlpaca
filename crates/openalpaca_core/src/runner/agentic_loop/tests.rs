@@ -1685,7 +1685,6 @@ impl MockRouterProvider {
     }
 
     /// The text of every message of each call, oldest call first.
-    #[allow(dead_code)]
     fn contents_seen(&self) -> Vec<Vec<String>> {
         self.contents_per_call
             .lock()
@@ -1694,7 +1693,6 @@ impl MockRouterProvider {
     }
 
     /// The tool-result texts the model was given, newest call last.
-    #[allow(dead_code)]
     fn tool_results_seen(&self) -> Vec<String> {
         self.tool_results_seen
             .lock()
@@ -3058,7 +3056,7 @@ async fn test_steering_error_exit_reappends_undelivered() {
     )
     .await;
 
-    assert!(matches!(result.finish_reason, LoopFinishReason::Error(_)));
+    std::assert_matches!(result.finish_reason, LoopFinishReason::Error(_));
     // Round 2's request did carry the interjection, but the call failed.
     let requests = provider.requests_seen();
     assert!(contains_interjection(&requests[1], "urgent change"));

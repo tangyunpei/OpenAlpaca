@@ -271,34 +271,31 @@ mod tests {
         assert_eq!(bundle.available_budget, 100);
 
         // TaskDescription -> SystemPrompt
-        assert!(matches!(
-            bundle.sections[0].injection,
-            InjectionMode::SystemPrompt
-        ));
+        std::assert_matches!(bundle.sections[0].injection, InjectionMode::SystemPrompt);
         // PredecessorOutput -> UserMessage { Untrusted }
-        assert!(matches!(
+        std::assert_matches!(
             &bundle.sections[1].injection,
             InjectionMode::UserMessage { tag, trust }
             if tag == "predecessor_output" && *trust == TrustLevel::Untrusted
-        ));
+        );
         // Memory -> UserMessage { Untrusted }
-        assert!(matches!(
+        std::assert_matches!(
             &bundle.sections[2].injection,
             InjectionMode::UserMessage { tag, trust }
             if tag == "retrieved_memory" && *trust == TrustLevel::Untrusted
-        ));
+        );
         // ConversationSummary -> UserMessage { Untrusted }
-        assert!(matches!(
+        std::assert_matches!(
             &bundle.sections[3].injection,
             InjectionMode::UserMessage { tag, trust }
             if tag == "conversation_summary" && *trust == TrustLevel::Untrusted
-        ));
+        );
         // WorkspaceArtifact -> UserMessage { Untrusted }
-        assert!(matches!(
+        std::assert_matches!(
             &bundle.sections[4].injection,
             InjectionMode::UserMessage { tag, trust }
             if tag == "workspace_artifact" && *trust == TrustLevel::Untrusted
-        ));
+        );
     }
 
     #[test]

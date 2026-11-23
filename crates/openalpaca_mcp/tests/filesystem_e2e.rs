@@ -109,10 +109,7 @@ async fn filesystem_call_tool_cancellation_returns_cancelled() {
         .await
         .expect_err("expected error");
 
-    assert!(
-        matches!(err, McpError::Cancelled),
-        "expected Cancelled, got {err:?}"
-    );
+    std::assert_matches!(err, McpError::Cancelled, "expected Cancelled, got {err:?}");
 
     client.disconnect().await.expect("disconnect");
 }

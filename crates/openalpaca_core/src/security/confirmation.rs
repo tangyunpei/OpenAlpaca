@@ -226,7 +226,6 @@ impl ApprovalCache {
     }
 
     /// Clear all approvals. Useful for tests and future manual-reset UX.
-    #[allow(dead_code)]
     pub fn clear(&self) {
         self.tool_approvals.clear();
         self.args_approvals.clear();
@@ -344,7 +343,7 @@ mod tests {
             .wait("r1", rx, std::time::Duration::from_millis(20))
             .await;
 
-        assert!(matches!(resolution, ConfirmationResolution::TimedOut));
+        std::assert_matches!(resolution, ConfirmationResolution::TimedOut);
         assert_eq!(resolution.outcome(), ConfirmationOutcome::TimedOut);
         assert_eq!(resolution.outcome().as_str(), "timed_out");
         // The map entry the receiver knew nothing about is gone, so

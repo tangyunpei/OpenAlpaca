@@ -1440,7 +1440,7 @@ fn resolve_content_on_a_deleted_file_marks_missing_and_returns_artifact_gone() {
         .downcast_ref::<ArtifactError>()
         .unwrap_or_else(|| panic!("not an ArtifactError: {err}"));
     assert_eq!(typed.code(), "ARTIFACT_GONE");
-    assert!(matches!(typed, ArtifactError::Gone { id, .. } if *id == record.id));
+    std::assert_matches!(typed, ArtifactError::Gone { id, .. } if *id == record.id);
 
     let after = f.store().get(&record.id, OWNER).unwrap().unwrap();
     assert!(after.missing(), "missing_since is stamped");
@@ -3408,11 +3408,9 @@ fn a_result_file_found_again_clears_its_missing_mark() {
     fs::rename(&path, &aside).unwrap();
 
     let err = f.store().resolve_content(&row.id, None).unwrap_err();
-    assert!(
-        matches!(
-            err.downcast_ref::<ArtifactError>(),
-            Some(ArtifactError::Gone { .. })
-        ),
+    std::assert_matches!(
+        err.downcast_ref::<ArtifactError>(),
+        Some(ArtifactError::Gone { .. }),
         "{err:#}"
     );
     assert!(f.store().get(&row.id, OWNER).unwrap().unwrap().missing());
@@ -3438,11 +3436,9 @@ fn a_result_file_has_no_older_version_to_read_or_diff() {
         f.store().resolve_content(&row.id, Some(2)).unwrap_err(),
         f.store().diff_paths(&row.id, 1, 2).unwrap_err(),
     ] {
-        assert!(
-            matches!(
-                err.downcast_ref::<ArtifactError>(),
-                Some(ArtifactError::VersionNotFound { version: 2, .. })
-            ),
+        std::assert_matches!(
+            err.downcast_ref::<ArtifactError>(),
+            Some(ArtifactError::VersionNotFound { version: 2, .. }),
             "{err:#}"
         );
     }

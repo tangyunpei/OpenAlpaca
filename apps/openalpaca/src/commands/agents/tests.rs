@@ -117,16 +117,16 @@ fn walk(root: &Path, dir: &Path, out: &mut Vec<(String, Vec<u8>, SystemTime)>) {
 
 #[test]
 fn tidy_is_a_verb_and_apply_its_one_flag() {
-    assert!(matches!(
+    std::assert_matches!(
         Harness::try_parse_from(["agents", "tidy"]).unwrap().command,
         AgentsCommands::Tidy { apply: false }
-    ));
-    assert!(matches!(
+    );
+    std::assert_matches!(
         Harness::try_parse_from(["agents", "tidy", "--apply"])
             .unwrap()
             .command,
         AgentsCommands::Tidy { apply: true }
-    ));
+    );
 }
 
 /// Without `--apply` the verb names the one copy the daemon sets aside —

@@ -329,8 +329,9 @@ fn a_malformed_file_spawns() {
         &br#"[4242]"#[..],
     ] {
         let read = read_discovery_bytes(bytes);
-        assert!(
-            matches!(read, DiscoveryRead::Unreadable),
+        std::assert_matches!(
+            read,
+            DiscoveryRead::Unreadable,
             "{:?}",
             String::from_utf8_lossy(bytes)
         );

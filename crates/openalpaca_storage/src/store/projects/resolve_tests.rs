@@ -235,11 +235,9 @@ fn a_home_store_reached_through_a_link_keeps_the_folder_around_its_name_no_proje
         assert_eq!(resolve(path).unwrap(), None, "{}", path.display());
     }
     let err = choose(&home).unwrap_err();
-    assert!(
-        matches!(
-            err.downcast_ref::<ProjectError>(),
-            Some(ProjectError::IsHome { .. })
-        ),
+    std::assert_matches!(
+        err.downcast_ref::<ProjectError>(),
+        Some(ProjectError::IsHome { .. }),
         "{err:#}"
     );
     assert_eq!(
@@ -354,11 +352,9 @@ fn choosing_the_home_store_or_a_folder_around_or_inside_it_is_refused() {
 
     for path in [s.home(), s.home_store(), inside, s.root()] {
         let err = choose(&path).unwrap_err();
-        assert!(
-            matches!(
-                err.downcast_ref::<ProjectError>(),
-                Some(ProjectError::IsHome { .. })
-            ),
+        std::assert_matches!(
+            err.downcast_ref::<ProjectError>(),
+            Some(ProjectError::IsHome { .. }),
             "{}: {err:#}",
             path.display()
         );
@@ -375,11 +371,9 @@ fn choosing_a_missing_path_or_a_file_is_refused_as_not_a_directory() {
 
     for path in [missing, file] {
         let err = choose(&path).unwrap_err();
-        assert!(
-            matches!(
-                err.downcast_ref::<ProjectError>(),
-                Some(ProjectError::NotADirectory { .. })
-            ),
+        std::assert_matches!(
+            err.downcast_ref::<ProjectError>(),
+            Some(ProjectError::NotADirectory { .. }),
             "{}: {err:#}",
             path.display()
         );

@@ -63,8 +63,11 @@ pub struct ExtArgs {
 // the two-string ones. clap builds exactly one of these per process, from argv,
 // and its derive cannot take a boxed subcommand field — so the size is the
 // argument surface, not a cost anything pays.
-#[allow(clippy::large_enum_variant)]
-#[derive(Subcommand)]
+#[expect(
+    clippy::large_enum_variant,
+    reason = "Mcp holds `mcp add`'s options; one is parsed from argv per run"
+)]
+#[derive(Subcommand, Debug)]
 #[command(defer = true)]
 pub enum ExtCommands {
     /// List MCP servers and plugins
@@ -151,8 +154,11 @@ pub enum ExtCommands {
     },
 }
 
-#[allow(clippy::large_enum_variant)]
-#[derive(Subcommand)]
+#[expect(
+    clippy::large_enum_variant,
+    reason = "`mcp add`'s options make Add the large variant; one per run"
+)]
+#[derive(Subcommand, Debug)]
 #[command(defer = true)]
 pub enum ExtMcpCommands {
     /// Write a servers block into config/mcp.toml and connect it
@@ -1069,36 +1075,36 @@ mod tests {
 
     #[test]
     fn every_verb_parses_with_its_arguments() {
-        assert!(matches!(
+        std::assert_matches!(
             parse(&["ext", "list"]),
             ExtCommands::List {
                 include_orphaned: false,
                 ..
             }
-        ));
-        assert!(matches!(
+        );
+        std::assert_matches!(
             parse(&["ext", "list", "--include-orphaned"]),
             ExtCommands::List {
                 include_orphaned: true,
                 ..
             }
-        ));
-        assert!(matches!(
+        );
+        std::assert_matches!(
             parse(&["ext", "enable", "mcp", "github"]),
             ExtCommands::Enable { kind, id } if kind == "mcp" && id == "github"
-        ));
-        assert!(matches!(
+        );
+        std::assert_matches!(
             parse(&["ext", "disable", "plugin", "notion"]),
             ExtCommands::Disable { kind, id } if kind == "plugin" && id == "notion"
-        ));
-        assert!(matches!(
+        );
+        std::assert_matches!(
             parse(&["ext", "reload", "mcp", "github"]),
             ExtCommands::Reload { kind, id } if kind == "mcp" && id == "github"
-        ));
-        assert!(matches!(
+        );
+        std::assert_matches!(
             parse(&["ext", "info", "mcp", "github"]),
             ExtCommands::Info { kind, id } if kind == "mcp" && id == "github"
-        ));
+        );
     }
 
     /// The three consent verbs are plugin-only, so they take **no** kind: a
@@ -1106,18 +1112,18 @@ mod tests {
     /// daemon can only answer `409 unsupported_for_kind`.
     #[test]
     fn the_consent_verbs_take_only_an_id() {
-        assert!(matches!(
+        std::assert_matches!(
             parse(&["ext", "approve", "notion"]),
             ExtCommands::Approve { id } if id == "notion"
-        ));
-        assert!(matches!(
+        );
+        std::assert_matches!(
             parse(&["ext", "deny", "notion"]),
             ExtCommands::Deny { id } if id == "notion"
-        ));
-        assert!(matches!(
+        );
+        std::assert_matches!(
             parse(&["ext", "remove", "notion"]),
             ExtCommands::Remove { id } if id == "notion"
-        ));
+        );
         assert!(
             Harness::try_parse_from(["ext", "approve", "plugin", "notion"]).is_err(),
             "approve must not accept a kind argument"
@@ -1144,32 +1150,32 @@ mod tests {
     /// The five new verbs, and the shapes their arguments take.
     #[test]
     fn the_install_verbs_parse_with_their_arguments() {
-        assert!(matches!(
+        std::assert_matches!(
             parse(&["ext", "install", "/src/notion"]),
             ExtCommands::Install { path, dry_run: false } if path == "/src/notion"
-        ));
-        assert!(matches!(
+        );
+        std::assert_matches!(
             parse(&["ext", "install", "/src/notion", "--dry-run"]),
             ExtCommands::Install { dry_run: true, .. }
-        ));
-        assert!(matches!(
+        );
+        std::assert_matches!(
             parse(&["ext", "update", "notion", "/src/notion"]),
             ExtCommands::Update { id, path } if id == "notion" && path == "/src/notion"
-        ));
-        assert!(matches!(
+        );
+        std::assert_matches!(
             parse(&["ext", "uninstall", "plugin", "notion"]),
             ExtCommands::Uninstall { kind, id, purge_data: false } if kind == "plugin" && id == "notion"
-        ));
-        assert!(matches!(
+        );
+        std::assert_matches!(
             parse(&["ext", "uninstall", "mcp", "github", "--purge-data"]),
             ExtCommands::Uninstall { purge_data: true, .. }
-        ));
-        assert!(matches!(
+        );
+        std::assert_matches!(
             parse(&["ext", "mcp", "remove", "github"]),
             ExtCommands::Mcp {
                 command: ExtMcpCommands::Remove { name }
             } if name == "github"
-        ));
+        );
     }
 
     /// The install body is always `source: "path"`. A URL install is declined

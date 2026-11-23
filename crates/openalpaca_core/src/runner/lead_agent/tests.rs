@@ -225,7 +225,7 @@ fn test_tracker_register_and_status() {
     let tracker = SubagentTracker::new();
 
     tracker.register("run-1");
-    assert!(matches!(tracker.get("run-1"), Some(SubagentStatus::Queued)));
+    std::assert_matches!(tracker.get("run-1"), Some(SubagentStatus::Queued));
     assert!(!tracker.all_done());
 }
 
@@ -311,13 +311,10 @@ fn test_tracker_set_status() {
     let tracker = SubagentTracker::new();
 
     tracker.register("run-1");
-    assert!(matches!(tracker.get("run-1"), Some(SubagentStatus::Queued)));
+    std::assert_matches!(tracker.get("run-1"), Some(SubagentStatus::Queued));
 
     tracker.set_status("run-1", SubagentStatus::Running);
-    assert!(matches!(
-        tracker.get("run-1"),
-        Some(SubagentStatus::Running)
-    ));
+    std::assert_matches!(tracker.get("run-1"), Some(SubagentStatus::Running));
     assert!(!tracker.all_done());
 
     tracker.set_status(
@@ -3116,7 +3113,6 @@ fn fixture_skill_catalog(tmp: &tempfile::TempDir) -> Arc<crate::orchestrator::sk
     catalog
 }
 
-#[allow(clippy::too_many_arguments)]
 async fn run_lead_for_test(
     provider: Arc<ScriptedProvider>,
     tool_registry: Arc<ToolRegistry>,
@@ -4698,10 +4694,10 @@ fn register_worker_template(shared: &SharedContext, id: &str, capabilities: Vec<
     let agent = crate::test_util::make_agent(id, capabilities);
     let mut template = crate::test_util::template_from_agent(&agent);
     template.frontmatter.denied_capabilities = denied.into_iter().map(str::to_string).collect();
-    assert!(matches!(
+    std::assert_matches!(
         template.source,
         crate::agent::template::AgentSource::Internal
-    ));
+    );
     assert!(shared.agent_registry.register_template(template));
 }
 
@@ -5426,7 +5422,7 @@ async fn a_lead_run_is_primed_with_its_memory_once_and_its_profile_once() {
 
     let seen = provider.seen_messages.lock().unwrap();
     let messages = &seen[0];
-    assert!(matches!(messages[0].role, openalpaca_llm::Role::System));
+    std::assert_matches!(messages[0].role, openalpaca_llm::Role::System);
     assert_eq!(
         messages[0].content.matches("### USER PROFILE ###").count(),
         1,
@@ -5438,7 +5434,7 @@ async fn a_lead_run_is_primed_with_its_memory_once_and_its_profile_once() {
         .map(|m| m.content.matches("### USER PROFILE ###").count())
         .sum();
     assert_eq!(profile_copies, 1);
-    assert!(matches!(messages[1].role, openalpaca_llm::Role::User));
+    std::assert_matches!(messages[1].role, openalpaca_llm::Role::User);
     assert!(messages[1].content.starts_with("<memory_context>\n"), "{}", messages[1].content);
     assert!(messages[1].content.contains(&scene.global.to_string()));
     assert!(!messages[1].content.contains(&scene.proj_a.to_string()));

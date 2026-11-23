@@ -40,7 +40,10 @@ pub struct SkillInvocationToolExecutor {
 }
 
 impl SkillInvocationToolExecutor {
-    #[allow(clippy::too_many_arguments)]
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "the catalog, shared handles and limits a nested skill runs under"
+    )]
     pub fn new(
         catalog: Arc<SkillCatalog>,
         tool_registry: Arc<ToolRegistry>,

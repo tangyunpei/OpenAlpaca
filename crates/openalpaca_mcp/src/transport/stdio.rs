@@ -518,8 +518,9 @@ mod tests {
         // implement `Debug`, so we can't use `.unwrap_err()` — match manually.
         match t.connect().await {
             Ok(_) => panic!("expected connect() to fail for nonexistent command"),
-            Err(err) => assert!(
-                matches!(err, McpError::Transport(_)),
+            Err(err) => std::assert_matches!(
+                err,
+                McpError::Transport(_),
                 "expected Transport error, got {err:?}"
             ),
         }

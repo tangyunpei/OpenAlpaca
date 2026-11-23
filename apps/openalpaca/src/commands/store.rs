@@ -43,7 +43,7 @@ pub struct StoreArgs {
     pub command: StoreCommands,
 }
 
-#[derive(Subcommand)]
+#[derive(Subcommand, Debug)]
 #[command(defer = true)]
 pub enum StoreCommands {
     /// List the projects OpenAlpaca keeps a folder for, and mark a missing one
@@ -673,33 +673,33 @@ mod tests {
 
     #[test]
     fn list_takes_no_arguments() {
-        assert!(matches!(parse(&["list"]), StoreCommands::List));
+        std::assert_matches!(parse(&["list"]), StoreCommands::List);
         assert!(try_parse(&["list", "/x"]).is_err());
     }
 
     #[test]
     fn rebase_takes_two_paths_and_an_optional_dry_run() {
-        assert!(matches!(
+        std::assert_matches!(
             parse(&["rebase", "/old/p", "/new/p"]),
             StoreCommands::Rebase { old, new, dry_run: false }
                 if old == "/old/p" && new == "/new/p"
-        ));
-        assert!(matches!(
+        );
+        std::assert_matches!(
             parse(&["rebase", "/old/p", "/new/p", "--dry-run"]),
             StoreCommands::Rebase { dry_run: true, .. }
-        ));
+        );
     }
 
     #[test]
     fn purge_takes_exactly_one_project() {
-        assert!(matches!(
+        std::assert_matches!(
             parse(&["purge", "/some/proj"]),
             StoreCommands::Purge { project, .. } if project == "/some/proj"
-        ));
-        assert!(matches!(
+        );
+        std::assert_matches!(
             parse(&["purge", "projects/-some-proj"]),
             StoreCommands::Purge { project, .. } if project == "projects/-some-proj"
-        ));
+        );
         assert!(
             try_parse(&["purge"]).is_err(),
             "a destructive verb never guesses the project"

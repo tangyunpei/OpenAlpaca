@@ -155,12 +155,12 @@ mod tests {
     fn test_from_budget_builds_correct_edits() {
         let mgmt = ContextManagement::from_budget(167_000, 5);
         assert_eq!(mgmt.edits.len(), 2);
-        assert!(matches!(
+        std::assert_matches!(
             mgmt.edits[0],
             ContextEdit::ClearThinking {
                 keep: ThinkingKept::All
             }
-        ));
+        );
     }
 
     #[test]

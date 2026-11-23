@@ -81,7 +81,10 @@ pub struct LeadAgentResult {
 
 /// Execute a task using the Lead Agent pattern: a full agentic loop
 /// with a `spawn_subagent` tool for dynamic subagent delegation.
-#[allow(clippy::too_many_arguments)]
+#[expect(
+    clippy::too_many_arguments,
+    reason = "everything the lead's run is given by its dispatcher"
+)]
 pub async fn run_lead_agent(
     lead_agent: &SubAgent,
     task_description: &str,

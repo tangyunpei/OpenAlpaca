@@ -54,7 +54,7 @@ pub struct SessionsArgs {
     pub format: OutputFormat,
 }
 
-#[derive(Subcommand)]
+#[derive(Subcommand, Debug)]
 #[command(defer = true)]
 pub enum SessionsCommands {
     /// Delete a conversation: its rows and its transcript on disk
@@ -88,7 +88,10 @@ pub struct SessionItem {
 #[derive(Debug, Deserialize)]
 pub(crate) struct SessionsResponse {
     sessions: Vec<SessionItem>,
-    #[allow(dead_code)]
+    #[expect(
+        dead_code,
+        reason = "the daemon's count; the CLI prints the rows it was sent"
+    )]
     total: i64,
 }
 

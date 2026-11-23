@@ -119,7 +119,7 @@ fn canonicalize_timestamp_normalizes_offsets_and_subseconds() {
         "2026-06-01T00:00:00Z"
     );
     let err = canonicalize_timestamp("valid_to", "June 2026").unwrap_err();
-    assert!(matches!(err, IndexError::InvalidInput(m) if m.contains("valid_to")));
+    std::assert_matches!(err, IndexError::InvalidInput(m) if m.contains("valid_to"));
 }
 
 // ============================================================================
@@ -526,7 +526,7 @@ mod query_tests {
         assert_eq!(split_scripts("在gui里"), "在 gui 里");
         assert_eq!(split_scripts("用户喜欢简洁的回答"), "用户喜欢简洁的回答");
         assert_eq!(split_scripts("ภาษาไทยabc"), "ภาษาไทย abc");
-        assert!(matches!(split_scripts("plain english"), Cow::Borrowed(_)));
+        std::assert_matches!(split_scripts("plain english"), Cow::Borrowed(_));
         assert_eq!(split_scripts("简\"洁"), "简\"洁");
         assert_eq!(split_scripts(""), "");
         let text = "发版前先看一遍commit记录, 2026年7月";
@@ -699,13 +699,12 @@ fn upsert_refuses_an_over_size_body_and_bad_timestamps() {
     let index = ready_index();
     let big = record("n1", "Big", &"x".repeat(MAX_NOTE_BYTES + 1));
     let err = index.upsert(&big).unwrap_err();
-    assert!(matches!(err, IndexError::InvalidInput(m) if m.contains("32768")));
+    std::assert_matches!(err, IndexError::InvalidInput(m) if m.contains("32768"));
     let ok = record("n1", "Big", &"x".repeat(MAX_NOTE_BYTES));
     index.upsert(&ok).unwrap();
     let mut bad = record("n2", "Bad", "body");
     bad.valid_to = Some("June".into());
-    assert!(
-        matches!(index.upsert(&bad).unwrap_err(), IndexError::InvalidInput(m) if m.contains("valid_to"))
+    std::assert_matches!(index.upsert(&bad).unwrap_err(), IndexError::InvalidInput(m) if m.contains("valid_to")
     );
     let mut bad = record("n3", "Bad", "body");
     bad.updated_at = "yesterday".into();
@@ -833,7 +832,7 @@ fn replace_partition_touches_only_that_partition() {
     // A record naming another partition is refused before anything changes.
     let stray = record("s", "S", "s");
     let err = index.replace_partition("home-q", &[stray]).unwrap_err();
-    assert!(matches!(err, IndexError::InvalidInput(_)));
+    std::assert_matches!(err, IndexError::InvalidInput(_));
     assert!(index.get("home-q", "q2").unwrap().is_some());
 }
 
@@ -1300,15 +1299,14 @@ fn search_validates_the_limit_and_the_query() {
     let index = ready_index();
     let mut bad = q("x");
     bad.limit = 0;
-    assert!(
-        matches!(index.search(&bad).unwrap_err(), IndexError::InvalidInput(m) if m.contains("limit"))
+    std::assert_matches!(index.search(&bad).unwrap_err(), IndexError::InvalidInput(m) if m.contains("limit")
     );
     bad.limit = MAX_LIMIT + 1;
     assert!(index.search(&bad).is_err());
-    assert!(matches!(
+    std::assert_matches!(
         index.search(&q("")).unwrap_err(),
         IndexError::InvalidInput(_)
-    ));
+    );
     assert!(index.search(&q(&"x".repeat(513))).is_err());
     // Punctuation only: nothing routed, nothing found, not refused.
     let r = index.search(&q("???")).unwrap();
@@ -2660,7 +2658,7 @@ fn reconcile_propagates_the_scanner_error_and_records_no_scan() {
     let err = index
         .reconcile("home-p", || Err(std::io::Error::other("boom")))
         .unwrap_err();
-    assert!(matches!(err, IndexError::Io(_)));
+    std::assert_matches!(err, IndexError::Io(_));
     assert_eq!(index.last_scan("home-p").unwrap(), None);
 }
 
@@ -3018,10 +3016,10 @@ fn the_limit_reaches_fifty() {
     query.limit = 50;
     assert_eq!(index.search(&query).unwrap().count, 50);
     query.limit = 51;
-    assert!(matches!(
+    std::assert_matches!(
         index.search(&query).unwrap_err(),
         IndexError::InvalidInput(m) if m.contains("limit")
-    ));
+    );
 }
 
 /// Design 09 §13.1: a historical hit whose window has ended says so, on the

@@ -55,7 +55,10 @@ use crate::AppState;
 /// - **409 `SESSION_ARCHIVED`** for a closed conversation the caller did not
 ///   ask to re-open. Re-opening archives whatever is live on that lane, which
 ///   is a decision, not a side effect of naming an id.
-#[allow(clippy::result_large_err)]
+#[expect(
+    clippy::result_large_err,
+    reason = "the Err is the session refusal the chat route answers with"
+)]
 fn target_session(
     db: &openalpaca_storage::Database,
     bus: &openalpaca_core::bus::EventBus,
@@ -154,7 +157,10 @@ fn target_session(
 /// downstream — a first binding, not a re-point. A request that names no
 /// session keeps R48 exactly: the header is the turn's project, and a project
 /// that differs from the lane's active session opens a new conversation.
-#[allow(clippy::result_large_err)]
+#[expect(
+    clippy::result_large_err,
+    reason = "the Err is target_session's refusal, passed up as it is"
+)]
 fn resolve_turn_target(
     db: &openalpaca_storage::Database,
     bus: &openalpaca_core::bus::EventBus,
@@ -192,7 +198,10 @@ fn lane_refusal(lane_key: &str, owner_id: &str) -> Option<Response> {
 ///
 /// A named session is checked against the lane the caller already passed
 /// ownership for, so the query cannot reach across lanes by naming an id.
-#[allow(clippy::result_large_err)]
+#[expect(
+    clippy::result_large_err,
+    reason = "the Err is the not-found or database Response of the history route"
+)]
 fn resolve_history_session(
     db: &openalpaca_storage::Database,
     lane_key: &str,
@@ -261,7 +270,10 @@ fn resolve_history_session(
 /// line and in the session log, for answers a local model wrote. `None` when
 /// nothing is routable at all — there is then no model to name, and the turn
 /// itself will fail at the router with `NoRoutableModel`.
-#[allow(clippy::result_large_err)]
+#[expect(
+    clippy::result_large_err,
+    reason = "the Err is the unknown-model or no-model refusal of the chat route"
+)]
 fn resolve_turn_model(
     router: Option<&openalpaca_llm::LlmRouter>,
     requested: Option<&str>,
@@ -316,7 +328,10 @@ struct TurnPlan {
 /// The attachment preflight is `openalpaca_core::chat::preflight_attachments` —
 /// the same function `ChatService::send_message` runs, not a second copy of the
 /// rule.
-#[allow(clippy::result_large_err)]
+#[expect(
+    clippy::result_large_err,
+    reason = "the Err is a refusal Response the chat route sends as it is"
+)]
 fn plan_turn(
     db: &openalpaca_storage::Database,
     bus: &openalpaca_core::bus::EventBus,
@@ -1831,11 +1846,11 @@ pub(crate) mod tests {
             repo.active_session_id("user1:gui").unwrap().as_deref(),
             Some(archived.id.as_str())
         );
-        assert!(matches!(
+        std::assert_matches!(
             rx.try_recv(),
             Ok(openalpaca_core::events::SystemEvent::SessionChanged { ref session_id, .. })
                 if session_id == &archived.id
-        ));
+        );
     }
 
     // ── R49: a named session brings its own workspace ───────────────

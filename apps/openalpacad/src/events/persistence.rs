@@ -615,7 +615,10 @@ impl EventBroadcaster {
     /// writer can find this row and add the index half — `log_seq`, the
     /// previews, `result_ref` — rather than writing a second row for the same
     /// call.
-    #[allow(clippy::too_many_arguments)]
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "the tool call's facts, written to its tool_execution_log row"
+    )]
     pub(super) fn persist_tool_execution(
         &self,
         agent_id: &str,

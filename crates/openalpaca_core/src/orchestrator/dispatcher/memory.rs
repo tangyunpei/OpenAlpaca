@@ -17,7 +17,10 @@ use std::sync::Arc;
 /// cancellable at shutdown, attributed to the run, never fire-and-forget.
 /// A failed or cancelled run teaches nothing, so nothing is started for
 /// one; nor without a memory service (a daemon with no store).
-#[allow(clippy::too_many_arguments)]
+#[expect(
+    clippy::too_many_arguments,
+    reason = "the extraction's services and the finished run's facts"
+)]
 pub(in crate::orchestrator) fn spawn_task_memory_extraction(
     background: &BackgroundJobs,
     memory_service: Option<Arc<MemoryService>>,

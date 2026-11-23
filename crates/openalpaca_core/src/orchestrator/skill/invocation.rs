@@ -36,7 +36,10 @@ use uuid::Uuid;
 
 impl Orchestrator {
     /// Inner implementation of skill invocation (separated for lifecycle event wrapping).
-    #[allow(clippy::too_many_arguments)]
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "the turn's context, as handle_skill_invocation passes it"
+    )]
     pub(in crate::orchestrator) async fn handle_skill_invocation_inner(
         &self,
         request_id: Uuid,
@@ -1222,7 +1225,10 @@ impl Orchestrator {
     /// emitted by the `handle_skill_invocation` wrapper, which this path
     /// shares with file-based skills. No LLM router is involved — token and
     /// cost fields in the result are zero.
-    #[allow(clippy::too_many_arguments)]
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "the turn's context plus the plugin and its executor"
+    )]
     async fn invoke_plugin_skill(
         &self,
         request_id: Uuid,

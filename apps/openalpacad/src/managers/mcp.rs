@@ -604,7 +604,6 @@ impl McpSupervisor {
     /// arguments, not a post-construction installer: a write-once setter left a
     /// window — however short — in which a crash's dependent scan could name
     /// nothing, and there is no caller that wants one.
-    #[allow(clippy::too_many_arguments)]
     pub fn new(
         config_path: PathBuf,
         tool_registry: Arc<ToolRegistry>,
@@ -1144,7 +1143,13 @@ impl McpSupervisor {
 
         // E2 — re-resolve `bearer_env`/`api_key_env` from the process env, so a
         // rotated credential takes effect here without a restart.
-        #[allow(unused_mut)] // only a test build adds to it
+        #[cfg_attr(
+            not(test),
+            expect(
+                unused_mut,
+                reason = "only a test build adds the inherited pairs to it"
+            )
+        )]
         let mut client_config = match build_client_config(name, cfg, defaults, self.inherited_env())
         {
             Ok(c) => c,

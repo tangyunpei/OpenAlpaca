@@ -65,6 +65,7 @@ pub fn handle_link_token(
 }
 
 /// Result of a link operation.
+#[derive(Debug)]
 pub enum LinkResult {
     /// Successfully linked to the given global_user_id
     Success(String),

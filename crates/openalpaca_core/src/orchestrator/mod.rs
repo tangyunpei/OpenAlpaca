@@ -341,7 +341,10 @@ pub(crate) fn wrap_untrusted_context(
 
 
 impl Orchestrator {
-    #[allow(clippy::too_many_arguments)]
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "the shared services the orchestrator is built from"
+    )]
     pub fn new(
         shared_context: Arc<SharedContext>,
         lane_manager: Arc<LaneManager>,

@@ -11,7 +11,10 @@ use std::path::Path;
 use std::sync::Arc;
 use tracing::{info, warn};
 
-#[allow(clippy::too_many_arguments)]
+#[expect(
+    clippy::too_many_arguments,
+    reason = "the startup handles the builtin tools are built from"
+)]
 pub(super) async fn build_tool_registry(
     config_base_dir: &Path,
     db: &Database,

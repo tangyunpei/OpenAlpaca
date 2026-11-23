@@ -605,7 +605,7 @@ fn a_plugin_removal_leaves_a_shipped_template() {
     let shipped = reg
         .get_template("writing_agent")
         .expect("the shipped template stays");
-    assert!(matches!(shipped.source, AgentSource::Internal));
+    std::assert_matches!(shipped.source, AgentSource::Internal);
     assert!(reg.template_tombstone("writing_agent").is_none());
 }
 
@@ -969,10 +969,10 @@ fn a_refused_plugin_template_is_listed_plugin_refused() {
         }],
         "listed once, however often the plugin asks"
     );
-    assert!(matches!(
+    std::assert_matches!(
         registry.get_template("general_agent").unwrap().source,
         AgentSource::Internal
-    ));
+    );
 
     registry.forget_plugin_refusals("acme");
     assert!(

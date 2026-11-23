@@ -896,7 +896,10 @@ fn every_typed_read_reads_its_sample_and_every_name_it_reads_is_sent() {
 #[test]
 fn a_struct_field_the_sample_lacks_fails_its_hold() {
     #[derive(serde::Deserialize)]
-    #[allow(dead_code)]
+    #[expect(
+        dead_code,
+        reason = "built only to show that a renamed field fails the read"
+    )]
     struct Renamed {
         default_lane: String,
     }
@@ -907,7 +910,10 @@ fn a_struct_field_the_sample_lacks_fails_its_hold() {
         "a renamed required field fails the read"
     );
     #[derive(serde::Deserialize)]
-    #[allow(dead_code)]
+    #[expect(
+        dead_code,
+        reason = "built only to show that an optional field passes the read"
+    )]
     struct Optional {
         #[serde(default)]
         default_lane: Option<String>,

@@ -150,7 +150,10 @@ pub fn main_loop_memory_guidance() -> &'static str {
 /// (skipped when no router is configured — the echo-stub path executes no
 /// tools); `max_cost` is the caller's loop budget, threaded as the nested
 /// skill invocation's budget ceiling.
-#[allow(clippy::too_many_arguments)]
+#[expect(
+    clippy::too_many_arguments,
+    reason = "the handles the per-request tools are built from"
+)]
 pub fn main_loop_tool_set(
     task_dispatcher: Arc<TaskDispatcher>,
     shared_context: Arc<SharedContext>,
@@ -429,7 +432,10 @@ mod tests {
         )
     }
 
-    #[allow(clippy::too_many_arguments)]
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "the tests' builder for main_loop_tool_set's inputs"
+    )]
     fn build_with(
         shared: Arc<SharedContext>,
         dispatcher: Arc<TaskDispatcher>,

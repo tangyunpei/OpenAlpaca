@@ -31,7 +31,7 @@ pub struct PersonaArgs {
     pub command: PersonaCommands,
 }
 
-#[derive(Subcommand)]
+#[derive(Subcommand, Debug)]
 #[command(defer = true)]
 pub enum PersonaCommands {
     /// Print a persona document as the daemon holds it
@@ -299,18 +299,18 @@ mod tests {
 
     #[test]
     fn show_and_edit_take_user_and_nothing_else() {
-        assert!(matches!(
+        std::assert_matches!(
             try_parse(&["show", "user"]),
             Ok(PersonaCommands::Show {
                 target: PersonaTarget::User
             })
-        ));
-        assert!(matches!(
+        );
+        std::assert_matches!(
             try_parse(&["edit", "user"]),
             Ok(PersonaCommands::Edit {
                 target: PersonaTarget::User
             })
-        ));
+        );
         // SOUL.md and IDENTITY.md have no user-directed route (MD-3 gives
         // USER.md the editor), so they are a parse error, not a `user`.
         assert!(try_parse(&["show", "soul"]).is_err());

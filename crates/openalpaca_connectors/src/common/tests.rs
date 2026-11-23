@@ -14,7 +14,7 @@ fn test_resolve_principal_untrusted() {
 
     // Test untrusted
     let (principal, _) = resolve_principal(&repo, "telegram", "user123", Some("Alice")).unwrap();
-    assert!(matches!(principal, Principal::External { id, .. } if id == "user123"));
+    std::assert_matches!(principal, Principal::External { id, .. } if id == "user123");
 }
 
 #[test]
@@ -31,7 +31,7 @@ fn test_resolve_principal_trusted() {
 
     // Test trusted
     let (principal, _) = resolve_principal(&repo, "telegram", "user123", None).unwrap();
-    assert!(matches!(principal, Principal::User { global_id } if global_id == "global1"));
+    std::assert_matches!(principal, Principal::User { global_id } if global_id == "global1");
 }
 
 #[test]
@@ -47,7 +47,7 @@ fn test_handle_link_token_flow() {
 
     // Consume
     let res = handle_link_token(&repo, "TOKEN1", ext.id).unwrap();
-    assert!(matches!(res, LinkResult::Success(uid) if uid == "global1"));
+    std::assert_matches!(res, LinkResult::Success(uid) if uid == "global1");
 
     // Verify linked in DB
     let ext_after = repo

@@ -964,10 +964,10 @@ fn an_absent_sidecar_is_a_spawn_refusal_of_its_own() {
         other => panic!("not the sidecar missing: {other:?}"),
     }
     let elsewhere = anyhow::anyhow!("Failed to open the daemon log: permission denied");
-    assert!(matches!(
+    std::assert_matches!(
         reuse::spawn_refusal(&elsewhere),
         reuse::SpawnRefusal::Failed(_)
-    ));
+    );
 }
 
 // ============================================================================
@@ -1369,20 +1369,20 @@ fn the_health_probe_reads_a_whole_answer_on_a_connection_kept_open() {
     let server =
         FakeServer::answering_and_holding(http_response("200 OK", "application/json", &body));
     let started = std::time::Instant::now();
-    assert!(matches!(
+    std::assert_matches!(
         on_one_thread(probe_health("127.0.0.1", server.port)),
         Health::Answered { .. }
-    ));
+    );
     assert!(started.elapsed() < HEALTH_PROBE_TIMEOUT);
 }
 
 #[test]
 fn the_health_probe_finds_nothing_at_a_closed_port() {
     let _guard = HomeStoreGuard::set("probe-closed");
-    assert!(matches!(
+    std::assert_matches!(
         on_one_thread(probe_health("127.0.0.1", closed_port())),
         Health::Unanswered(_)
-    ));
+    );
 }
 
 /// A port that accepts and never answers (a daemon bound and not yet
@@ -1393,10 +1393,10 @@ fn the_health_probe_reads_a_bound_port_that_never_answers_as_no_answer() {
     let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("loopback listener");
     let port = listener.local_addr().expect("port").port();
     let started = std::time::Instant::now();
-    assert!(matches!(
+    std::assert_matches!(
         on_one_thread(probe_health("127.0.0.1", port)),
         Health::Unanswered(_)
-    ));
+    );
     assert!(started.elapsed() >= HEALTH_PROBE_TIMEOUT);
     drop(listener);
 }

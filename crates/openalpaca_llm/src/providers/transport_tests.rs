@@ -478,7 +478,7 @@ async fn a_body_that_is_not_json_stays_a_serialization_error() {
         .unwrap_err();
 
     assert!(!err.is_transient(), "{err}");
-    assert!(matches!(err, LlmError::Serialization(_)), "{err:?}");
+    std::assert_matches!(err, LlmError::Serialization(_), "{err:?}");
     assert_eq!(
         err.to_string(),
         format!(
@@ -511,7 +511,7 @@ async fn a_stream_cut_mid_answer_says_why() {
     };
 
     assert!(err.is_transient(), "{err}");
-    assert!(matches!(err, LlmError::Stream(_)), "{err:?}");
+    std::assert_matches!(err, LlmError::Stream(_), "{err:?}");
     assert_eq!(
         err.to_string(),
         "Stream error: error decoding response body: request or response body error: error \
@@ -631,9 +631,8 @@ async fn a_test_build_refuses_anthropics_real_endpoint() {
         .await
         .unwrap_err();
     for err in [chat, stream, list] {
-        assert!(
-            matches!(&err, LlmError::Config(m)
-                if m.contains("test-endpoint-guard") && m.contains("(api.anthropic.com)")),
+        std::assert_matches!(&err, LlmError::Config(m)
+                if m.contains("test-endpoint-guard") && m.contains("(api.anthropic.com)"),
             "{err}"
         );
         assert!(!err.is_transient(), "{err}");
@@ -711,9 +710,8 @@ async fn a_test_build_refuses_openais_real_hosts() {
             .await
             .unwrap_err();
         for err in [chat, stream, list] {
-            assert!(
-                matches!(&err, LlmError::Config(m)
-                    if m.contains("test-endpoint-guard") && m.contains(&format!("({host})"))),
+            std::assert_matches!(&err, LlmError::Config(m)
+                    if m.contains("test-endpoint-guard") && m.contains(&format!("({host})")),
                 "{err}"
             );
             assert!(!err.is_transient(), "{err}");

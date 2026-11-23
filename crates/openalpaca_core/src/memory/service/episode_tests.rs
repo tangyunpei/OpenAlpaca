@@ -171,13 +171,13 @@ fn the_summary_provenance_writes_only_a_plain_episode() {
             .service
             .store(&extraction(&h, None), input)
             .expect_err(why);
-        assert!(matches!(err, MemoryError::InvalidInput(_)), "{why}: {err}");
+        std::assert_matches!(err, MemoryError::InvalidInput(_), "{why}: {err}");
     }
     let err = h
         .service
         .store(&h.user(ALICE, None), base())
         .expect_err("a user-directed write carries no provenance");
-    assert!(matches!(err, MemoryError::InvalidInput(_)), "{err}");
+    std::assert_matches!(err, MemoryError::InvalidInput(_), "{err}");
 }
 
 /// **§13.3: "automatic recall excludes" a summary, "per-turn recall and the

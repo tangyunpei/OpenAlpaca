@@ -141,10 +141,10 @@ fn a_template_file_that_no_longer_parses_withholds_its_id() {
     );
     let provenance = f.registry.provenance("reader").expect("the file holds it");
     assert_eq!(provenance.layer, TemplateLayer::File);
-    assert!(matches!(
+    std::assert_matches!(
         provenance.state,
         TemplateState::Withheld { path: ref p, .. } if *p == path
-    ));
+    );
     assert_eq!(provenance.warnings.len(), 1, "{:?}", provenance.warnings);
 
     // A rescan of the same directory keeps it withheld.
@@ -466,8 +466,7 @@ fn a_broken_file_never_takes_the_id_of_a_file_that_parses() {
         f.rescan(LoadMode::Reload).unwrap();
         assert!(f.ids().is_empty());
         let state = f.registry.provenance("reader").unwrap().state;
-        assert!(
-            matches!(state, TemplateState::Withheld { ref path, .. } if *path == copy),
+        std::assert_matches!(state, TemplateState::Withheld { ref path, .. } if *path == copy,
             "{state:?}"
         );
     }

@@ -709,7 +709,7 @@ const PAUSE_ACTION: &str = "pause";
 ///
 /// A run this caller cannot see gets the same `404` a missing one does — never
 /// a `403`, which would confirm that the id belongs to somebody.
-#[allow(
+#[expect(
     clippy::result_large_err,
     reason = "the Err is the route's answer, an axum Response"
 )]
@@ -1011,7 +1011,7 @@ fn is_steerable(task: &Task, shared_context: &SharedContext, owner_id: &str) -> 
 
 /// Apply one steering push, as a `Response`. Split out from the handler so
 /// every status code is provable without a router or an `AppState`.
-#[allow(
+#[expect(
     clippy::too_many_arguments,
     reason = "the handler's state, passed apart so no AppState is needed"
 )]
@@ -2662,10 +2662,7 @@ pub(crate) mod tests {
         let (code, body) = split(start_task(&orchestrator, &db, LAUNCH_OWNER, "task-1", None)).await;
         assert_eq!(code, StatusCode::OK);
         assert_eq!(body["task_id"], "task-1", "D5: the id does not change");
-        assert!(matches!(
-            body["status"].as_str(),
-            Some("queued") | Some("running")
-        ));
+        std::assert_matches!(body["status"].as_str(), Some("queued") | Some("running"));
         // One row before, one row after — and it is the same row.
         assert_eq!(TaskRepository::new(&db).list_recent(10).unwrap().len(), 1);
     }
@@ -2951,11 +2948,9 @@ pub(crate) mod tests {
         assert_eq!(body, serde_json::json!({ "error": PAUSE_UNSUPPORTED }));
         let row = TaskRepository::new(&db).get("task-1").unwrap().unwrap();
         assert_eq!(row.status, TaskStatus::Running, "the row is not paused");
-        assert!(
-            matches!(
-                events.try_recv(),
-                Err(tokio::sync::broadcast::error::TryRecvError::Empty)
-            ),
+        std::assert_matches!(
+            events.try_recv(),
+            Err(tokio::sync::broadcast::error::TryRecvError::Empty),
             "no TaskUpdated is published"
         );
     }

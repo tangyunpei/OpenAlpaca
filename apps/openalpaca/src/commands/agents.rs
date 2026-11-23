@@ -18,7 +18,7 @@ pub struct AgentsArgs {
     pub command: Option<AgentsCommands>,
 }
 
-#[derive(Subcommand)]
+#[derive(Subcommand, Debug)]
 #[command(defer = true)]
 pub enum AgentsCommands {
     /// List agents

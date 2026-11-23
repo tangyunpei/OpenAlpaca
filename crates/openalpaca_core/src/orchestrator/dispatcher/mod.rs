@@ -96,7 +96,10 @@ pub struct TaskDispatcher {
 }
 
 impl TaskDispatcher {
-    #[allow(clippy::too_many_arguments)]
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "the shared services and stores the dispatcher holds"
+    )]
     pub fn new(
         shared_context: Arc<SharedContext>,
         lane_manager: Arc<LaneManager>,

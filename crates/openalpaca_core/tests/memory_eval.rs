@@ -4383,7 +4383,10 @@ async fn knowledge_of(
 /// ([`superseded_old_hit`]), one more coverage-judge call on the old gold
 /// with the same frozen prompt, shown its hits without the new note — at
 /// most one call a pair (8 in all), none for a pair with no link.
-#[allow(clippy::too_many_arguments)]
+#[expect(
+    clippy::too_many_arguments,
+    reason = "the link check's inputs from the run's state"
+)]
 async fn check_links(
     router: &openalpaca_llm::LlmRouter,
     mut gate: Option<&mut JudgeGate>,
@@ -5402,7 +5405,10 @@ fn tally_restatements(results: &mut LearningResults) {
 /// Everything §7.3 measures on a store the corpus taught (L, L0, a replay):
 /// the dump, coverage, noise, the changed facts, the restatements, aliases
 /// and keys. The forced re-run and the invariants come after.
-#[allow(clippy::too_many_arguments)]
+#[expect(
+    clippy::too_many_arguments,
+    reason = "what the measurement reads from the run's state"
+)]
 async fn measure_learning(
     router: &openalpaca_llm::LlmRouter,
     mut gate: Option<&mut JudgeGate>,
@@ -5484,7 +5490,10 @@ async fn measure_learning(
 /// The forced re-run (design 09 §7.2): forget the first learned note that is
 /// still active and cites a message, move its session's cursor back to 0,
 /// flush the session again, and look for a note citing a forgotten row.
-#[allow(clippy::too_many_arguments)]
+#[expect(
+    clippy::too_many_arguments,
+    reason = "the stores and records the forced re-run reads and writes"
+)]
 async fn forced_rerun(
     queue: &openalpaca_core::memory::learning::LearningQueue,
     bus: &openalpaca_core::bus::EventBus,
@@ -5661,7 +5670,10 @@ fn archived_reader(report: &serde_json::Value) -> Option<String> {
 /// judge; the report records `rejudged_from`, and the agreement between the
 /// two judges (raw and Cohen's κ) over the rows both judged. `progress` is
 /// handed the report after every row.
-#[allow(clippy::too_many_arguments)]
+#[expect(
+    clippy::too_many_arguments,
+    reason = "the judge, the report and their hashes, each recorded"
+)]
 async fn rejudge_report(
     router: &openalpaca_llm::LlmRouter,
     gate: &mut JudgeGate,
@@ -6009,7 +6021,10 @@ fn corpus_sessions(corpus: &Corpus, system: System, limit: Option<usize>) -> Vec
         .collect()
 }
 
-#[allow(clippy::too_many_arguments)]
+#[expect(
+    clippy::too_many_arguments,
+    reason = "the settings, corpus and coverage files the conditions name"
+)]
 fn learning_conditions(
     cfg: &openalpaca_core::daemon_config::DaemonConfig,
     corpus_path: &Path,
@@ -6978,7 +6993,10 @@ struct AskedQuestions {
 
 /// A replay's conditions: no seeding, the replay's own owner and scratch,
 /// and the questions only when `asked` (the L8 fix slice's H9).
-#[allow(clippy::too_many_arguments)]
+#[expect(
+    clippy::too_many_arguments,
+    reason = "the settings, files and judge a replay's conditions name"
+)]
 fn replay_conditions(
     settings: &Settings,
     replay: &ReplayScratch,
@@ -7341,7 +7359,10 @@ fn print_learning(l: &LearningResults) {
 
 /// The question phase: every question on a fresh lane, as D asks it —
 /// `Orchestrator::handle_message`, which persists nothing — and judged.
-#[allow(clippy::too_many_arguments)]
+#[expect(
+    clippy::too_many_arguments,
+    reason = "the question phase's inputs from the run's state"
+)]
 async fn ask_questions(
     orch: &openalpaca_core::orchestrator::Orchestrator,
     reads: &ReadLog,
@@ -10197,7 +10218,7 @@ async fn the_gateway_feed_maps_every_turn_and_the_forced_rerun_checks() {
         .map(|t| t.row.unwrap_or_else(|| panic!("no row for {t:?}")))
         .collect();
     assert!(
-        rows.windows(2).all(|w| w[0] < w[1]),
+        rows.is_sorted_by(|a, b| a < b),
         "one row per turn, in order"
     );
     for t in &fed.turns {
@@ -12616,6 +12637,7 @@ async fn the_read_recorder_changes_nothing_the_reader_sees() {
             format!("{:?}", w.annotations)
         );
         assert_eq!((&p.version, &p.author), (&w.version, &w.author));
+        // Not assert_matches!: `ToolBackend` has no Debug (a dyn tool, headers).
         assert!(matches!(w.backend, ToolBackend::BuiltIn(_)));
     }
 

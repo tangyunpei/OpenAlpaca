@@ -1606,7 +1606,6 @@ fn register_with_no_annotations_skips_virtual_caps() {
 // ===========================================================================
 
 // Mock provider for lifecycle tests.
-#[allow(dead_code)]
 struct P3dMockProvider {
     capability_name: &'static str,
     target_tool_prefix: &'static str,

@@ -1143,8 +1143,9 @@ command = "{}"
         .call_tool("echo", serde_json::json!({}), None)
         .await
         .expect_err("a sealed client must refuse");
-    assert!(
-        matches!(err, McpError::Closed),
+    std::assert_matches!(
+        err,
+        McpError::Closed,
         "expected Closed (not TransportClosed), got {err:?}"
     );
     assert!(!err.is_retriable(), "Closed must never be retriable");
@@ -1882,8 +1883,9 @@ async fn a_store_that_cannot_be_written_makes_disable_a_500_and_changes_nothing(
     std::fs::set_permissions(h.path(), std::fs::Permissions::from_mode(0o755))
         .expect("restore the config dir");
 
-    assert!(
-        matches!(err, ExtensionError::WriteFailed(_)),
+    std::assert_matches!(
+        err,
+        ExtensionError::WriteFailed(_),
         "expected the 500 shape, got {err:?}"
     );
     let record = h.record("srv").expect("the row survives");
@@ -1924,14 +1926,12 @@ async fn enabling_an_unreachable_command_returns_the_row_with_the_bit_true_and_s
         .await
         .expect("enable returns the row, not an error");
     assert!(row.disposition.0, "the bit is durable");
-    assert!(
-        matches!(
-            row.state,
-            ExtensionState::Failed {
-                reason: FailureReason::Unreachable,
-                ..
-            }
-        ),
+    std::assert_matches!(
+        row.state,
+        ExtensionState::Failed {
+            reason: FailureReason::Unreachable,
+            ..
+        },
         "a command that will not spawn is unreachable, got {:?}",
         row.state
     );
@@ -1960,8 +1960,9 @@ async fn enabling_an_unreachable_command_returns_the_row_with_the_bit_true_and_s
         .record(&mcp("srv"))
         .expect("the restart built a row");
     assert!(after.disposition.0, "the restart read the bit as true");
-    assert!(
-        matches!(after.state, ExtensionState::Failed { .. }),
+    std::assert_matches!(
+        after.state,
+        ExtensionState::Failed { .. },
         "and tried again, got {:?}",
         after.state
     );
@@ -2283,14 +2284,12 @@ command = "{}"
         fourth.contains("reconnect attempts exhausted"),
         "expected ReconnectExhausted, got: {fourth}"
     );
-    assert!(
-        matches!(
-            h.state("srv"),
-            Some(ExtensionState::Failed {
-                reason: FailureReason::Crashed,
-                ..
-            })
-        ),
+    std::assert_matches!(
+        h.state("srv"),
+        Some(ExtensionState::Failed {
+            reason: FailureReason::Crashed,
+            ..
+        }),
         "the row now reads failed/crashed, got {:?}",
         h.state("srv")
     );
@@ -2594,11 +2593,9 @@ async fn a_server_that_dies_at_its_start_leaves_its_stderr_tail_redacted_on_the_
     let (reason, detail) = failure_of(&h, Duration::from_secs(5))
         .await
         .unwrap_or_else(|| panic!("the row reads failed, got {:?}", h.state("srv")));
-    assert!(
-        matches!(
-            reason,
-            FailureReason::ProtocolNegotiationFailed | FailureReason::Unreachable
-        ),
+    std::assert_matches!(
+        reason,
+        FailureReason::ProtocolNegotiationFailed | FailureReason::Unreachable,
         "a death at the start: {reason:?}"
     );
     assert!(
@@ -3003,11 +3000,9 @@ async fn a_refresh_that_finds_its_client_exhausted_leaves_the_stderr_tail_on_the
         }
         let _ = client.list_tools(None).await;
     }
-    assert!(
-        matches!(
-            client.connection_state().await,
-            openalpaca_mcp::ConnectionSnapshot::Failed { .. }
-        ),
+    std::assert_matches!(
+        client.connection_state().await,
+        openalpaca_mcp::ConnectionSnapshot::Failed { .. },
         "the client's reconnects are spent"
     );
     assert!(
@@ -3021,8 +3016,9 @@ async fn a_refresh_that_finds_its_client_exhausted_leaves_the_stderr_tail_on_the
         .supervisor
         .on_tool_list_changed(&mcp("srv"), generation, &client)
         .await;
-    assert!(
-        matches!(refresh, ToolListRefresh::FetchFailed),
+    std::assert_matches!(
+        refresh,
+        ToolListRefresh::FetchFailed,
         "the refresh's fetch fails"
     );
     let (reason, detail) = failure_of(&h, Duration::ZERO)
@@ -3142,11 +3138,9 @@ async fn reload_bumps_the_generation_keeps_the_bit_and_staleifies_a_snapshot() {
 
     // `reload` is not the verb that turns things on.
     h.supervisor.disable(&mcp("srv")).await.expect("disable");
-    assert!(
-        matches!(
-            h.supervisor.reload(&mcp("srv")).await,
-            Err(ExtensionError::NotLoaded)
-        ),
+    std::assert_matches!(
+        h.supervisor.reload(&mcp("srv")).await,
+        Err(ExtensionError::NotLoaded),
         "reload from Disabled is not_loaded"
     );
 }
@@ -3216,8 +3210,9 @@ command = "/definitely/not/a/command/xyzzy"
 "#,
     );
     h.supervisor.reconcile_all().await;
-    assert!(
-        matches!(h.state("srv"), Some(ExtensionState::Failed { .. })),
+    std::assert_matches!(
+        h.state("srv"),
+        Some(ExtensionState::Failed { .. }),
         "the declared command does not exist"
     );
     let failed = h.record("srv").expect("record");
@@ -3338,8 +3333,9 @@ enabled = false
     // The route the GUI drives: W flips the bit on disk, then E0–E5 cannot
     // connect — the `Failed` row §3.4 trigger 2 would retry on a real change.
     let row = h.supervisor.enable(&mcp("srv")).await.expect("enable");
-    assert!(
-        matches!(row.state, ExtensionState::Failed { .. }),
+    std::assert_matches!(
+        row.state,
+        ExtensionState::Failed { .. },
         "the declared command does not exist: {:?}",
         row.state
     );
@@ -3361,8 +3357,9 @@ enabled = false
         after.generation, after_enable,
         "nothing about srv changed, so §3.4's trigger 2 must not fire"
     );
-    assert!(
-        matches!(after.state, ExtensionState::Failed { .. }),
+    std::assert_matches!(
+        after.state,
+        ExtensionState::Failed { .. },
         "and the row is where the enable left it"
     );
     assert!(!other.any_alive(), "the untouched disabled server never started");
@@ -3398,14 +3395,12 @@ async fn an_unparseable_store_keeps_the_server_up_and_parks_a_pseudo_record() {
     let pseudo = h
         .record(CONFIG_PSEUDO_ID)
         .expect("the whole-file pseudo-record appears");
-    assert!(
-        matches!(
-            pseudo.state,
-            ExtensionState::Failed {
-                reason: FailureReason::ConfigInvalid,
-                ..
-            }
-        ),
+    std::assert_matches!(
+        pseudo.state,
+        ExtensionState::Failed {
+            reason: FailureReason::ConfigInvalid,
+            ..
+        },
         "with the parse error, got {:?}",
         pseudo.state
     );
@@ -3418,18 +3413,14 @@ async fn an_unparseable_store_keeps_the_server_up_and_parks_a_pseudo_record() {
     //    its `disable` is not refused up front; it runs W, W cannot write into
     //    a file that does not parse, and that is the `500` write-first
     //    promises, with nothing torn down.
-    assert!(
-        matches!(
-            h.supervisor.disable(&mcp(CONFIG_PSEUDO_ID)).await,
-            Err(ExtensionError::StoreUnreadable(_))
-        ),
+    std::assert_matches!(
+        h.supervisor.disable(&mcp(CONFIG_PSEUDO_ID)).await,
+        Err(ExtensionError::StoreUnreadable(_)),
         "the pseudo-record row is 409 store_unreadable"
     );
-    assert!(
-        matches!(
-            h.supervisor.disable(&mcp("srv")).await,
-            Err(ExtensionError::WriteFailed(_))
-        ),
+    std::assert_matches!(
+        h.supervisor.disable(&mcp("srv")).await,
+        Err(ExtensionError::WriteFailed(_)),
         "a live server's disable is the write-first 500"
     );
     assert_eq!(
@@ -3883,8 +3874,9 @@ async fn a_bring_up_that_fails_after_the_handshake_tears_its_own_handle_down() {
 
     h.supervisor.reconcile_all().await;
 
-    assert!(
-        matches!(h.state("srv"), Some(ExtensionState::Failed { .. })),
+    std::assert_matches!(
+        h.state("srv"),
+        Some(ExtensionState::Failed { .. }),
         "the row reads failed, got {:?}",
         h.state("srv")
     );
@@ -3959,7 +3951,10 @@ Body.
 ";
 
 /// Every `ExtensionCapabilityWithdrawn` frame the bus holds.
-#[allow(clippy::type_complexity)]
+#[expect(
+    clippy::type_complexity,
+    reason = "the withdrawal frame's seven fields, read by position"
+)]
 fn withdrawn_frames(
     rx: &mut tokio::sync::broadcast::Receiver<openalpaca_core::events::SystemEvent>,
 ) -> Vec<(ExtensionId, ExtensionState, WithdrawalCause, Vec<String>, Vec<String>, Vec<String>, String)>
@@ -4122,8 +4117,9 @@ async fn a_reload_that_ends_failed_fires_the_cron_notice() {
 
     let mut events = h.bus.subscribe();
     h.supervisor.reload(&mcp("srv")).await.expect("reload");
-    assert!(
-        matches!(h.state("srv"), Some(ExtensionState::Failed { .. })),
+    std::assert_matches!(
+        h.state("srv"),
+        Some(ExtensionState::Failed { .. }),
         "got {:?}",
         h.state("srv")
     );
@@ -4132,7 +4128,7 @@ async fn a_reload_that_ends_failed_fires_the_cron_notice() {
     assert_eq!(frames.len(), 1, "one transition, one announcement: {frames:?}");
     let (_, state, cause, _, _, cron, _) = &frames[0];
     assert_eq!(*cause, WithdrawalCause::Reload);
-    assert!(matches!(state, ExtensionState::Failed { .. }));
+    std::assert_matches!(state, ExtensionState::Failed { .. });
     assert_eq!(
         cron,
         &vec!["nightly".to_string()],

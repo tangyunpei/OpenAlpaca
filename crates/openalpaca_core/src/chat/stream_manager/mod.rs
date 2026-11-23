@@ -161,7 +161,10 @@ impl StreamSink {
     /// omitted the same way when the turn delivered no note. `continuity`
     /// (design 11 §5) is always sent: `working_state_updated` and
     /// `continued_from`, `false` and `null` on an ordinary turn.
-    #[allow(clippy::too_many_arguments)]
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "the parts of the turn's done frame, sent in one call"
+    )]
     pub fn send_done_with_attachments(
         &self,
         content: &str,
@@ -218,13 +221,16 @@ impl crate::chat::turn_sink::TurnSink for StreamSink {
 
 struct StreamEntry {
     tx: broadcast::Sender<ChatStreamEvent>,
-    #[allow(dead_code)]
+    #[expect(dead_code, reason = "recorded when the stream opens; nothing reads it")]
     created_at: Instant,
     /// Updated on every send (via StreamSink or ChatStreamManager::send());
     /// used by cleanup_stale() to avoid GC'ing active streams.
     /// Shared with StreamSink via Arc so sink sends also refresh it.
     last_active: Arc<Mutex<Instant>>,
-    #[allow(dead_code)]
+    #[expect(
+        dead_code,
+        reason = "recorded with the stream; streams are found by id"
+    )]
     lane_key: String,
 }
 

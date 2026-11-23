@@ -400,7 +400,10 @@ impl<'a> LlmUsageRepository<'a> {
 
     /// Record a completed LLM call: inserts into call log and upserts daily aggregate.
     /// Use status "success" for successful calls, "error" or "cost_exceeded" for failures.
-    #[allow(clippy::too_many_arguments)]
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "the call's facts, for its call log row and the daily total"
+    )]
     pub fn record_and_log(
         &self,
         agent_id: &str,

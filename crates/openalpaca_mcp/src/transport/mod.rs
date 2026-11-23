@@ -161,6 +161,7 @@ pub mod test_utils {
         #[tokio::test]
         async fn the_mock_variant_dispatches_connect() {
             let t = crate::Transport::Mock(MockTransport::new("mock"));
+            // Not assert_matches!: a connection holds rmcp's transport, no Debug.
             assert!(matches!(t.connect().await, Err(McpError::TransportClosed)));
             assert_eq!((t.kind(), t.server_name()), ("mock", "mock"));
             let crate::Transport::Mock(m) = &t else {

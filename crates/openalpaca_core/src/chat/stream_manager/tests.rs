@@ -17,7 +17,7 @@ fn test_send_and_receive() {
     mgr.send(&stream_id, ChatStreamEvent::Thinking).unwrap();
 
     let event = rx.try_recv().unwrap();
-    assert!(matches!(event, ChatStreamEvent::Thinking));
+    std::assert_matches!(event, ChatStreamEvent::Thinking);
 }
 
 #[test]
@@ -312,7 +312,7 @@ fn sink_sends_reasoning_text() {
     sink.send_thinking();
     sink.send_reasoning("the user is asking a classic");
 
-    assert!(matches!(rx.try_recv().unwrap(), ChatStreamEvent::Thinking));
+    std::assert_matches!(rx.try_recv().unwrap(), ChatStreamEvent::Thinking);
     match rx.try_recv().unwrap() {
         ChatStreamEvent::Reasoning { text } => {
             assert_eq!(text, "the user is asking a classic")

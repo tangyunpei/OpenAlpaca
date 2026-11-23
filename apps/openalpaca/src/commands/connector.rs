@@ -29,7 +29,10 @@ pub(crate) struct ConnectorStatus {
     id: String,
     name: String,
     status: String,
-    #[allow(dead_code)]
+    #[expect(
+        dead_code,
+        reason = "sent in the daemon's row; the connector table does not show it"
+    )]
     configured: bool,
 }
 

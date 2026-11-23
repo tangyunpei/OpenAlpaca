@@ -477,7 +477,7 @@ mod tests {
     fn validate_telegram_recipient_default() {
         let result = validate_telegram_recipient("default");
         assert!(result.is_ok());
-        assert!(matches!(result.unwrap(), TelegramRecipient::Default));
+        std::assert_matches!(result.unwrap(), TelegramRecipient::Default);
     }
 
     #[test]
@@ -523,7 +523,7 @@ mod tests {
     fn validate_discord_recipient_default() {
         let result = validate_discord_recipient("default");
         assert!(result.is_ok());
-        assert!(matches!(result.unwrap(), DiscordRecipient::Default));
+        std::assert_matches!(result.unwrap(), DiscordRecipient::Default);
     }
 
     #[test]

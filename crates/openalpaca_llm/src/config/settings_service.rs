@@ -1047,7 +1047,13 @@ impl LlmSettingsService {
     }
 
     /// Build and register a provider that wasn't in the router at startup.
-    #[allow(unused_variables)]
+    #[cfg_attr(
+        not(feature = "openai"),
+        expect(
+            unused_variables,
+            reason = "without the openai feature no arm reads base_url"
+        )
+    )]
     fn register_provider_from_config(
         &self,
         config: &LlmRouterConfig,
@@ -1148,7 +1154,13 @@ impl LlmSettingsService {
                     .with_request_timeout(request_timeout),
                 ))
             }
-            #[allow(unreachable_patterns)]
+            #[cfg_attr(
+                all(feature = "anthropic", feature = "openai", feature = "ollama"),
+                expect(
+                    unreachable_patterns,
+                    reason = "with every provider feature on, each provider has its arm"
+                )
+            )]
             _ => None,
         };
 

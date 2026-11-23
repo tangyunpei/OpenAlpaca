@@ -76,7 +76,6 @@ impl EventBroadcaster {
 
     /// Broadcast a `memory_changed` frame (memory redesign, design §7a). Not
     /// persisted: `persist` answers `Ok(0)` for it, like a shutdown frame.
-    #[allow(clippy::too_many_arguments)]
     pub fn memory_changed(
         &self,
         partition_key: &str,

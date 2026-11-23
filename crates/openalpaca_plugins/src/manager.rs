@@ -87,7 +87,10 @@ const DRAIN_POLL: std::time::Duration = std::time::Duration::from_millis(5);
 /// Emits the declared caps for every tool whose `author` field matches
 /// `plugin:<plugin_name>` — i.e., every tool this plugin registered.
 pub(crate) struct PluginCapabilityProvider {
-    #[allow(dead_code)]
+    #[expect(
+        dead_code,
+        reason = "kept with the provider; tools are matched by author_prefix"
+    )]
     plugin_name: String,
     author_prefix: String,
     virtual_caps: Vec<String>,

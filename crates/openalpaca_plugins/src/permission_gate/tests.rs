@@ -155,8 +155,9 @@ fn a_corrupt_store_is_an_error_and_a_missing_one_is_empty() {
 
     let garbage = "[oops\napproved = yes";
     std::fs::write(tmp.path().join(".permissions.toml"), garbage).unwrap();
-    assert!(
-        matches!(gate.load_table(), Err(PluginError::StoreUnreadable(_))),
+    std::assert_matches!(
+        gate.load_table(),
+        Err(PluginError::StoreUnreadable(_)),
         "one malformed line still lost every approval"
     );
 

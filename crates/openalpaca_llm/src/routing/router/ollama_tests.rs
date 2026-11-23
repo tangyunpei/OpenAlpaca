@@ -214,10 +214,7 @@ async fn an_empty_pool_still_refuses_a_provider_that_needs_a_key() {
         .complete(request("gpt-6.1-sol"))
         .await
         .expect_err("a provider that needs a key and has none cannot be served");
-    assert!(
-        matches!(err, LlmRouterError::AllFallbacksFailed),
-        "{err:?}"
-    );
+    std::assert_matches!(err, LlmRouterError::AllFallbacksFailed, "{err:?}");
     assert_eq!(server.hits("/v1/chat/completions").await, 0);
 }
 
@@ -653,7 +650,7 @@ async fn an_ollama_with_no_models_installed_says_what_to_do() {
         .complete(request("claude-sonnet-5-5"))
         .await
         .expect_err("nothing is installed");
-    assert!(matches!(err, LlmRouterError::NoRoutableModel), "{err:?}");
+    std::assert_matches!(err, LlmRouterError::NoRoutableModel, "{err:?}");
     assert!(err.to_string().contains("ollama pull"), "{err}");
 }
 

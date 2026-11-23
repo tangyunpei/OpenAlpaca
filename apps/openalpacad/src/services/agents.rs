@@ -484,10 +484,10 @@ mod tests {
 
         assert!(!registry.register_template(template));
         let general = registry.get_template("general_agent").unwrap();
-        assert!(matches!(
+        std::assert_matches!(
             general.source,
             openalpaca_core::agent::AgentSource::Internal
-        ));
+        );
         assert_ne!(general.frontmatter.name, "Acme");
     }
 }

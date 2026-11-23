@@ -385,7 +385,6 @@ impl Orchestrator {
     /// `request_workspace_root` is the turn's resolved project root
     /// (`MemoryScopeContext::for_request`, `handlers.rs`), `None` when the
     /// turn carried no project; it is what the message records (F4).
-    #[allow(clippy::too_many_arguments)]
     pub(super) fn handle_steer_prefix(
         &self,
         request_id: uuid::Uuid,
@@ -581,21 +580,21 @@ mod tests {
         let db = Database::open(&dir.path().join("test.db")).unwrap();
 
         let (ctx, lanes, bus) = make_env();
-        assert!(matches!(
+        std::assert_matches!(
             apply_task_action(&ctx, &lanes, &bus, Some(&db), "nope", "cancel"),
             Err(TaskActionError::NotFound)
-        ));
-        assert!(matches!(
+        );
+        std::assert_matches!(
             apply_task_action(&ctx, &lanes, &bus, None, "nope", "cancel"),
             Err(TaskActionError::NotFound)
-        ));
+        );
 
         ctx.task_registry
             .register("t1".to_string(), "Test task".to_string());
-        assert!(matches!(
+        std::assert_matches!(
             apply_task_action(&ctx, &lanes, &bus, Some(&db), "t1", "explode"),
             Err(TaskActionError::UnknownAction)
-        ));
+        );
     }
 
     #[test]

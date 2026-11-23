@@ -672,9 +672,8 @@ mod tests {
             .unwrap()
             .ensure()
             .expect_err("a link is not the scratch folder");
-        assert!(
-            matches!(&err, WorkingFolderRefusal::Unavailable { reason }
-                if reason.contains("is not a folder of its own")),
+        std::assert_matches!(&err, WorkingFolderRefusal::Unavailable { reason }
+                if reason.contains("is not a folder of its own"),
             "{err:?}"
         );
         assert_eq!(
@@ -695,9 +694,8 @@ mod tests {
             .unwrap()
             .ensure()
             .expect_err("a link is not the conversation's folder");
-        assert!(
-            matches!(&err, WorkingFolderRefusal::Unavailable { reason }
-                if reason.contains("is not a folder of its own")),
+        std::assert_matches!(&err, WorkingFolderRefusal::Unavailable { reason }
+                if reason.contains("is not a folder of its own"),
             "{err:?}"
         );
         assert_eq!(std::fs::read_dir(elsewhere.path()).unwrap().count(), 0);
@@ -710,9 +708,8 @@ mod tests {
         assert_eq!(folder.ensure().unwrap(), gp.root.as_path());
         std::fs::remove_dir_all(&gp.root).unwrap();
         let err = folder.ensure().expect_err("the folder is gone");
-        assert!(
-            matches!(&err, WorkingFolderRefusal::Unavailable { reason }
-                if reason.contains("is missing: it is no longer a directory")),
+        std::assert_matches!(&err, WorkingFolderRefusal::Unavailable { reason }
+                if reason.contains("is missing: it is no longer a directory"),
             "{err:?}"
         );
     }
@@ -747,9 +744,8 @@ mod tests {
         let err = folder
             .ensure()
             .expect_err("the root no longer leads to itself");
-        assert!(
-            matches!(&err, WorkingFolderRefusal::Unavailable { reason }
-                if reason.contains("is missing: it is no longer a directory")),
+        std::assert_matches!(&err, WorkingFolderRefusal::Unavailable { reason }
+                if reason.contains("is missing: it is no longer a directory"),
             "{err:?}"
         );
         let missing = WorkingFolderRefusal::ProjectMissing {

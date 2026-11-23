@@ -68,7 +68,15 @@ pub fn build_router_with_secret_store(
 }
 
 /// Build router from the hierarchical config format.
-#[allow(unused_variables, unused_mut, unreachable_code)]
+#[cfg_attr(
+    not(any(feature = "anthropic", feature = "openai")),
+    expect(
+        unused_variables,
+        unused_mut,
+        unreachable_code,
+        reason = "with no provider feature the provider loop builds nothing"
+    )
+)]
 fn build_router_from_hierarchical(
     content: &str,
     secret_store: Option<&dyn crate::keys::secret_store::SecretStore>,
@@ -300,7 +308,13 @@ fn build_router_from_hierarchical(
                         .with_request_timeout(request_timeout),
                     )
                 }
-                #[allow(unreachable_patterns)]
+                #[cfg_attr(
+                    all(feature = "anthropic", feature = "openai", feature = "ollama"),
+                    expect(
+                        unreachable_patterns,
+                        reason = "with every provider feature on, each provider has its arm"
+                    )
+                )]
                 _ => {
                     return Err(LlmError::UnknownProvider(provider_name.clone()));
                 }

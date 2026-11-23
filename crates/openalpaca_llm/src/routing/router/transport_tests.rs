@@ -261,7 +261,7 @@ async fn a_request_timeout_is_asked_once_per_rung_and_held_to_the_bound() {
     for model in models {
         assert_eq!(hits(&server, model).await, 1, "{model} asked once: {err}");
     }
-    assert!(matches!(err, LlmRouterError::AllFallbacksFailed), "{err}");
+    std::assert_matches!(err, LlmRouterError::AllFallbacksFailed, "{err}");
     // What the caller is told: the chain's own words, not the provider's; the
     // first rung's cause is only in the router's warning in the log.
     assert_eq!(err.to_string(), "All fallback models failed");
@@ -298,14 +298,13 @@ async fn a_streamed_attempt_and_its_non_streaming_retry_are_held_to_the_bound() 
         1,
         "returned at once: {streamed}"
     );
-    assert!(
-        matches!(&streamed, LlmRouterError::Llm(e) if e.is_transient()),
+    std::assert_matches!(&streamed, LlmRouterError::Llm(e) if e.is_transient(),
         "{streamed}"
     );
 
     let err = router.complete(request(PRIMARY)).await.unwrap_err();
     let elapsed = started.elapsed();
-    assert!(matches!(err, LlmRouterError::AllFallbacksFailed), "{err}");
+    std::assert_matches!(err, LlmRouterError::AllFallbacksFailed, "{err}");
     assert_eq!(hits(&server, PRIMARY).await, 2);
     assert_eq!(hits(&server, FALLBACK_1).await, 1);
     assert_eq!(hits(&server, FALLBACK_2).await, 1);
@@ -637,14 +636,16 @@ async fn a_keys_error_stays_the_answer_when_a_local_rung_spends_its_whole_timeou
         let err = router.complete(request(CLOUD)).await.unwrap_err();
 
         if managed_only {
-            assert!(
-                matches!(err, LlmRouterError::NoApiCompatibleKeys),
+            std::assert_matches!(
+                err,
+                LlmRouterError::NoApiCompatibleKeys,
                 "no API-compatible key: {err} ({err:?})"
             );
             assert_eq!(hits(&cloud, CLOUD).await, 0, "{err}");
         } else {
-            assert!(
-                matches!(err, LlmRouterError::AllKeysRefused),
+            std::assert_matches!(
+                err,
+                LlmRouterError::AllKeysRefused,
                 "every key refused: {err} ({err:?})"
             );
             assert!(hits(&cloud, CLOUD).await >= 1, "{err}");
@@ -677,8 +678,7 @@ async fn a_local_timeout_short_of_its_whole_figure_keeps_the_retry_row() {
     let Err(streamed) = router.complete_streaming(request(PRIMARY)).await else {
         panic!("a silent server opened a stream");
     };
-    assert!(
-        matches!(&streamed, LlmRouterError::Llm(e) if e.is_transient()),
+    std::assert_matches!(&streamed, LlmRouterError::Llm(e) if e.is_transient(),
         "{streamed}"
     );
 
@@ -686,7 +686,7 @@ async fn a_local_timeout_short_of_its_whole_figure_keeps_the_retry_row() {
     let err = router.complete(request(PRIMARY)).await.unwrap_err();
     let elapsed = started.elapsed();
 
-    assert!(matches!(err, LlmRouterError::AllFallbacksFailed), "{err}");
+    std::assert_matches!(err, LlmRouterError::AllFallbacksFailed, "{err}");
     assert_eq!(
         hits(&server, PRIMARY).await,
         2,
@@ -820,7 +820,7 @@ async fn a_connect_timeout_is_retried_on_the_key_and_walks_the_chain() {
 
     let err = router.complete(request(PRIMARY)).await.unwrap_err();
 
-    assert!(matches!(err, LlmRouterError::AllFallbacksFailed), "{err}");
+    std::assert_matches!(err, LlmRouterError::AllFallbacksFailed, "{err}");
     assert_eq!(
         resolver.lookups(),
         3 * 3,
@@ -848,17 +848,16 @@ async fn a_refused_port_is_neither_retried_nor_taken_to_the_chain() {
     let err = router.complete(request(PRIMARY)).await.unwrap_err();
 
     assert_eq!(resolver.lookups(), 1, "one try, no chain: {err}");
-    assert!(
-        matches!(&err, LlmRouterError::Llm(e) if !e.is_transient()),
+    std::assert_matches!(&err, LlmRouterError::Llm(e) if !e.is_transient(),
         "{err}"
     );
-    assert!(matches!(
+    std::assert_matches!(
         &err,
         LlmRouterError::Llm(LlmError::Transport {
             kind: TransportKind::ConnectRefused,
             ..
         })
-    ));
+    );
     assert_eq!(
         err.to_string(),
         format!(
@@ -885,17 +884,16 @@ async fn an_unresolvable_host_is_neither_retried_nor_taken_to_the_chain() {
     let err = router.complete(request(PRIMARY)).await.unwrap_err();
 
     assert_eq!(resolver.lookups(), 1, "one try, no chain: {err}");
-    assert!(
-        matches!(&err, LlmRouterError::Llm(e) if !e.is_transient()),
+    std::assert_matches!(&err, LlmRouterError::Llm(e) if !e.is_transient(),
         "{err}"
     );
-    assert!(matches!(
+    std::assert_matches!(
         &err,
         LlmRouterError::Llm(LlmError::Transport {
             kind: TransportKind::Dns,
             ..
         })
-    ));
+    );
     assert_eq!(
         err.to_string(),
         format!(
@@ -920,14 +918,13 @@ async fn an_answer_that_is_not_http_is_neither_retried_nor_taken_to_the_chain() 
 
     assert_eq!(hits(&server, PRIMARY).await, 1, "one try: {err}");
     assert_eq!(hits(&server, FALLBACK_1).await, 0, "no chain: {err}");
-    assert!(
-        matches!(
+    std::assert_matches!(
             &err,
             LlmRouterError::Llm(e @ LlmError::Transport {
                 kind: TransportKind::TlsOrOther,
                 ..
             }) if !e.is_transient()
-        ),
+        ,
         "{err}"
     );
 }
@@ -951,14 +948,13 @@ async fn an_answer_that_is_not_http_is_not_retried_on_a_multi_thread_runtime() {
 
         assert_eq!(hits(&server, PRIMARY).await, 1, "one try: {err}");
         assert_eq!(hits(&server, FALLBACK_1).await, 0, "no chain: {err}");
-        assert!(
-            matches!(
+        std::assert_matches!(
                 &err,
                 LlmRouterError::Llm(e @ LlmError::Transport {
                     kind: TransportKind::TlsOrOther,
                     ..
                 }) if !e.is_transient()
-            ),
+            ,
             "{err}"
         );
     }
@@ -1042,7 +1038,7 @@ async fn an_open_breaker_fails_complete_at_once_on_every_rung_but_not_a_stream()
     let router = keyed_router(&server.base_url, &models, rates(3));
 
     let err = router.complete(request(PRIMARY)).await.unwrap_err();
-    assert!(matches!(err, LlmRouterError::AllFallbacksFailed), "{err}");
+    std::assert_matches!(err, LlmRouterError::AllFallbacksFailed, "{err}");
     assert_eq!(
         server.requests().await.len(),
         3,
@@ -1052,7 +1048,7 @@ async fn an_open_breaker_fails_complete_at_once_on_every_rung_but_not_a_stream()
     let started = Instant::now();
     let err = router.complete(request(PRIMARY)).await.unwrap_err();
     let elapsed = started.elapsed();
-    assert!(matches!(err, LlmRouterError::AllFallbacksFailed), "{err}");
+    std::assert_matches!(err, LlmRouterError::AllFallbacksFailed, "{err}");
     assert_eq!(server.requests().await.len(), 3, "no rung made a request");
     assert!(elapsed < REQUEST_TIMEOUT, "failed at once: {elapsed:?}");
 

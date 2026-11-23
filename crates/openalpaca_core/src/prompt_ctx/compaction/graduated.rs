@@ -443,8 +443,7 @@ mod tests {
         drop_multimedia(&mut messages);
         let parts = messages[1].parts.as_ref().unwrap();
         assert_eq!(parts.len(), 2);
-        assert!(
-            matches!(&parts[0], ContentPart::Text { text } if text.contains("[image removed"))
+        std::assert_matches!(&parts[0], ContentPart::Text { text } if text.contains("[image removed")
         );
     }
 }

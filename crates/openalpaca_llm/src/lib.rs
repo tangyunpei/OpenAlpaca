@@ -423,9 +423,9 @@ mod tests {
 
         let events = response_to_events(response);
         let n = events.len();
-        assert!(matches!(&events[n - 3], StreamEvent::Turn(t) if *t == turn));
-        assert!(matches!(&events[n - 2], StreamEvent::Usage(_)));
-        assert!(matches!(&events[n - 1], StreamEvent::Done { .. }));
+        std::assert_matches!(&events[n - 3], StreamEvent::Turn(t) if *t == turn);
+        std::assert_matches!(&events[n - 2], StreamEvent::Usage(_));
+        std::assert_matches!(&events[n - 1], StreamEvent::Done { .. });
 
         let stream = Box::pin(futures_util::stream::iter(events.into_iter().map(Ok)));
         let collected = collect_stream(stream, "m".to_string()).await.unwrap();
@@ -447,13 +447,13 @@ mod tests {
         let events = response_to_events(response);
         // TextDelta + Usage + Done = 3 events
         assert_eq!(events.len(), 3);
-        assert!(matches!(&events[0], StreamEvent::TextDelta { text } if text == "Hello"));
-        assert!(matches!(&events[1], StreamEvent::Usage(_)));
-        assert!(matches!(
+        std::assert_matches!(&events[0], StreamEvent::TextDelta { text } if text == "Hello");
+        std::assert_matches!(&events[1], StreamEvent::Usage(_));
+        std::assert_matches!(
             &events[2],
             StreamEvent::Done {
                 finish_reason: FinishReason::Stop
             }
-        ));
+        );
     }
 }

@@ -714,7 +714,7 @@ pub async fn update_extension_handler(
 ///   verbs. Without it a `GET` on a typo answers `200 {}` (an empty config is
 ///   indistinguishable from a missing plugin) and a `POST` writes
 ///   `.config/<typo>.toml` for a plugin that does not exist.
-#[allow(
+#[expect(
     clippy::result_large_err,
     reason = "the Err is the route's answer, an axum Response"
 )]

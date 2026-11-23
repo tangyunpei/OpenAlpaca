@@ -82,7 +82,10 @@ pub(crate) struct GuardedProject {
     _guard: HomeStoreGuard,
     pub(crate) home: tempfile::TempDir,
     /// Held so the project folder lives as long as the test.
-    #[allow(dead_code)]
+    #[expect(
+        dead_code,
+        reason = "held so the project folder lives as long as the test"
+    )]
     pub(crate) project: tempfile::TempDir,
     /// The project's canonical root, as `projects::register` recorded it.
     pub(crate) root: std::path::PathBuf,

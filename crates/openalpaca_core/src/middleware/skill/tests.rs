@@ -449,10 +449,10 @@ fn the_closing_delimiter_is_a_whole_line() {
         parse_skill_frontmatter("---\nname: N\ndescription: d\n---x\n").unwrap_err(),
         SkillParseError::UnterminatedFrontmatter
     );
-    assert!(matches!(
+    std::assert_matches!(
         parse_skill_frontmatter("---\nname: N\ndescription: d\n----\nmore: x\n---\n"),
         Err(SkillParseError::InvalidYaml(_))
-    ));
+    );
     let doc = parse_skill_markdown("---\nname: N\ndescription: d\n--- \r\n## A\nbody\n")
         .expect("trailing space and CR after the delimiter");
     assert_eq!(doc.sections["A"], "body");

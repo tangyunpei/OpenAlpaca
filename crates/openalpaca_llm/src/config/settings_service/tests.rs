@@ -259,7 +259,7 @@ async fn a_failed_write_leaves_the_router_untouched() {
         .set_provider_enabled("openai", false)
         .await
         .expect_err("a refused write is not a toggle");
-    assert!(matches!(err, SetProviderEnabledError::Persist(_)), "{err:?}");
+    std::assert_matches!(err, SetProviderEnabledError::Persist(_), "{err:?}");
 
     assert_eq!(h.text(), hand_authored(), "the file is byte-identical");
     assert!(
@@ -286,8 +286,7 @@ async fn an_unknown_provider_is_refused_before_anything_is_written() {
         .set_provider_enabled("groq", false)
         .await
         .unwrap_err();
-    assert!(
-        matches!(&err, SetProviderEnabledError::UnknownProvider(name) if name == "groq"),
+    std::assert_matches!(&err, SetProviderEnabledError::UnknownProvider(name) if name == "groq",
         "{err:?}"
     );
     assert!(h.writes.lock().unwrap().is_empty());
@@ -587,8 +586,7 @@ context = 8192
         .set_provider_enabled("openai", false)
         .await
         .unwrap_err();
-    assert!(
-        matches!(&err, SetProviderEnabledError::IsDefaultProvider { model, .. } if model == "house-model"),
+    std::assert_matches!(&err, SetProviderEnabledError::IsDefaultProvider { model, .. } if model == "house-model",
         "{err:?}"
     );
 }
@@ -675,8 +673,7 @@ async fn the_default_model_refusal_is_read_under_the_write_lock() {
         .join()
         .unwrap()
         .expect_err("the provider now serving the default model was disabled");
-    assert!(
-        matches!(&err, SetProviderEnabledError::IsDefaultProvider { model, .. } if model == "gpt-6.1-sol"),
+    std::assert_matches!(&err, SetProviderEnabledError::IsDefaultProvider { model, .. } if model == "gpt-6.1-sol",
         "{err:?}"
     );
     assert!(
@@ -725,8 +722,9 @@ fn a_second_writer_in_this_process_waits_for_the_write_lock() {
     // blocked behind a failed test.
     drop(held);
 
-    assert!(
-        matches!(while_held, Err(RecvTimeoutError::Timeout)),
+    std::assert_matches!(
+        while_held,
+        Err(RecvTimeoutError::Timeout),
         "the second writer finished while the first held the lock: {while_held:?}"
     );
     assert_eq!(written_while_held, 0, "a write landed under a held lock");

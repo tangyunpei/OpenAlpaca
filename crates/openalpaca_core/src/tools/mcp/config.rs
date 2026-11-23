@@ -290,14 +290,14 @@ mod tests {
     fn load_missing_returns_not_found() {
         let p = Path::new("/definitely/does/not/exist/mcp.toml");
         let err = McpConfig::load(p).unwrap_err();
-        assert!(matches!(err, LoadError::NotFound(_)), "got {err:?}");
+        std::assert_matches!(err, LoadError::NotFound(_), "got {err:?}");
     }
 
     #[test]
     fn load_malformed_returns_parse_err() {
         let tmp = write_temp_toml("not a valid = = toml [[[");
         let err = McpConfig::load(tmp.path()).unwrap_err();
-        assert!(matches!(err, LoadError::Parse(_)), "got {err:?}");
+        std::assert_matches!(err, LoadError::Parse(_), "got {err:?}");
     }
 
     #[test]
@@ -385,7 +385,7 @@ mod tests {
         "#;
         let tmp = write_temp_toml(toml);
         let err = McpConfig::load(tmp.path()).unwrap_err();
-        assert!(matches!(err, LoadError::InvalidServerName(_)), "got {err:?}");
+        std::assert_matches!(err, LoadError::InvalidServerName(_), "got {err:?}");
     }
 
     #[test]

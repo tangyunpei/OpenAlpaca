@@ -913,10 +913,7 @@ fn the_home_store_what_lies_inside_it_and_what_contains_it_are_refused() {
     ] {
         let err = register(&path).unwrap_err();
         let refusal = err.downcast_ref::<ProjectError>().expect("a ProjectError");
-        assert!(
-            matches!(refusal, ProjectError::IsHome { .. }),
-            "{path:?}: {refusal}"
-        );
+        std::assert_matches!(refusal, ProjectError::IsHome { .. }, "{path:?}: {refusal}");
         assert_eq!(refusal.code(), "WORKSPACE_IS_HOME");
     }
     assert!(!w.projects().exists(), "a refusal creates nothing");
@@ -929,11 +926,9 @@ fn a_path_that_is_not_a_directory_is_refused_and_so_is_a_relative_one() {
     fs::write(&file, "x").unwrap();
     for path in [w.tmp.path().join("work").join("never-made"), file] {
         let err = register(&path).unwrap_err();
-        assert!(
-            matches!(
-                err.downcast_ref::<ProjectError>(),
-                Some(ProjectError::NotADirectory { .. })
-            ),
+        std::assert_matches!(
+            err.downcast_ref::<ProjectError>(),
+            Some(ProjectError::NotADirectory { .. }),
             "{path:?}: {err}"
         );
     }

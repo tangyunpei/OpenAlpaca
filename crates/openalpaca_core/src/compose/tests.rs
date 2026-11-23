@@ -254,7 +254,7 @@ fn test_compose_request_default_modes_table() {
     assert_eq!(p, P::Default);
     assert_eq!(sp, S::Default);
     assert_eq!(dc, D::Default);
-    assert!(matches!(h, H::Default));
+    std::assert_matches!(h, H::Default);
 
     // Social: Minimal + SocialMinimal + Skip + Default.
     let req = ComposeRequest::Social {
@@ -266,7 +266,7 @@ fn test_compose_request_default_modes_table() {
     assert_eq!(p, P::Minimal);
     assert_eq!(sp, S::SocialMinimal);
     assert_eq!(dc, D::Skip);
-    assert!(matches!(h, H::Default));
+    std::assert_matches!(h, H::Default);
 
     // Phase 6: DagNode and LeadAgent both use
     // (Skip, SubagentMinimal, Default, Default). Spec errata (pre-migration
@@ -287,7 +287,7 @@ fn test_compose_request_default_modes_table() {
     assert_eq!(p, P::Skip);
     assert_eq!(sp, S::SubagentMinimal);
     assert_eq!(dc, D::Default);
-    assert!(matches!(h, H::Default));
+    std::assert_matches!(h, H::Default);
 
     // DagNode: Skip + SubagentMinimal + Default + Default.
     use crate::agent::subagent::{
@@ -317,7 +317,7 @@ fn test_compose_request_default_modes_table() {
     assert_eq!(p, P::Skip);
     assert_eq!(sp, S::SubagentMinimal);
     assert_eq!(dc, D::Default);
-    assert!(matches!(h, H::Default));
+    std::assert_matches!(h, H::Default);
 }
 
 // ──────────────────────────────────────────────────────────────────────────
@@ -989,7 +989,7 @@ fn test_history_layer_default_mode_assembles_summary_then_recent_then_current() 
     // Expect 4 messages: summary-as-user, old user, old assistant, current user.
     assert_eq!(out.messages.len(), 4);
     // First is the summary (possibly wrapped).
-    assert!(matches!(out.messages[0].role, Role::User));
+    std::assert_matches!(out.messages[0].role, Role::User);
     // Middle is recent history.
     assert_eq!(out.messages[1].content, "old user msg");
     assert_eq!(out.messages[2].content, "old assistant reply");
@@ -4057,7 +4057,7 @@ fn the_working_state_is_the_history_layers_first_message_as_render_writes_it() {
     assert_eq!(contents.len(), 4);
     assert_eq!(contents[0], state.render(STATE_AT, 4000));
     assert!(contents[0].starts_with(crate::orchestrator::working_state::BLOCK_PREFIX));
-    assert!(matches!(out.messages[0].role, Role::User));
+    std::assert_matches!(out.messages[0].role, Role::User);
     assert_eq!(&contents[1..], ["u1", "a2", "what next?"]);
 }
 
@@ -4339,7 +4339,7 @@ fn the_previous_conversation_is_the_history_layers_first_message_quoted() {
         )
     );
     assert!(contents[0].starts_with(crate::orchestrator::working_state::PREVIOUS_BLOCK_PREFIX));
-    assert!(matches!(out.messages[0].role, Role::User));
+    std::assert_matches!(out.messages[0].role, Role::User);
     assert_eq!(&contents[1..], ["u1", "a2", "go on"]);
 }
 

@@ -95,7 +95,10 @@ pub(super) fn workflow_contract_suffix(steering_attached: bool) -> String {
 /// `max_subagents_per_run` is the run's bound on the subagents it spawns in
 /// all (N-LEAD-6), which `<workflow>`'s step 3 names: the figure the run's
 /// spawn tool enforces (`SpawnSubagentTool::max_subagents_per_run`).
-#[allow(clippy::too_many_arguments)]
+#[expect(
+    clippy::too_many_arguments,
+    reason = "the prompt's inputs: persona, templates, budgets and skills"
+)]
 pub fn build_lead_agent_prompt_from_templates(
     compose_engine: &ComposeEngine,
     base_persona: &str,

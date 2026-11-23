@@ -378,11 +378,9 @@ async fn a_close_makes_two_calls_with_two_labels_when_both_are_due() {
     assert!(episode.contains("<today>2026-"), "{episode}");
     let request = scene.model.seen.lock().unwrap()[2].clone();
     assert_eq!(request.model.as_deref(), Some("claude-haiku-5-5"));
-    assert!(
-        matches!(
-            request.thinking,
-            Some(openalpaca_llm::ThinkingConfig::Disabled)
-        ),
+    std::assert_matches!(
+        request.thinking,
+        Some(openalpaca_llm::ThinkingConfig::Disabled),
         "{:?}",
         request.thinking
     );
@@ -481,11 +479,9 @@ async fn an_episode_is_one_active_extracted_other_note_with_the_designs_fields()
     );
 
     let request = scene.model.first_request();
-    assert!(
-        matches!(
-            request.thinking,
-            Some(openalpaca_llm::ThinkingConfig::Disabled)
-        ),
+    std::assert_matches!(
+        request.thinking,
+        Some(openalpaca_llm::ThinkingConfig::Disabled),
         "{:?}",
         request.thinking
     );

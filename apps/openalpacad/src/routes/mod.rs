@@ -412,7 +412,10 @@ pub(crate) fn request_project_root(workspace_path: Option<&str>) -> Option<Strin
 /// under `projects/`, through `MemoryScopeContext::for_turn`, the same call a
 /// chat turn makes. A root that cannot be recorded is answered by
 /// [`registration_refusal`], and the caller does nothing more.
-#[allow(clippy::result_large_err)]
+#[expect(
+    clippy::result_large_err,
+    reason = "the Err is registration_refusal's answer, returned as it is"
+)]
 pub(crate) fn register_request_project(
     workspace_path: Option<&str>,
 ) -> Result<Option<String>, Response> {

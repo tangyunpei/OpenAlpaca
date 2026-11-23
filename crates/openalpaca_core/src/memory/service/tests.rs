@@ -3203,10 +3203,10 @@ fn forget_takes_ids_with_revisions_and_records_a_tombstone() {
             },
         )
         .unwrap();
-    assert!(matches!(
+    std::assert_matches!(
         stale.results[0].status,
         ForgetItemStatus::RevisionConflict { .. }
-    ));
+    );
 
     let out = h
         .service
@@ -4444,10 +4444,10 @@ fn a_partition_that_fails_its_scan_is_skipped_and_the_rest_are_still_scanned() {
     assert_eq!(report.scanned, 1, "b's one note; a was skipped");
     assert_eq!(report.changes.len(), 1);
     assert_eq!(report.changes[0].note_id, in_b.id);
-    assert!(matches!(
+    std::assert_matches!(
         rx.try_recv(),
         Ok(crate::events::SystemEvent::MemoryChanged { .. })
-    ));
+    );
 }
 
 /// The timer is a stat scan (design §5, *Freshness without a watcher*): a
@@ -4494,10 +4494,10 @@ fn a_quiet_tick_re_hashes_nothing_and_sync_still_does() {
     let synced = h.service.sync(&user).unwrap();
     assert_eq!(synced.changes.len(), 1, "sync re-hashes everything");
     assert_eq!(synced.changes[0].note_id, note.id);
-    assert!(matches!(
+    std::assert_matches!(
         rx.try_recv(),
         Ok(crate::events::SystemEvent::MemoryChanged { .. })
-    ));
+    );
     let view = h
         .service
         .read(
@@ -6940,7 +6940,7 @@ fn the_storage_errors_read_the_same_through_memory_error_and_a_context() {
         assert_eq!(wrapped.chain().count(), 2, "{want}");
     }
     let internal = MemoryError::from(IndexError::Io(std::io::Error::other("x")));
-    assert!(matches!(internal, MemoryError::Internal(_)));
+    std::assert_matches!(internal, MemoryError::Internal(_));
     let invalid = MemoryError::from(IndexError::InvalidInput("q".to_string()));
-    assert!(matches!(invalid, MemoryError::InvalidInput(_)));
+    std::assert_matches!(invalid, MemoryError::InvalidInput(_));
 }

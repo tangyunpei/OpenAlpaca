@@ -595,10 +595,10 @@ fn a_plugin_skill_over_a_bundled_key_gives_it_back_when_it_goes() {
         Arc::new(Stub),
         "p".to_string(),
     );
-    assert!(matches!(
+    std::assert_matches!(
         store.entry("code-review").source,
         SkillSource::Plugin { .. }
-    ));
+    );
 
     store.catalog.remove_plugin_skill("code-review", "p");
 

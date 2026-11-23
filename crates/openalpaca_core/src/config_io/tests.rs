@@ -76,7 +76,7 @@ fn a_malformed_edit_is_aborted_with_the_file_untouched() {
     // makes `toml_edit` synthesize a table with no `transport` tag.
     let err = atomic_write_toml(&path, set_enabled("vanished", false), reparse_servers)
         .expect_err("the re-parse must reject a synthesized block");
-    assert!(matches!(err, ConfigWriteError::Reparse { .. }), "{err}");
+    std::assert_matches!(err, ConfigWriteError::Reparse { .. }, "{err}");
     assert!(err.to_string().contains("no transport"), "{err}");
 
     assert_eq!(
@@ -90,7 +90,7 @@ fn a_malformed_edit_is_aborted_with_the_file_untouched() {
 
     // An edit closure that refuses is the same shape.
     let err = atomic_write_toml(&path, |_| Err("nope".to_string()), reparse_servers).unwrap_err();
-    assert!(matches!(err, ConfigWriteError::Edit(_)), "{err}");
+    std::assert_matches!(err, ConfigWriteError::Edit(_), "{err}");
     assert_eq!(std::fs::read_to_string(&path).unwrap(), HAND_AUTHORED);
 }
 
@@ -274,8 +274,9 @@ fn a_second_writer_in_this_process_waits_for_the_lock() {
     // blocked behind a failed test.
     drop(held);
 
-    assert!(
-        matches!(while_held, Err(RecvTimeoutError::Timeout)),
+    std::assert_matches!(
+        while_held,
+        Err(RecvTimeoutError::Timeout),
         "the second writer finished while the first held the lock: {while_held:?}"
     );
     assert_eq!(

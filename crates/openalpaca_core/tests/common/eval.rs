@@ -3,7 +3,10 @@
 //! live-eval`) and the corpus validation (`tests/memory_eval_corpus.rs`,
 //! a plain `cargo test`). Each test crate includes this file with
 //! `#[path = "common/eval.rs"] mod eval;` and uses what it needs.
-#![allow(dead_code)]
+#![expect(
+    dead_code,
+    reason = "each test crate including this file uses only part of it"
+)]
 
 use openalpaca_storage::hash::sha256_hex;
 use serde::{Deserialize, Serialize};

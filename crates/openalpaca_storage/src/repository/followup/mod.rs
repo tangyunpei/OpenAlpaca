@@ -94,7 +94,10 @@ impl<'a> FollowupRepository<'a> {
     ///
     /// Eight columns, because the row is the contract: every one of them is a
     /// column of `lane_followups` and none can be derived from the others.
-    #[allow(clippy::too_many_arguments)]
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "each argument is its own column of lane_followups"
+    )]
     pub fn queue(
         &self,
         lane_key: &str,

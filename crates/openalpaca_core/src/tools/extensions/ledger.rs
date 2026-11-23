@@ -1293,7 +1293,10 @@ impl ExtensionLedger {
         self.observe(ext, subject, state_word, false, moment, ctx, scope_override);
     }
 
-    #[allow(clippy::too_many_arguments)]
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "the extension, subject, state, moment and scope it observes"
+    )]
     fn observe(
         &self,
         ext: &ExtensionId,

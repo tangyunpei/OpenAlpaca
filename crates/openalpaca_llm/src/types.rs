@@ -698,7 +698,7 @@ mod tests {
         let msg = ChatMessage::assistant("plain text");
         let parts = msg.effective_parts();
         assert_eq!(parts.len(), 1);
-        assert!(matches!(&parts[0], ContentPart::Text { text } if text == "plain text"));
+        std::assert_matches!(&parts[0], ContentPart::Text { text } if text == "plain text");
     }
 
     #[test]

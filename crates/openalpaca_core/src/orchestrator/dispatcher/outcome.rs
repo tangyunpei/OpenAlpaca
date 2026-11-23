@@ -616,7 +616,10 @@ pub(super) fn finalize_task_with_outcome(
 }
 
 /// Update task status in registry + DB + emit event for a completed or failed task.
-#[allow(clippy::too_many_arguments)]
+#[expect(
+    clippy::too_many_arguments,
+    reason = "the task's final fields, for its registry entry, row and event"
+)]
 pub(super) fn finalize_task(
     ctx: &crate::context::SharedContext,
     bus: &crate::bus::EventBus,
@@ -735,7 +738,10 @@ pub(super) fn completion_status_line(
 /// only reason that exists is that this message belongs to a run started
 /// there. `None` means "wherever this lane is talking now", which is what lane
 /// chatter wants, and it creates the lane's session if it has none.
-#[allow(clippy::too_many_arguments)]
+#[expect(
+    clippy::too_many_arguments,
+    reason = "the database and the columns of the message row it writes"
+)]
 pub fn persist_conversation(
     db: &openalpaca_storage::Database,
     lane_key: &str,
@@ -808,7 +814,10 @@ pub fn persist_conversation(
 ///
 /// A failure to link is logged, never fatal: the report itself is the record of
 /// the run, and losing a chip must not lose the message.
-#[allow(clippy::too_many_arguments)]
+#[expect(
+    clippy::too_many_arguments,
+    reason = "the database and the columns of the report's message row"
+)]
 pub fn persist_completion_report(
     db: &openalpaca_storage::Database,
     lane_key: &str,

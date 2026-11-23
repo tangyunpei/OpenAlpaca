@@ -1747,8 +1747,9 @@ mod tests {
         run(&db, &router, cfg, &Arc::new(DashMap::new()), ctx, None).await;
 
         let request = provider.first_request();
-        assert!(
-            matches!(request.thinking, Some(ThinkingConfig::Disabled)),
+        std::assert_matches!(
+            request.thinking,
+            Some(ThinkingConfig::Disabled),
             "the writer must ask for no reasoning, got {:?}",
             request.thinking
         );

@@ -19,8 +19,11 @@ pub struct CreateTaskRequest {
     /// removing a required field breaks every existing caller for nothing.
     ///
     /// Never read, therefore, and that is the ruling rather than an
-    /// oversight — the allow records it so the build stays warning-free.
-    #[allow(dead_code)]
+    /// oversight — the expect records it so the build stays warning-free.
+    #[expect(
+        dead_code,
+        reason = "never read, by ruling: removing it would break every caller"
+    )]
     pub created_by: String,
     /// The lane the run belongs to, and the lane the caller must own: a run
     /// launched onto a lane posts its report into that conversation, so naming

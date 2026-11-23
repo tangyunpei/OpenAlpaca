@@ -21,22 +21,22 @@ fn plain() {
 
 #[test]
 fn list_and_info_are_the_two_verbs() {
-    assert!(matches!(
+    std::assert_matches!(
         parse(&["skills", "list"]),
         SkillsCommands::List {
             format: OutputFormat::Table
         }
-    ));
-    assert!(matches!(
+    );
+    std::assert_matches!(
         parse(&["skills", "list", "--format", "json"]),
         SkillsCommands::List {
             format: OutputFormat::Json
         }
-    ));
-    assert!(matches!(
+    );
+    std::assert_matches!(
         parse(&["skills", "info", "/review"]),
         SkillsCommands::Info { ref skill, .. } if skill == "/review"
-    ));
+    );
     assert!(Harness::try_parse_from(["skills"]).is_err());
     assert!(Harness::try_parse_from(["skills", "info"]).is_err());
 }
@@ -401,14 +401,14 @@ impl TidyStore {
 
 #[test]
 fn tidy_is_a_verb_and_apply_its_one_flag() {
-    assert!(matches!(
+    std::assert_matches!(
         parse(&["skills", "tidy"]),
         SkillsCommands::Tidy { apply: false }
-    ));
-    assert!(matches!(
+    );
+    std::assert_matches!(
         parse(&["skills", "tidy", "--apply"]),
         SkillsCommands::Tidy { apply: true }
-    ));
+    );
 }
 
 /// `--apply` moves the whole unedited folder to

@@ -33,7 +33,10 @@ use crate::AppState;
 /// It also covers every connector attachment, which reaches `UploadStore`
 /// without ever passing through here and always takes [`StoreScope::Home`].
 /// `Err` is the route's answer when the root cannot be recorded.
-#[allow(clippy::result_large_err)]
+#[expect(
+    clippy::result_large_err,
+    reason = "the Err is the upload route's answer when no root is recorded"
+)]
 fn upload_scope(headers: &HeaderMap) -> Result<StoreScope, axum::response::Response> {
     Ok(
         match super::register_request_project(super::workspace_header(headers).as_deref())? {
@@ -932,10 +935,7 @@ pub(crate) mod tests {
 
         // No header at all — every client that chose no project, and the shape
         // every connector attachment reaches the writer with.
-        assert!(matches!(
-            upload_scope(&headers_with(None)),
-            Ok(StoreScope::Home)
-        ));
+        std::assert_matches!(upload_scope(&headers_with(None)), Ok(StoreScope::Home));
     }
 
     #[test]
@@ -946,10 +946,10 @@ pub(crate) mod tests {
 
         let loose = root.join("Downloads");
         std::fs::create_dir(&loose).expect("create dir");
-        assert!(matches!(
+        std::assert_matches!(
             upload_scope(&headers_with(loose.to_str())),
             Ok(StoreScope::Home)
-        ));
+        );
     }
 
     /// `$HOME` is not a project: a header pointing anywhere under it with no
@@ -966,10 +966,10 @@ pub(crate) mod tests {
 
         let documents = home.join("Documents");
         std::fs::create_dir(&documents).expect("create dir");
-        assert!(matches!(
+        std::assert_matches!(
             upload_scope(&headers_with(documents.to_str())),
             Ok(StoreScope::Home)
-        ));
+        );
     }
 
     #[test]

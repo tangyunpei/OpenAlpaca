@@ -11,14 +11,14 @@ fn test_lookup_exact() {
 fn test_lookup_pattern_token() {
     let def = lookup("wechat.token").unwrap();
     assert!(def.sensitive);
-    assert!(matches!(def.kind, ConfigKind::String));
+    std::assert_matches!(def.kind, ConfigKind::String);
 }
 
 #[test]
 fn test_lookup_pattern_enabled() {
     let def = lookup("wechat.enabled").unwrap();
     assert!(!def.sensitive);
-    assert!(matches!(def.kind, ConfigKind::Bool));
+    std::assert_matches!(def.kind, ConfigKind::Bool);
 }
 
 #[test]
@@ -247,7 +247,7 @@ fn test_ai_key_lookup() {
 
     let def = lookup("ai.anthropic.enabled").unwrap();
     assert!(!def.sensitive);
-    assert!(matches!(def.kind, ConfigKind::Bool));
+    std::assert_matches!(def.kind, ConfigKind::Bool);
 }
 
 #[test]

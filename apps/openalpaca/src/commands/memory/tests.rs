@@ -29,7 +29,7 @@ fn parse(args: &[&str]) -> Result<MemoryCommands, clap::Error> {
 /// and the two local verbs take what the design says they take.
 #[test]
 fn the_design_syntax_parses() {
-    assert!(matches!(
+    std::assert_matches!(
         parse(&[
             "list",
             "--kind",
@@ -45,8 +45,8 @@ fn the_design_syntax_parses() {
             limit: 5,
             ..
         })
-    ));
-    assert!(matches!(
+    );
+    std::assert_matches!(
         parse(&[
             "search",
             "vim",
@@ -60,11 +60,11 @@ fn the_design_syntax_parses() {
             at: ScopeArgs { global: true, .. },
             ..
         })
-    ));
-    assert!(matches!(
+    );
+    std::assert_matches!(
         parse(&["show", "55e811b6", "--raw", "--revision", "abc"]),
         Ok(MemoryCommands::Show { raw: true, .. })
-    ));
+    );
     match parse(&[
         "add",
         "--kind",
@@ -99,32 +99,32 @@ fn the_design_syntax_parses() {
         }
         other => panic!("{other:?}"),
     }
-    assert!(matches!(
+    std::assert_matches!(
         parse(&["edit", "55e811b6"]),
         Ok(MemoryCommands::Edit { .. })
-    ));
-    assert!(matches!(
+    );
+    std::assert_matches!(
         parse(&["confirm", "55e811b6"]),
         Ok(MemoryCommands::Confirm { .. })
-    ));
-    assert!(matches!(
+    );
+    std::assert_matches!(
         parse(&["undo", "55e811b6"]),
         Ok(MemoryCommands::Undo { .. })
-    ));
+    );
     match parse(&["forget", "55e811b6", "0c7b2e4a", "--yes"]) {
         Ok(MemoryCommands::Forget { ids, yes: true, .. }) => assert_eq!(ids.len(), 2),
         other => panic!("{other:?}"),
     }
     assert!(parse(&["forget"]).is_err(), "forget needs at least one id");
-    assert!(matches!(parse(&["sync"]), Ok(MemoryCommands::Sync { .. })));
-    assert!(matches!(
+    std::assert_matches!(parse(&["sync"]), Ok(MemoryCommands::Sync { .. }));
+    std::assert_matches!(
         parse(&["doctor", "--repair", "--project", "/tmp/p"]),
         Ok(MemoryCommands::Doctor { repair: true, .. })
-    ));
-    assert!(matches!(
+    );
+    std::assert_matches!(
         parse(&["adopt", "32acea7eb739b08afd959db91e46d450"]),
         Ok(MemoryCommands::Adopt { .. })
-    ));
+    );
     assert!(
         parse(&["list", "--global", "--project", "/tmp/p"]).is_err(),
         "--global and --project exclude each other"
@@ -595,12 +595,12 @@ fn repair_lifts_a_quarantine_and_adopt_rebinds_an_orphan() {
     .unwrap();
     std::fs::remove_file(mine.snapshot_path()).unwrap();
     drop(mine);
-    assert!(matches!(
+    std::assert_matches!(
         Partition::open(&StoreScope::Home, current)
             .unwrap()
             .health(),
         PartitionHealth::Quarantined(_)
-    ));
+    );
     repair_locally(&ScopeArgs {
         global: true,
         ..Default::default()
@@ -1101,18 +1101,18 @@ fn post_body(request: &str) -> serde_json::Value {
 
 #[test]
 fn the_suggestions_verb_parses() {
-    assert!(matches!(
+    std::assert_matches!(
         parse(&["suggestions", "--limit", "5", "--global"]),
         Ok(MemoryCommands::Suggestions {
             limit: 5,
             at: ScopeArgs { global: true, .. },
             ..
         })
-    ));
-    assert!(matches!(
+    );
+    std::assert_matches!(
         parse(&["suggestions"]),
         Ok(MemoryCommands::Suggestions { limit: 20, .. })
-    ));
+    );
 }
 
 /// Design 09 §3.5's line: `<id8>  replace “X” (saved by you) → “B”  from
@@ -1332,15 +1332,15 @@ fn the_search_filters_and_timeline_parse() {
         }
         other => panic!("{other:?}"),
     }
-    assert!(matches!(
+    std::assert_matches!(
         parse(&["timeline", "--query", "office move", "--global"]),
         Ok(MemoryCommands::Timeline {
             query: Some(_),
             at: ScopeArgs { global: true, .. },
             ..
         })
-    ));
-    assert!(matches!(
+    );
+    std::assert_matches!(
         parse(&[
             "timeline",
             "--date",
@@ -1356,7 +1356,7 @@ fn the_search_filters_and_timeline_parse() {
             after: 3,
             ..
         })
-    ));
+    );
     assert!(parse(&["timeline"]).is_err(), "an anchor is required");
     assert!(
         parse(&["timeline", "55e811b6", "--date", "2026-06-10"]).is_err(),

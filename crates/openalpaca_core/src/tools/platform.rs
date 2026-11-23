@@ -241,7 +241,7 @@ mod tests {
         let mut cmd = Command::new(dir.path().join("no-such-program"));
         cmd.current_dir(dir.path());
         let outcome = run_bounded(cmd, Duration::from_secs(5)).await;
-        assert!(matches!(outcome, Err(RunFailure::Spawn(_))), "{outcome:?}");
+        std::assert_matches!(outcome, Err(RunFailure::Spawn(_)), "{outcome:?}");
     }
 
     /// `sleep 30` started in the background, its pid written to `pidfile`,
@@ -278,7 +278,7 @@ mod tests {
             run_bounded(starts_a_sleep(dir.path(), &pidfile), Duration::from_secs(1)).await;
         let pid = pid_from_file(&pidfile, Duration::from_secs(1)).await;
         let _kill = KillOnFail(pid);
-        assert!(matches!(outcome, Err(RunFailure::TimedOut)), "{outcome:?}");
+        std::assert_matches!(outcome, Err(RunFailure::TimedOut), "{outcome:?}");
         assert!(
             wait_until_gone(pid, GONE_WITHIN).await,
             "the background sleep {pid} outlived the timeout"

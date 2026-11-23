@@ -499,8 +499,9 @@ mcp_compatible = true
         std::fs::create_dir(&permissions).unwrap();
 
         let err = h.manager.deny_plugin("echo-test").await.unwrap_err();
-        assert!(
-            matches!(err, ExtensionError::StoreUnreadable(_) | ExtensionError::WriteFailed(_)),
+        std::assert_matches!(
+            err,
+            ExtensionError::StoreUnreadable(_) | ExtensionError::WriteFailed(_),
             "expected the failed write to surface, got {err:?}"
         );
 
@@ -846,14 +847,12 @@ mcp_compatible = true
             "a refused handshake is followed by the shutdown request alone"
         );
         let row = h.row("strict-mcp").await;
-        assert!(
-            matches!(
-                row.state,
-                ExtensionState::Failed {
-                    reason: FailureReason::Unreachable,
-                    ..
-                }
-            ),
+        std::assert_matches!(
+            row.state,
+            ExtensionState::Failed {
+                reason: FailureReason::Unreachable,
+                ..
+            },
             "a refused initialize leaves the row Failed: {:?}",
             row.state
         );
@@ -1169,8 +1168,9 @@ mcp_compatible = true
         let result = channel
             .call("ping", serde_json::json!({"delay_secs": 2}))
             .await;
-        assert!(
-            matches!(result, Err(PluginError::Timeout)),
+        std::assert_matches!(
+            result,
+            Err(PluginError::Timeout),
             "a request with no figure of its own did not end at the channel's default: {result:?}"
         );
         assert!(
@@ -1502,14 +1502,12 @@ mcp_compatible = true
         h.scan().await;
 
         let row = h.row("echo-test").await;
-        assert!(
-            matches!(
-                row.state,
-                ExtensionState::Failed {
-                    reason: FailureReason::ConfigInvalid,
-                    ..
-                }
-            ),
+        std::assert_matches!(
+            row.state,
+            ExtensionState::Failed {
+                reason: FailureReason::ConfigInvalid,
+                ..
+            },
             "expected config_invalid, got {:?}",
             row.state
         );
@@ -1531,8 +1529,9 @@ mcp_compatible = true
             h.manager.deny_plugin("echo-test").await,
             h.manager.approve_plugin("echo-test").await,
         ] {
-            assert!(
-                matches!(result, Err(ExtensionError::StoreUnreadable(_))),
+            std::assert_matches!(
+                result,
+                Err(ExtensionError::StoreUnreadable(_)),
                 "a verb took a transition over an unreadable store: {result:?}"
             );
         }
@@ -1581,14 +1580,12 @@ mcp_compatible = true
         h.scan().await;
 
         let state = h.state("echo-test").await;
-        assert!(
-            matches!(
-                state,
-                ExtensionState::Failed {
-                    reason: FailureReason::ConfigInvalid,
-                    ..
-                }
-            ),
+        std::assert_matches!(
+            state,
+            ExtensionState::Failed {
+                reason: FailureReason::ConfigInvalid,
+                ..
+            },
             "expected config_invalid for an escaping symlink, got {state:?}"
         );
         assert!(
@@ -1624,14 +1621,12 @@ mcp_compatible = true
             .expect("scan hung on a FIFO plugin.toml");
 
         let state = h.state("echo-test").await;
-        assert!(
-            matches!(
-                state,
-                ExtensionState::Failed {
-                    reason: FailureReason::ConfigInvalid,
-                    ..
-                }
-            ),
+        std::assert_matches!(
+            state,
+            ExtensionState::Failed {
+                reason: FailureReason::ConfigInvalid,
+                ..
+            },
             "expected config_invalid for a FIFO manifest, got {state:?}"
         );
     }
@@ -1788,11 +1783,9 @@ mcp_compatible = true
             .agents
             .get_template("writing_agent")
             .expect("the shipped template survives the plugin's disable");
-        assert!(
-            matches!(
-                shipped.source,
-                openalpaca_core::agent::template::AgentSource::Internal
-            ),
+        std::assert_matches!(
+            shipped.source,
+            openalpaca_core::agent::template::AgentSource::Internal,
             "and it is still the shipped one: {:?}",
             shipped.source
         );
@@ -1914,10 +1907,10 @@ mcp_compatible = true
             .skills
             .get("code-review")
             .expect("the file skill named like the plugin's skill id survives its unload");
-        assert!(matches!(
+        std::assert_matches!(
             survivor.source,
             openalpaca_core::orchestrator::skill_catalog::SkillSource::FileBased
-        ));
+        );
     }
 
     // ── C4 — T1 step 3: the dependent scan (§3.2 T1, §7.3) ───────────
@@ -1948,7 +1941,6 @@ mcp_compatible = true
         }
     }
 
-    #[allow(clippy::type_complexity)]
     fn withdrawn_frames(
         rx: &mut tokio::sync::broadcast::Receiver<openalpaca_core::events::SystemEvent>,
     ) -> Vec<(ExtensionId, ExtensionState, WithdrawalCause, Vec<String>, String)> {
@@ -2116,14 +2108,12 @@ mcp_compatible = true
         kill_out_of_band_and_sweep(&h, "echo-test").await;
         let rows = ExtensionSupervisor::list(&*h.manager).await;
         let row = rows.iter().find(|r| r.id.name == "echo-test").unwrap();
-        assert!(
-            matches!(
-                row.state,
-                ExtensionState::Failed {
-                    reason: FailureReason::Crashed,
-                    ..
-                }
-            ),
+        std::assert_matches!(
+            row.state,
+            ExtensionState::Failed {
+                reason: FailureReason::Crashed,
+                ..
+            },
             "expected failed/crashed, got {:?}",
             row.state
         );
@@ -2360,15 +2350,14 @@ mcp_compatible = true
 
         // The impostor is parked, with the bit as read and no child.
         let row = h.row("echo-copy").await;
-        assert!(
-            matches!(
+        std::assert_matches!(
                 &row.state,
                 ExtensionState::Failed {
                     reason: FailureReason::ConfigInvalid,
                     detail,
                     ..
                 } if detail == "manifest name does not match directory"
-            ),
+            ,
             "expected the name-mismatch park, got {:?}",
             row.state
         );
@@ -2408,14 +2397,12 @@ mcp_compatible = true
         h.manager.permission_gate.approve("echo-copy", &[]).unwrap();
         h.scan().await;
 
-        assert!(
-            matches!(
-                h.state("echo-copy").await,
-                ExtensionState::Failed {
-                    reason: FailureReason::ConfigInvalid,
-                    ..
-                }
-            ),
+        std::assert_matches!(
+            h.state("echo-copy").await,
+            ExtensionState::Failed {
+                reason: FailureReason::ConfigInvalid,
+                ..
+            },
             "the scan did not park the impostor"
         );
         assert_eq!(spawn_count(&impostor), 0);
@@ -2423,15 +2410,14 @@ mcp_compatible = true
     }
 
     fn assert_still_parked(row: &ExtensionRecord, impostor: &Path, verb: &str) {
-        assert!(
-            matches!(
+        std::assert_matches!(
                 &row.state,
                 ExtensionState::Failed {
                     reason: FailureReason::ConfigInvalid,
                     detail,
                     ..
                 } if detail == "manifest name does not match directory"
-            ),
+            ,
             "{verb} left the name-mismatch row at {:?}",
             row.state
         );
@@ -2510,14 +2496,12 @@ mcp_compatible = true
 
         assert!(!h.holds_process("echo-test").await, "T4 kept the dead handle");
         assert!(!h.has_tool("echo-test::echo"), "the reaper published nothing");
-        assert!(
-            matches!(
-                h.state("echo-test").await,
-                ExtensionState::Failed {
-                    reason: FailureReason::Crashed,
-                    ..
-                }
-            ),
+        std::assert_matches!(
+            h.state("echo-test").await,
+            ExtensionState::Failed {
+                reason: FailureReason::Crashed,
+                ..
+            },
             "the reaper wrote state"
         );
     }
@@ -2802,8 +2786,9 @@ mcp_compatible = true
             h.manager.approve_plugin("echo-test").await,
             h.manager.deny_plugin("echo-test").await,
         ] {
-            assert!(
-                matches!(result, Err(ExtensionError::Orphaned)),
+            std::assert_matches!(
+                result,
+                Err(ExtensionError::Orphaned),
                 "an orphaned row accepted a verb: {result:?}"
             );
         }
@@ -2848,14 +2833,12 @@ mcp_compatible = true
         h.manager.permission_gate.approve("echo-test", &[]).unwrap();
         h.scan().await;
 
-        assert!(
-            matches!(
-                h.state("echo-test").await,
-                ExtensionState::Failed {
-                    reason: FailureReason::NeedsConfig { .. },
-                    ..
-                }
-            ),
+        std::assert_matches!(
+            h.state("echo-test").await,
+            ExtensionState::Failed {
+                reason: FailureReason::NeedsConfig { .. },
+                ..
+            },
             "expected the unresolved-secret park, got {:?}",
             h.state("echo-test").await
         );
@@ -2893,8 +2876,9 @@ mcp_compatible = true
             .manager
             .set_plugin_config("echo-test", "token", toml::Value::String("sk-live".into()))
             .await;
-        assert!(
-            matches!(refused, Err(PluginError::PermissionDenied(_))),
+        std::assert_matches!(
+            refused,
+            Err(PluginError::PermissionDenied(_)),
             "a sensitive key was accepted: {refused:?}"
         );
 
@@ -2906,8 +2890,9 @@ mcp_compatible = true
             .manager
             .set_plugin_config("echo-test", "token", toml::Value::String("sk-live".into()))
             .await;
-        assert!(
-            matches!(refused, Err(PluginError::NoDeclaration(_))),
+        std::assert_matches!(
+            refused,
+            Err(PluginError::NoDeclaration(_)),
             "a write with no declaration in hand was accepted: {refused:?}"
         );
         assert!(
@@ -2922,10 +2907,7 @@ mcp_compatible = true
             .manager
             .set_plugin_config("echo-test", "endpoint", toml::Value::String("https://x".into()))
             .await;
-        assert!(
-            matches!(refused, Err(PluginError::NoDeclaration(_))),
-            "{refused:?}"
-        );
+        std::assert_matches!(refused, Err(PluginError::NoDeclaration(_)), "{refused:?}");
         assert!(!config_path.exists());
     }
 
@@ -2964,18 +2946,14 @@ mcp_compatible = true
             "a traversal entry was orphaned into the ledger: {rows:?}"
         );
         // 404, never 403: the daemon names no resource for this id.
-        assert!(
-            matches!(
-                h.manager.known(&ext("../escape")).await,
-                Err(ExtensionError::NotFound(_))
-            ),
+        std::assert_matches!(
+            h.manager.known(&ext("../escape")).await,
+            Err(ExtensionError::NotFound(_)),
             "a traversal id read as known"
         );
-        assert!(
-            matches!(
-                h.manager.uninstall("../escape", true).await,
-                Err(InstallError::Extension(ExtensionError::NotFound(_)))
-            ),
+        std::assert_matches!(
+            h.manager.uninstall("../escape", true).await,
+            Err(InstallError::Extension(ExtensionError::NotFound(_))),
             "uninstall accepted a traversal id"
         );
     }
@@ -3240,8 +3218,7 @@ mcp_compatible = true
             .publish(&ext("echo-test"), &dir, manifest, intruder, discovered)
             .await
             .expect_err("E5 published over a live handle");
-        assert!(
-            matches!(err, PluginError::HandleHeld(ref id) if id == "echo-test"),
+        std::assert_matches!(err, PluginError::HandleHeld(ref id) if id == "echo-test",
             "expected HandleHeld, got {err:?}"
         );
 
@@ -3310,8 +3287,7 @@ mcp_compatible = true
             .publish(&ext("echo-test"), &dir, manifest, intruder, discovered)
             .await
             .expect_err("E5 published over a live handle");
-        assert!(
-            matches!(err, PluginError::HandleHeld(ref id) if id == "echo-test"),
+        std::assert_matches!(err, PluginError::HandleHeld(ref id) if id == "echo-test",
             "expected HandleHeld, got {err:?}"
         );
 
@@ -3372,8 +3348,7 @@ mcp_compatible = true
             .publish(&ext("echo-test"), &dir, manifest, intruder, discovered)
             .await
             .expect_err("E5 published over a live handle");
-        assert!(
-            matches!(err, PluginError::HandleHeld(ref id) if id == "echo-test"),
+        std::assert_matches!(err, PluginError::HandleHeld(ref id) if id == "echo-test",
             "expected HandleHeld, got {err:?}"
         );
 
@@ -3411,8 +3386,9 @@ mcp_compatible = true
             .reload(&ext("echo-test"))
             .await
             .expect_err("a reload over an unreadable store must refuse");
-        assert!(
-            matches!(err, ExtensionError::StoreUnreadable(_)),
+        std::assert_matches!(
+            err,
+            ExtensionError::StoreUnreadable(_),
             "expected store_unreadable, got {err:?}"
         );
 
@@ -3834,11 +3810,9 @@ mod install_tests {
 
         let error = h.manager.install_from_path(&source).await.unwrap_err();
 
-        assert!(
-            matches!(
-                error,
-                InstallError::Extension(ExtensionError::WriteFailed(_))
-            ),
+        std::assert_matches!(
+            error,
+            InstallError::Extension(ExtensionError::WriteFailed(_)),
             "the store write is what failed: {error:?}"
         );
         assert!(
@@ -4206,10 +4180,7 @@ mod install_tests {
         let h = Harness::new();
         let source = h.source("echo-test", "0.1.0", "");
         let error = h.manager.update_from_path("echo-test", &source).await.unwrap_err();
-        assert!(matches!(
-            error,
-            InstallError::Extension(ExtensionError::NotFound(_))
-        ));
+        std::assert_matches!(error, InstallError::Extension(ExtensionError::NotFound(_)));
     }
 
     /// **The order, on the other verb** (D7). The update path is the worse of
@@ -4255,11 +4226,9 @@ mod install_tests {
             .await
             .unwrap_err();
 
-        assert!(
-            matches!(
-                error,
-                InstallError::Extension(ExtensionError::WriteFailed(_))
-            ),
+        std::assert_matches!(
+            error,
+            InstallError::Extension(ExtensionError::WriteFailed(_)),
             "the store write is what failed: {error:?}"
         );
         assert!(
@@ -4744,9 +4713,6 @@ mod install_tests {
     async fn uninstalling_an_unknown_plugin_is_not_found() {
         let h = Harness::new();
         let error = h.manager.uninstall("nope", true).await.unwrap_err();
-        assert!(matches!(
-            error,
-            InstallError::Extension(ExtensionError::NotFound(_))
-        ));
+        std::assert_matches!(error, InstallError::Extension(ExtensionError::NotFound(_)));
     }
 }

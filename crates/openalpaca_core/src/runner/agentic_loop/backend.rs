@@ -46,7 +46,10 @@ impl<'a> LlmBackend<'a> {
     /// not asked again of that provider: the ladder's other providers may
     /// answer, else the call ends naming it (LOCAL-HOUR-NO-RETRY,
     /// `LlmRouter::complete_elsewhere`).
-    #[allow(clippy::too_many_arguments)]
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "the messages, tools and settings of one model request"
+    )]
     pub(super) async fn complete(
         &self,
         messages: Arc<Vec<ChatMessage>>,
@@ -416,8 +419,9 @@ mod tests {
         assert_eq!(written, state());
 
         let request = provider.first_request();
-        assert!(
-            matches!(request.thinking, Some(ThinkingConfig::Disabled)),
+        std::assert_matches!(
+            request.thinking,
+            Some(ThinkingConfig::Disabled),
             "the utility call must ask for no reasoning, got {:?}",
             request.thinking
         );

@@ -33,11 +33,20 @@ pub struct CompactionResult {
     /// of the list the pipeline was handed lie behind it. `None` when nothing
     /// was summarised or the summary fell back to the heuristic.
     pub working_state: Option<(WorkingState, usize)>,
-    #[allow(dead_code)]
+    #[cfg_attr(
+        not(test),
+        expect(dead_code, reason = "read only by the compaction tests")
+    )]
     pub messages_discarded: usize,
-    #[allow(dead_code)]
+    #[cfg_attr(
+        not(test),
+        expect(dead_code, reason = "read only by the compaction tests")
+    )]
     pub messages_before: usize,
-    #[allow(dead_code)]
+    #[expect(
+        dead_code,
+        reason = "set with the other two counts; no caller or test reads it"
+    )]
     pub messages_after: usize,
     pub error: Option<String>,
 }

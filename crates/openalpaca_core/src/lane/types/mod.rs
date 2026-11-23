@@ -24,7 +24,10 @@ impl LaneKey {
     /// Note: the `Option<Self>` return type is intentional — we don't want
     /// the `FromStr` trait's `Result`-based contract here; plain `Option`
     /// is clearer for a single-error-case parser.
-    #[allow(clippy::should_implement_trait)]
+    #[expect(
+        clippy::should_implement_trait,
+        reason = "returns Option on purpose, not FromStr's Result"
+    )]
     pub fn from_str(s: &str) -> Option<Self> {
         let (user_id, source) = s.split_once(':')?;
         if user_id.is_empty() || source.is_empty() {

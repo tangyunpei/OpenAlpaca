@@ -77,7 +77,10 @@ impl Orchestrator {
     /// Invoke a skill with route-telemetry capture.
     ///
     /// Used by the deterministic skill tier in `handle_message_internal`.
-    #[allow(clippy::too_many_arguments)]
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "the turn's context, passed through to the skill unchanged"
+    )]
     pub(super) async fn invoke_skill_with_telemetry(
         &self,
         request_id: Uuid,

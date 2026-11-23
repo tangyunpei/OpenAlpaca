@@ -437,10 +437,10 @@ fn a_broken_override_of_a_bundled_id_withholds_it_rather_than_falling_back() {
             .iter()
             .any(|t| t.frontmatter.id == "system_agent")
     );
-    assert!(matches!(
+    std::assert_matches!(
         store.registry.provenance("system_agent").unwrap().state,
         TemplateState::Withheld { .. }
-    ));
+    );
 }
 
 /// W-1: an edited copy that keeps the two `file_delete` lines (the step-7

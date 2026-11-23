@@ -57,7 +57,10 @@ pub struct InitializedServices {
 }
 
 /// Initialize all core services: agent templates, LLM router, tools, security, etc.
-#[allow(clippy::too_many_arguments)]
+#[expect(
+    clippy::too_many_arguments,
+    reason = "the daemon's startup inputs, each handed in by main"
+)]
 pub async fn initialize_services(
     config_base_dir: &Path,
     db: &Database,

@@ -65,7 +65,10 @@ fn append_line(buf: &mut String, line: &str) {
     buf.push_str(line.trim());
 }
 
-#[allow(clippy::type_complexity)]
+#[expect(
+    clippy::type_complexity,
+    reason = "the four parsed parts as one tuple, read by its one caller"
+)]
 fn parse_sections(
     lines: &[String],
 ) -> Result<(Vec<String>, Vec<String>, String, Vec<String>), SoulParseError> {

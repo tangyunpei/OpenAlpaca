@@ -1107,13 +1107,11 @@ async fn a_tool_call_and_finish_reason_in_one_frame_both_survive() {
         "the usage on the finish frame is still read: {events:?}"
     );
     let last = events.last().expect("some events");
-    assert!(
-        matches!(
-            last,
-            StreamEvent::Done {
-                finish_reason: FinishReason::ToolUse
-            }
-        ),
+    std::assert_matches!(
+        last,
+        StreamEvent::Done {
+            finish_reason: FinishReason::ToolUse
+        },
         "done is last: {last:?}"
     );
 }

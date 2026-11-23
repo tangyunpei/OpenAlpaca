@@ -64,7 +64,10 @@ pub struct StdioChannel {
     next_id: Arc<AtomicU64>,
     semaphore: Arc<Semaphore>,
     /// Kept alive so cloned `StdioChannel` handles retain the notification sender.
-    #[allow(dead_code)]
+    #[expect(
+        dead_code,
+        reason = "kept alive so cloned handles retain the notification sender"
+    )]
     notification_tx: mpsc::Sender<Value>,
     default_timeout: Duration,
 }

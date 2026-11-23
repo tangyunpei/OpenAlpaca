@@ -437,10 +437,7 @@ mod tests {
         let mapped = McpError::from(rmcp::service::ServiceError::InputRequiredRoundsExceeded {
             max_rounds: 10,
         });
-        assert!(
-            matches!(mapped, McpError::InputRoundsExceeded(10)),
-            "{mapped:?}"
-        );
+        std::assert_matches!(mapped, McpError::InputRoundsExceeded(10), "{mapped:?}");
         assert_eq!(
             mapped.to_string(),
             "the server still asked for input after 10 rounds; the call was ended there"

@@ -1053,7 +1053,13 @@ impl<R: tauri::Runtime> EndedWindow for DialogWebview<R> {
 
 /// The hook [`with_app_hooks`] registers for a web content process that
 /// ended: [`reload_hook_over`] the window in the app, [`DialogWebview`].
-#[cfg_attr(not(any(target_os = "macos", target_os = "ios")), allow(dead_code))]
+#[cfg_attr(
+    not(any(target_os = "macos", target_os = "ios")),
+    allow(
+        dead_code,
+        reason = "only the macOS and iOS hook registers it; unverifiable here"
+    )
+)]
 fn bounded_reload_hook<R: tauri::Runtime>() -> impl Fn(&tauri::Webview<R>) + Send + Sync + 'static {
     reload_hook_over(|webview: &tauri::Webview<R>| DialogWebview(webview.clone()))
 }
@@ -1062,7 +1068,13 @@ fn bounded_reload_hook<R: tauri::Runtime>() -> impl Fn(&tauri::Webview<R>) + Sen
 /// [`web_content_ended`] on the real clock, over one [`ReloadBound`] the hook
 /// owns for the app's life, so every end it is called for counts against
 /// the same bound and one dialog per window is open at a time.
-#[cfg_attr(not(any(target_os = "macos", target_os = "ios")), allow(dead_code))]
+#[cfg_attr(
+    not(any(target_os = "macos", target_os = "ios")),
+    allow(
+        dead_code,
+        reason = "called by the macOS and iOS hook and by tests; unverifiable here"
+    )
+)]
 fn reload_hook_over<R, W, F>(window: F) -> impl Fn(&tauri::Webview<R>) + Send + Sync + 'static
 where
     R: tauri::Runtime,
@@ -1094,7 +1106,13 @@ fn lock_bound(bound: &Mutex<ReloadBound>) -> std::sync::MutexGuard<'_, ReloadBou
 /// macOS and iOS only, where Tauri reports it
 /// (`Builder::on_web_content_process_terminate`). The window and the clock
 /// are parameters, so a test sees each effect, at the instants it chooses.
-#[cfg_attr(not(any(target_os = "macos", target_os = "ios")), allow(dead_code))]
+#[cfg_attr(
+    not(any(target_os = "macos", target_os = "ios")),
+    allow(
+        dead_code,
+        reason = "called by the macOS and iOS hook and by tests; unverifiable here"
+    )
+)]
 fn web_content_ended<W: EndedWindow>(window: &W, bound: &Arc<Mutex<ReloadBound>>, now: Instant) {
     let label = window.label();
     let action = lock_bound(bound).on_end(label, now);

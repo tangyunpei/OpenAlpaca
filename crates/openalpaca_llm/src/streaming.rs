@@ -235,7 +235,7 @@ mod tests {
         let result = collect_stream(stream, "test-model".to_string()).await;
         assert!(result.is_err());
         let err = result.unwrap_err();
-        assert!(matches!(err, LlmError::Stream(ref s) if s.contains("connection reset")));
+        std::assert_matches!(err, LlmError::Stream(ref s) if s.contains("connection reset"));
     }
 
     #[tokio::test(start_paused = true)]

@@ -151,7 +151,10 @@ impl LoopState {
 /// When `sandbox` is `Some`, tool calls are routed through the SandboxManager
 /// with capability checks, input sanitization, and timeout enforcement.
 /// When `sandbox` is `None`, falls back to stub behavior (backward compat).
-#[allow(clippy::too_many_arguments)]
+#[expect(
+    clippy::too_many_arguments,
+    reason = "the loop's inputs from the direct-provider caller"
+)]
 pub async fn run_agentic_loop(
     provider: &DynLlmProvider<'_>,
     initial_messages: Vec<ChatMessage>,
@@ -182,7 +185,10 @@ pub async fn run_agentic_loop(
 }
 
 /// Production entry point — router with key rotation, fallback, cost tracking.
-#[allow(clippy::too_many_arguments)]
+#[expect(
+    clippy::too_many_arguments,
+    reason = "the loop's inputs plus the router's task id and cost meter"
+)]
 pub async fn run_agentic_loop_routed(
     router: &LlmRouter,
     initial_messages: Vec<ChatMessage>,
@@ -414,7 +420,10 @@ fn return_pending_steering(config: &LoopConfig, pending: &mut Vec<SteeringMsg>) 
 ///
 /// The exit record lives here rather than at the nine `return`s inside the
 /// core so no future exit can be added without one.
-#[allow(clippy::too_many_arguments)]
+#[expect(
+    clippy::too_many_arguments,
+    reason = "the inputs both entry points hand the shared loop"
+)]
 async fn run_agentic_loop_inner(
     backend: LlmBackend<'_>,
     initial_messages: Vec<ChatMessage>,
@@ -493,7 +502,10 @@ fn finish_reason_str(reason: &LoopFinishReason) -> &'static str {
 }
 
 /// Core agentic loop implementation shared by both Direct and Router backends.
-#[allow(clippy::too_many_arguments)]
+#[expect(
+    clippy::too_many_arguments,
+    reason = "the inputs both entry points hand the shared loop"
+)]
 async fn run_agentic_loop_core(
     backend: LlmBackend<'_>,
     initial_messages: Vec<ChatMessage>,

@@ -116,10 +116,10 @@ fn a_plugin_removal_leaves_another_plugins_skill() {
     let entry = catalog
         .get("triage")
         .expect("q's skill survives p's unload");
-    assert!(matches!(
+    std::assert_matches!(
         entry.source,
         SkillSource::Plugin { ref plugin_id, .. } if plugin_id == "q"
-    ));
+    );
     assert!(catalog.get_by_command("triage").is_some());
     assert!(catalog.tombstone("triage").is_none());
 }

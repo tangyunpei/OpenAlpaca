@@ -371,7 +371,7 @@ async fn nothing_routable_is_one_error_that_names_the_fix() {
         .complete(make_request(None))
         .await
         .expect_err("no provider is loaded");
-    assert!(matches!(err, LlmRouterError::NoRoutableModel), "{err:?}");
+    std::assert_matches!(err, LlmRouterError::NoRoutableModel, "{err:?}");
     let text = err.to_string();
     assert!(text.contains("Settings → Models"), "{text}");
     assert!(text.contains("openalpaca llm"), "{text}");
@@ -509,7 +509,7 @@ async fn test_all_failed_no_fallback() {
     );
 
     let result = router.complete(make_request(None)).await;
-    assert!(matches!(result, Err(LlmRouterError::AllFallbacksFailed)));
+    std::assert_matches!(result, Err(LlmRouterError::AllFallbacksFailed));
 }
 
 #[tokio::test]
@@ -1003,6 +1003,7 @@ async fn test_streaming_all_keys_rate_limited() {
 
     let request = make_request(Some("gpt-6-astra"));
     let result = router.complete_streaming(request).await;
+    // Not assert_matches!: `RoutedStream` has no Debug (a boxed stream).
     assert!(
         matches!(result, Err(LlmRouterError::AllKeysRateLimited)),
         "Should return AllKeysRateLimited when all keys fail"
@@ -1050,6 +1051,7 @@ async fn test_streaming_non_retryable_error_fails_immediately() {
 
     let request = make_request(Some("gpt-6-astra"));
     let result = router.complete_streaming(request).await;
+    // Not assert_matches!: `RoutedStream` has no Debug (a boxed stream).
     assert!(
         matches!(
             result,
@@ -1090,7 +1092,7 @@ async fn the_cli_backend_will_not_serve_a_provider_that_is_not_loaded() {
 
     // With nothing loaded there is no routable model at all, which L3 reports
     // as its own error — the CLI backend is still never reached.
-    assert!(matches!(err, LlmRouterError::NoRoutableModel), "{err:?}");
+    std::assert_matches!(err, LlmRouterError::NoRoutableModel, "{err:?}");
     assert_eq!(
         cli_provider.call_count.load(Ordering::SeqCst),
         0,
@@ -1301,11 +1303,7 @@ async fn every_key_refused_is_named_on_both_paths() {
 
     let (router, _) = two_key_router(vec![refused()]);
     let result = router.complete(make_request(Some("gpt-6-astra"))).await;
-    assert!(
-        matches!(result, Err(LlmRouterError::AllKeysRefused)),
-        "non-streaming: {:?}",
-        result.err()
-    );
+    std::assert_matches!(result, Err(LlmRouterError::AllKeysRefused), "non-streaming");
 
     let (router, _) = two_key_router(vec![Err(LlmError::AuthenticationFailed(
         "bad key".to_string(),
@@ -1313,6 +1311,7 @@ async fn every_key_refused_is_named_on_both_paths() {
     let result = router
         .complete_streaming(make_request(Some("gpt-6-astra")))
         .await;
+    // Not assert_matches!: `RoutedStream` has no Debug (a boxed stream).
     assert!(
         matches!(result, Err(LlmRouterError::AllKeysRefused)),
         "streaming: {:?}",

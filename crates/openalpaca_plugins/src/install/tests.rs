@@ -722,11 +722,9 @@ fn a_marker_that_leaves_the_trash_is_left_alone() {
     std::fs::create_dir_all(plugins.join(STAGING_DIR)).unwrap();
     for line in ["../elsewhere", "/abs/path", ".trash/../../x", "notion-2026"] {
         std::fs::write(swap_marker(&plugins, "notion"), format!("{line}\n")).unwrap();
-        assert!(
-            matches!(
-                recover_swap(&plugins, "notion").unwrap(),
-                SwapRecovery::Unreadable { .. }
-            ),
+        std::assert_matches!(
+            recover_swap(&plugins, "notion").unwrap(),
+            SwapRecovery::Unreadable { .. },
             "{line}"
         );
         assert!(

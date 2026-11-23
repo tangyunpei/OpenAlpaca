@@ -129,7 +129,10 @@ impl ScopedRun for PluginLoopOutcome {
 ///    sent to the plugin on every abnormal exit (cancel, RPC error,
 ///    iteration cap). Each race is `run_until_cancelled`'s: a future and a
 ///    cancel ready in the same tick yield the future's output.
-#[allow(clippy::too_many_arguments)]
+#[expect(
+    clippy::too_many_arguments,
+    reason = "the plugin agent's run inputs from its spawn"
+)]
 pub async fn run_plugin_agent_loop(
     executor: &Arc<DynPluginAgentExecutor<'static>>,
     instance_id: &str,

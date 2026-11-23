@@ -118,8 +118,8 @@ impl HandleResult {
 /// One inbound turn, as a [`MessageHandler`] receives it.
 ///
 /// This used to be a positional argument list, and GAP-13's `model_override`
-/// would have been its ninth entry — eight already needed
-/// `#[allow(clippy::too_many_arguments)]`, and a call site passing
+/// would have been its ninth entry — eight already needed clippy's
+/// `too_many_arguments` lint silenced, and a call site passing
 /// `None, None, None` in a row says nothing about which `None` is which. Named
 /// fields make each caller legible and let the next field be added without
 /// re-punctuating every one of them.

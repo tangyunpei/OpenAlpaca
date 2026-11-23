@@ -47,7 +47,10 @@ use uuid::Uuid;
 /// spilled whole to the session's `results/` beside it (the writer's §5.4
 /// spill: the file, then `result_ref` and a preview on the record), so a
 /// resumed run reads it back whole — the span row keeps 200 characters.
-#[allow(clippy::too_many_arguments)]
+#[expect(
+    clippy::too_many_arguments,
+    reason = "the session log and the fields of the span's close record"
+)]
 fn emit_subagent_close(
     log: Option<&crate::session_log::SessionLogHandle>,
     task_id: &str,
@@ -314,7 +317,10 @@ impl SpawnSubagentTool {
         self.shared_context.task_session_log(&self.task_id)
     }
 
-    #[allow(clippy::too_many_arguments)]
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "the run's shared handles, ids and limits the spawn tool holds"
+    )]
     pub fn new(
         router: Arc<LlmRouter>,
         tool_registry: Arc<ToolRegistry>,
@@ -2353,7 +2359,10 @@ pub fn spawn_subagent_tool_definition_with_models(
 ///
 /// Can be called at any time — the registry uses DashMap internally and
 /// does not require `&mut`.
-#[allow(clippy::too_many_arguments)]
+#[expect(
+    clippy::too_many_arguments,
+    reason = "the four tools and their four definitions, registered in pairs"
+)]
 pub fn register_coordination_tools(
     registry: &crate::tools::ToolRegistry,
     spawn_tool: Arc<SpawnSubagentTool>,

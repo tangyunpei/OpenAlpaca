@@ -11,7 +11,10 @@ use uuid::Uuid;
 /// Record LLM usage metrics (cost, tokens, latency) to the database and emit an event:
 /// a workflow's lead row and each subagent's, priced from
 /// `LoopResult::requests_cost` (UPR-1).
-#[allow(clippy::too_many_arguments)]
+#[expect(
+    clippy::too_many_arguments,
+    reason = "the call's figures and the two places they are written"
+)]
 pub(crate) fn record_llm_usage(
     router: &LlmRouter,
     loop_result: &LoopResult,

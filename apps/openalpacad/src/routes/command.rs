@@ -14,10 +14,12 @@ use crate::AppState;
 pub struct CommandRequest {
     pub command: String,
     #[serde(default)]
-    #[allow(dead_code)]
     pub args: HashMap<String, serde_json::Value>,
     #[serde(skip_serializing_if = "Option::is_none")]
-    #[allow(dead_code)]
+    #[expect(
+        dead_code,
+        reason = "accepted in the request body; no command reads it"
+    )]
     pub target_agent: Option<String>,
     /// **S5** — this client cannot answer a tool-approval prompt, the same
     /// declaration `POST /v1/chat` takes. `openalpaca command` is scriptable

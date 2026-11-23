@@ -30,7 +30,7 @@ pub fn spawn_event_bridge(
                 openalpaca_core::events::SystemEvent::ConnectorStatus { id, status, .. } => {
                     eb.connector_status(&id, &status);
                 }
-                #[allow(
+                #[expect(
                     clippy::unneeded_wildcard_pattern,
                     reason = "R79: the bridge ignores created_by on purpose, and says so"
                 )]
@@ -698,8 +698,9 @@ mod tests {
             });
             cancel.cancel();
             let forwarded = tokio::time::timeout(Duration::from_secs(2), rx.recv()).await;
-            assert!(
-                matches!(forwarded, Ok(Ok(ServerEvent::WorkflowStarted { .. }))),
+            std::assert_matches!(
+                forwarded,
+                Ok(Ok(ServerEvent::WorkflowStarted { .. })),
                 "round {round}: the event published with the cancel was dropped: {forwarded:?}"
             );
         }

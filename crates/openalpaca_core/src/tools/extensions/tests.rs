@@ -148,13 +148,13 @@ fn mark_failed_is_a_no_op_for_a_stale_generation() {
     assert_eq!(ledger.state(&ext), Some(ExtensionState::Enabled));
 
     assert!(ledger.mark_failed(&ext, 2, FailureReason::Crashed, "real crash"));
-    assert!(matches!(
+    std::assert_matches!(
         ledger.state(&ext),
         Some(ExtensionState::Failed {
             reason: FailureReason::Crashed,
             ..
         })
-    ));
+    );
 }
 
 #[test]
@@ -197,11 +197,11 @@ fn an_exit_reads_failed_queues_no_reap_and_the_gate_still_admits_the_call() {
     let (ledger, mut reaper) = enabled_with_reaper(&ext);
 
     assert!(ledger.mark_exited(&ext, 1, "exit status: 3"));
-    assert!(matches!(
+    std::assert_matches!(
         ledger.state(&ext),
         Some(ExtensionState::Failed { reason: FailureReason::Crashed, ref detail, .. })
             if detail == "exit status: 3"
-    ));
+    );
     assert!(reaper.try_recv().is_err(), "an exit is not the reaper's");
     assert_eq!(ledger.admits_calls(&ext), Some(true));
     assert!(
@@ -253,14 +253,14 @@ fn every_other_transition_out_of_an_exit_ends_its_admission() {
     let ext = mcp("github");
     let (ledger, _reaper) = enabled_with_reaper(&ext);
     assert!(ledger.mark_exited(&ext, 1, "exit status: 0"));
-    assert!(matches!(
+    std::assert_matches!(
         ledger.begin(
             &ext,
             ExtensionState::Disabling,
             Some(WithdrawalCause::Disable)
         ),
         Transition::Took(1)
-    ));
+    );
     assert_eq!(ledger.admits_calls(&ext), Some(false));
     assert!(
         !ledger.mark_recovered(&ext, 1),

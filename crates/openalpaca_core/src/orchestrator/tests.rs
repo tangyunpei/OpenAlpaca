@@ -1735,7 +1735,7 @@ fn a_native_document_model_still_gets_the_native_part() {
     );
 
     assert_eq!(adapted.len(), 1);
-    assert!(matches!(adapted[0], ContentPart::Document { .. }));
+    std::assert_matches!(adapted[0], ContentPart::Document { .. });
 }
 
 /// **U2 — bounded, and never silently.** The extraction cap
@@ -6121,11 +6121,10 @@ async fn a_streaming_skill_keeps_its_forced_tool_choice() {
 
     let requests = seen.lock().unwrap_or_else(|p| p.into_inner());
     assert_eq!(requests.len(), 2, "one forced tool round, then the answer");
-    assert!(
-        matches!(
+    std::assert_matches!(
             requests[0].tool_choice,
             Some(openalpaca_llm::ToolChoice::Tool(ref t)) if t == "send"
-        ),
+        ,
         "the forced initial tool choice must reach the streaming request, got {:?}",
         requests[0].tool_choice
     );
@@ -8571,7 +8570,7 @@ async fn the_main_loop_prompt_says_search_pick_read_in_one_line() {
     {
         let reqs = requests.lock().unwrap();
         let system = &reqs[0].messages[0];
-        assert!(matches!(system.role, openalpaca_llm::Role::System));
+        std::assert_matches!(system.role, openalpaca_llm::Role::System);
         assert_eq!(
             system.content.matches(guidance).count(),
             1,
@@ -9705,14 +9704,14 @@ async fn onboarding_completes_from_the_files_update_persona_wrote_with_no_backgr
 
     assert!(!bootstrap.exists(), "onboarding completed from the files");
     assert!(!orch.is_bootstrapping());
-    assert!(matches!(
+    std::assert_matches!(
         events.try_recv(),
         Ok(SystemEvent::BootstrapCompleted {
             identity_populated: true,
             user_populated: true,
             ..
         })
-    ));
+    );
 }
 
 /// The other half: a `USER.md` that is still the seeded template does not

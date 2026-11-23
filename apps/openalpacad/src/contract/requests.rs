@@ -123,13 +123,19 @@ mod tests {
 
     #[derive(Deserialize)]
     #[serde(rename_all = "camelCase")]
-    #[allow(dead_code)]
+    #[expect(
+        dead_code,
+        reason = "a shape whose wire names the test reads; its field is unread"
+    )]
     struct Inner {
         some_key: String,
     }
 
     #[derive(Deserialize)]
-    #[allow(dead_code)]
+    #[expect(
+        dead_code,
+        reason = "a shape whose wire names the test reads; its fields are unread"
+    )]
     struct Outer {
         #[serde(rename = "wire_name")]
         field: u32,

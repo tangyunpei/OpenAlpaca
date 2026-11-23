@@ -28,7 +28,10 @@ impl Orchestrator {
     /// Handle a skill invocation: load full SKILL.md, inject as context, run agentic loop.
     ///
     /// Mirrors `handle_simple_query()` with an extra `### SKILL CONTEXT ###` block.
-    #[allow(clippy::too_many_arguments)]
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "the turn's context and how the skill was chosen"
+    )]
     pub(in crate::orchestrator) async fn handle_skill_invocation(
         &self,
         request_id: Uuid,

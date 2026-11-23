@@ -81,10 +81,7 @@ fn test_bare_task_control_commands() {
 #[test]
 fn test_task_control_prefix_words_are_not_commands() {
     // "/cancellation" must not parse as a bare /cancel.
-    assert!(matches!(
-        parser().parse("/cancellation"),
-        Intent::SimpleQuery { .. }
-    ));
+    std::assert_matches!(parser().parse("/cancellation"), Intent::SimpleQuery { .. });
 }
 
 #[test]
@@ -110,7 +107,7 @@ fn test_single_keyword_no_signal() {
     // "search" alone without complexity signal -> SimpleQuery
     let intent = parser().parse("search for cats");
     // "search" matches web_search but no complexity signal -> SimpleQuery
-    assert!(matches!(intent, Intent::SimpleQuery { .. }));
+    std::assert_matches!(intent, Intent::SimpleQuery { .. });
 }
 
 // --- suggest_tools tests ---
@@ -360,7 +357,7 @@ fn test_router_auto_select_records_usage_for_recency() {
     // Auto-selection at the production site must write the recency tier
     // via record_usage (wiring audit §2: recency bonus needs a writer).
     let intent = parser().parse_with_skills_and_router("review code for bugs", &catalog, &router);
-    assert!(matches!(intent, Intent::SkillInvocation { .. }));
+    std::assert_matches!(intent, Intent::SkillInvocation { .. });
 
     // A subsequent route sees the recency bonus for the selected skill.
     let result = router.route("review code for bugs", &catalog);
@@ -382,8 +379,9 @@ fn test_router_no_match_falls_through() {
     let router = SkillRouter::new(0.65, 0.45);
 
     let intent = parser().parse_with_skills_and_router("hello world", &catalog, &router);
-    assert!(
-        matches!(intent, Intent::SimpleQuery { .. }),
+    std::assert_matches!(
+        intent,
+        Intent::SimpleQuery { .. },
         "Should fall through to SimpleQuery, got {:?}",
         intent
     );
@@ -896,10 +894,10 @@ Echo.
         );
     }
     // Its other alias still reaches it.
-    assert!(matches!(
+    std::assert_matches!(
         parser().parse_with_skills_and_router("/jot hello", &catalog, &router),
         Intent::SkillInvocation { .. }
-    ));
+    );
 }
 
 #[test]

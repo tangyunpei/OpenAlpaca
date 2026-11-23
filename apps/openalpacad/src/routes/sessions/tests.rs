@@ -1105,10 +1105,10 @@ async fn deleting_answers_204_and_takes_the_transcript_with_it() {
         dir.display()
     );
 
-    assert!(matches!(
+    std::assert_matches!(
         rx.try_recv(),
         Ok(SystemEvent::SessionChanged { ref status, .. }) if status == "deleted"
-    ));
+    );
 }
 
 /// Storage design §10: a conversation's scratch folder — its working folder

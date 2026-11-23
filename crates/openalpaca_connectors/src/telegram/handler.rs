@@ -26,7 +26,7 @@ use tracing::{error, info, warn};
 
 impl TelegramConnector {
     /// Handle an incoming Telegram message.
-    #[allow(
+    #[expect(
         clippy::too_many_arguments,
         reason = "the dispatcher's dependencies, injected one by one"
     )]

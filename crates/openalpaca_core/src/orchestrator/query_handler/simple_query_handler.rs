@@ -32,7 +32,10 @@ use openalpaca_storage::repository::LlmUsageRepository;
 use uuid::Uuid;
 
 impl Orchestrator {
-    #[allow(clippy::too_many_arguments)]
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "the turn's routing context, taken apart from HandleRequest"
+    )]
     pub(in crate::orchestrator) async fn handle_simple_query(
         &self,
         request_id: Uuid,

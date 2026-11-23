@@ -284,8 +284,9 @@ async fn approve_and_deny_on_an_mcp_server_are_409_unsupported_for_kind() {
         assert_eq!(status, StatusCode::CONFLICT, "{verb:?}");
         assert_eq!(error_word(&body), "unsupported_for_kind");
     }
-    assert!(
-        matches!(h.state("mcp", "srv"), Some(ExtensionState::Enabled)),
+    std::assert_matches!(
+        h.state("mcp", "srv"),
+        Some(ExtensionState::Enabled),
         "a refused verb must take no transition"
     );
 }
@@ -323,13 +324,14 @@ async fn reload_from_disabled_is_409_not_loaded() {
     let h = Harness::new();
     h.declare_unreachable("srv", false);
     h.mcp.reconcile_all().await;
-    assert!(matches!(h.state("mcp", "srv"), Some(ExtensionState::Disabled)));
+    std::assert_matches!(h.state("mcp", "srv"), Some(ExtensionState::Disabled));
 
     let (status, body) = h.verb("mcp", "srv", Verb::Reload).await;
     assert_eq!(status, StatusCode::CONFLICT);
     assert_eq!(error_word(&body), "not_loaded");
-    assert!(
-        matches!(h.state("mcp", "srv"), Some(ExtensionState::Disabled)),
+    std::assert_matches!(
+        h.state("mcp", "srv"),
+        Some(ExtensionState::Disabled),
         "a refused reload must take no transition"
     );
 }
@@ -339,10 +341,10 @@ async fn reload_from_unapproved_is_409_not_loaded() {
     let h = Harness::new();
     h.write_plugin("waiting");
     h.plugins.start().await.expect("plugin scan");
-    assert!(matches!(
+    std::assert_matches!(
         h.state("plugin", "waiting"),
         Some(ExtensionState::Unapproved { .. })
-    ));
+    );
 
     let (status, body) = h.verb("plugin", "waiting", Verb::Reload).await;
     assert_eq!(status, StatusCode::CONFLICT);
@@ -357,8 +359,9 @@ async fn reload_from_enabled_and_from_failed_are_200() {
     let h = Harness::new();
     h.declare_stub("srv", 0);
     h.mcp.reconcile_all().await;
-    assert!(
-        matches!(h.state("mcp", "srv"), Some(ExtensionState::Enabled)),
+    std::assert_matches!(
+        h.state("mcp", "srv"),
+        Some(ExtensionState::Enabled),
         "the stub should have come up: {:?}",
         h.state("mcp", "srv")
     );
@@ -491,7 +494,7 @@ async fn a_write_that_fails_is_a_500_and_takes_no_transition() {
     h.declare_unreachable("srv", true);
     h.mcp.reconcile_all().await;
     let before = h.state("mcp", "srv");
-    assert!(matches!(before, Some(ExtensionState::Failed { .. })));
+    std::assert_matches!(before, Some(ExtensionState::Failed { .. }));
 
     // Readable, but not writable: this is a **write** failure, not the
     // `409 store_unreadable` of a store nobody can parse.
@@ -534,7 +537,7 @@ async fn delete_on_a_row_that_is_not_orphaned_is_409_not_orphaned() {
         .remove(&ExtensionId::plugin("present"))
         .await
         .expect_err("a present plugin is not removable");
-    assert!(matches!(error, ExtensionError::NotOrphaned));
+    std::assert_matches!(error, ExtensionError::NotOrphaned);
     let (status, body) = split(extension_error(&error)).await;
     assert_eq!(status, StatusCode::CONFLICT);
     assert_eq!(error_word(&body), "not_orphaned");
@@ -575,8 +578,9 @@ async fn delete_on_an_orphan_removes_its_entry_and_its_record() {
         .reconcile(&ExtensionId::plugin("gone"))
         .await
         .expect("reconcile should park the vanished plugin");
-    assert!(
-        matches!(h.state("plugin", "gone"), Some(ExtensionState::Orphaned)),
+    std::assert_matches!(
+        h.state("plugin", "gone"),
+        Some(ExtensionState::Orphaned),
         "a vanished directory parks as Orphaned: {:?}",
         h.state("plugin", "gone")
     );
@@ -1076,10 +1080,7 @@ async fn a_dropped_request_does_not_abandon_the_transition() {
         h.config_dir.path().join("slow-server.sh").display()
     ));
     h.mcp.reconcile_all().await;
-    assert!(matches!(
-        h.state("mcp", "slow"),
-        Some(ExtensionState::Disabled)
-    ));
+    std::assert_matches!(h.state("mcp", "slow"), Some(ExtensionState::Disabled));
 
     let extensions = h.extensions.clone();
     let request = tokio::spawn(async move {
@@ -1087,8 +1088,9 @@ async fn a_dropped_request_does_not_abandon_the_transition() {
     });
     // Long enough to be past E0's CAS and inside the handshake.
     tokio::time::sleep(Duration::from_millis(300)).await;
-    assert!(
-        matches!(h.state("mcp", "slow"), Some(ExtensionState::Enabling)),
+    std::assert_matches!(
+        h.state("mcp", "slow"),
+        Some(ExtensionState::Enabling),
         "the verb should be mid-transition when the request is dropped: {:?}",
         h.state("mcp", "slow")
     );

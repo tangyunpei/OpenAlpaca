@@ -495,7 +495,7 @@ async fn the_wait_after_a_start_waits_for_the_file_then_the_answer() {
 
     let waited = wait_after_start(&mut world, &cli(1, 1), None).await;
 
-    assert!(matches!(waited, StartWait::Ready), "{waited:?}");
+    std::assert_matches!(waited, StartWait::Ready, "{waited:?}");
     assert_eq!(world.looks, 4);
     assert_eq!(world.waited(), POLL * 3);
     assert_eq!(
@@ -742,7 +742,7 @@ async fn a_spawned_daemon_still_running_is_waited_for() {
 
     let waited = wait_after_start(&mut world, &cli(1, 1), Some(&mut spawned)).await;
 
-    assert!(matches!(waited, StartWait::Ready), "{waited:?}");
+    std::assert_matches!(waited, StartWait::Ready, "{waited:?}");
     assert_eq!(world.looks, 3);
 }
 
@@ -805,7 +805,7 @@ async fn an_exited_child_still_shown_as_starting_ends_the_wait() {
     let mut world_other = Stub::canned([starting_look(&d), answering(&d, 1)]);
 
     let waited = wait_after_start(&mut world_other, &cli(1, 1), Some(&mut other)).await;
-    assert!(matches!(waited, StartWait::Ready), "{waited:?}");
+    std::assert_matches!(waited, StartWait::Ready, "{waited:?}");
 
     let mut spawned = FakeSpawn {
         pid: d.pid,

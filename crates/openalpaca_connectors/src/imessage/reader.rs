@@ -26,12 +26,18 @@ pub(super) fn resolve_attachment_path(raw_path: &str, home: Option<&Path>) -> Op
 #[derive(Debug, Clone)]
 pub struct IMessageAttachment {
     /// The original filename from chat.db (before `~` expansion).
-    #[allow(dead_code)]
+    #[expect(
+        dead_code,
+        reason = "read from chat.db with the row; the file is opened by file_path"
+    )]
     pub filename: String,
     pub mime_type: String,
     pub transfer_name: String,
     pub file_path: String,
-    #[allow(dead_code)]
+    #[expect(
+        dead_code,
+        reason = "read from chat.db with the row; no caller uses the size"
+    )]
     pub total_bytes: i64,
 }
 
