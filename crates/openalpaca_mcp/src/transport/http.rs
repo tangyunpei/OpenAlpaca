@@ -367,6 +367,47 @@ mod tests {
         );
     }
 
+    /// RUSTSEC-2026-0592: up to url 2.5.8, `Url::origin()` recursed once per
+    /// `blob:` prefix, so a redirect target nesting ten thousand of them
+    /// (about 50 KB) overflowed the stack and aborted the process, which no
+    /// `catch_unwind` stops. From 2.5.9 such a target has one opaque origin:
+    /// refused, and named by its scheme. Run on a thread with a 2 MiB stack,
+    /// a tokio worker's default, so the result does not depend on the test
+    /// harness's own stack size.
+    #[test]
+    fn a_deeply_nested_blob_redirect_target_is_refused_without_a_crash() {
+        let configured = Url::parse("https://mcp.example.com/mcp").unwrap();
+        let next = Url::parse(&format!("{}https://example.com/", "blob:".repeat(10_000)))
+            .expect("a nested blob: URL parses");
+        let named = std::thread::Builder::new()
+            .stack_size(2 * 1024 * 1024)
+            .spawn(move || {
+                let refused = refuse_redirect(
+                    &configured.origin(),
+                    false,
+                    &next,
+                    std::slice::from_ref(&configured),
+                )
+                .map(|r| r.origin);
+                (refused, origin_of(&next))
+            })
+            .expect("spawn a 2 MiB thread")
+            .join()
+            .expect("the thread returns");
+        assert_eq!(named, (Some("blob:".to_owned()), "blob:".to_owned()));
+    }
+
+    /// A `blob:` URL takes its inner URL's origin only when that one is
+    /// http, https or file (the URL Standard, as url 2.5.9 follows it);
+    /// any other inner scheme, a nested `blob:` included, is opaque.
+    #[test]
+    fn a_blob_url_has_its_inner_origin_only_for_http_https_or_file() {
+        let named = |url: &str| origin_of(&Url::parse(url).unwrap());
+        assert_eq!(named("blob:https://example.com/x"), "https://example.com");
+        assert_eq!(named("blob:ws://example.com/x"), "blob:");
+        assert_eq!(named("blob:blob:https://example.com/x"), "blob:");
+    }
+
     #[test]
     fn credentials_or_extra_headers_make_a_server_credentialed() {
         let url = || Url::parse("https://example.com/mcp").unwrap();
