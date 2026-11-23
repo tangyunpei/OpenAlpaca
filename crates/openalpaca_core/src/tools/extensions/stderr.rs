@@ -6,11 +6,18 @@
 //! `McpError`'s text, never in the connection state's reason, never in a log
 //! line of their own. What is shown is, in this order:
 //!
-//! 1. decoded lossily, `\r\n` read as `\n`;
+//! 1. decoded lossily, `\r\n` read as `\n`, once the pieces of a character
+//!    a cut left are left out: the continuation bytes a cut head begins
+//!    with, and a last character's first bytes without its last;
 //! 2. every value the load resolved for the server — its `env` and `env_from`
 //!    values, credential-bearing arguments, the daemon's own variables with
-//!    secret-like names — replaced by [`MASKED`], longest first, a value's
-//!    `\r\n` read as `\n` as the text's is;
+//!    secret-like names — masked as [`MASKED`], a value's `\r\n` read as
+//!    `\n` as the text's is: every occurrence, looked for at every place,
+//!    inside another one too, the masked bytes their union (two
+//!    occurrences that overlap read `<masked><masked>`); a value holding a
+//!    `\r` not followed by `\n` is looked for in the text as written too,
+//!    for where the server writes that `\r` before a `\n` (the newline read
+//!    from them is shown: its `\n` is no part of the value);
 //! 3. a tail the ring's own bound cut at the head that lies wholly inside
 //!    one value masked whole; else a value cut at the head masked too, or
 //!    the partial first line dropped (a cut tail of one line ending with a
@@ -21,11 +28,10 @@
 //!    leaves none of its later lines; and the start of a value that ends
 //!    the text (a tail read before the server finished writing it) masked:
 //!    inside a line of it, or, for a value holding a newline, just after
-//!    one of its newlines — all judged in step 2's one scan, on the text as
-//!    written, so a shorter value inside a part cut at the head cannot hide
-//!    it (at the end one still can: a shorter value that is a prefix of a
-//!    longer one ending the text is masked whole and the longer value's cut
-//!    start after it is shown);
+//!    one of its newlines, looked for at every place, inside a whole value
+//!    too — all judged in step 2's scan, on the text as written, so a
+//!    shorter value inside a part cut at either end, or one that ends
+//!    inside a cut start, is no reason to stop looking;
 //! 4. the generic shapes of a credential masked: a URL's userinfo, a bearer
 //!    token, an `Authorization` or `Cookie` header's value, a `key=value` or
 //!    `"key": "value"` whose name looks like a secret, a sensitive query
@@ -34,6 +40,31 @@
 //!    never inside a `<masked>` or a `<U+XXXX>` — so the last line is kept;
 //! 6. escaped once, here, with [`escape_hidden`] (D19 (a)), so every surface
 //!    that shows the detail shows `<U+XXXX>` for a hidden character.
+//!
+//! What the steps aim at: what is shown is a window on the bytes the
+//! server wrote, and no byte of an occurrence of a value in them is shown,
+//! whether the occurrence lies inside the window or crosses one of its
+//! cuts. That is claimed only as far as an oracle sampled it, with one
+//! named exception. The test
+//! `the_oracle_s_sample_shows_no_value_byte_outside_class_nl` reads
+//! 216,000 generated windows of the fixed seed `0x005E_ED0F_7A11_0001`
+//! (9,000 streams, about 5 s in a debug build; its doc lists the classes
+//! its generator builds); when it was written, five seeds of 20,000
+//! streams (480,000 windows each, about 11 s a seed in a debug build)
+//! showed no byte of a value but in class NL: a window the ring cut at
+//! its head that holds only newline bytes inside a run of a value's
+//! newlines can show one of them (values `y2y\r\n\r\n\r\n1` and `\n1`,
+//! window `\n\r\n\r\n`, shown `\n<masked>`), as it did before; it is
+//! pinned as shown today. Without the test's NL exemption the official
+//! seed is green at 6,000 streams and red at 9,000 and 20,000. A
+//! fixed-seed sample, not a proof.
+//! Outside it: the generic shapes (step 4), hidden characters, a tail
+//! longer than [`TAIL_BYTES`], and which values are in the mask set.
+//!
+//! A value holding a `\r` not followed by `\n` (as an `env_from` value from
+//! a file with CRLF line ends can) is not the lone `\r` a read stopped
+//! between a `\r` and its `\n` leaves at a cut, which step 3 reads as the
+//! start of a value's newline; both are kept.
 //!
 //! The detail is then `<base>\nserver stderr (last N bytes, redacted):\n<tail>`,
 //! the tail last (D23); a spawn that wrote nothing leaves `base` as it is.
@@ -104,12 +135,9 @@ pub fn compose_detail(base: impl Into<String>, tail: &TailSnapshot, secrets: &[S
 
 /// Steps 1–6 of the module's list.
 fn shown_tail(tail: &TailSnapshot, secrets: &[String]) -> String {
-    let text = String::from_utf8_lossy(&tail.bytes).replace("\r\n", "\n");
-    // The values as the text is read: a value written with `\r\n` line
-    // ends is found in the text only with `\n` ones.
-    let secrets = as_read(secrets);
     let partial_head = tail.truncated;
-    let text = mask_values(&text, &secrets, partial_head);
+    let (text, ranges) = read_and_find(tail, secrets);
+    let text = masked(&text, ranges);
     let text = mask_shapes(&text);
     let text = text.trim_end_matches('\n');
     let (pieces, cut) = last_pieces(text, TAIL_BYTES);
@@ -122,6 +150,109 @@ fn shown_tail(tail: &TailSnapshot, secrets: &[String]) -> String {
         shown.drain(..=newline);
     }
     shown
+}
+
+/// Steps 1 to 3: the text as read, and the ranges of it masked.
+fn read_and_find(tail: &TailSnapshot, secrets: &[String]) -> (String, Vec<std::ops::Range<usize>>) {
+    let written = String::from_utf8_lossy(whole_characters(&tail.bytes, tail.truncated));
+    let text = written.replace("\r\n", "\n");
+    // The values as the text is read: a value written with `\r\n` line
+    // ends is found in the text only with `\n` ones.
+    // A value holding a `\r` not followed by `\n` is looked for in the
+    // text as written too: where the server writes that `\r` before a
+    // `\n`, the text as read holds no `\r` there.
+    let written = Written {
+        text: &written,
+        secrets: &with_a_lone_cr(secrets),
+    };
+    let ranges = masked_ranges(&text, &as_read(secrets), &written, tail.truncated);
+    (text, ranges)
+}
+
+/// The text as written and the values to look for in it, the ones holding
+/// a lone `\r` ([`with_a_lone_cr`]).
+struct Written<'a> {
+    text: &'a str,
+    secrets: &'a [String],
+}
+
+/// The values of `secrets` that hold a `\r` not followed by `\n`, longest
+/// first.
+fn with_a_lone_cr(secrets: &[String]) -> Vec<String> {
+    let mut lone: Vec<String> = secrets
+        .iter()
+        .filter(|secret| {
+            secret
+                .match_indices('\r')
+                .any(|(at, _)| !secret[at + 1..].starts_with('\n'))
+        })
+        .cloned()
+        .collect();
+    lone.sort_by(|a, b| b.len().cmp(&a.len()).then_with(|| a.cmp(b)));
+    lone.dedup();
+    lone
+}
+
+/// `ranges` of the text as `written` as ranges of the text as read
+/// (`\r\n` read as `\n`). The `\r` of a `\r\n` is in none: the newline
+/// read from it shows only its `\n`, so a range ending at that `\r` stops
+/// before the newline, and a range of nothing else is left out.
+fn as_read_ranges(
+    written: &str,
+    ranges: Vec<std::ops::Range<usize>>,
+) -> Vec<std::ops::Range<usize>> {
+    let bytes = written.as_bytes();
+    // Where each character of `written` begins in the text as read; none
+    // for the `\r` of a `\r\n`.
+    let mut read_at = vec![None; written.len()];
+    let mut read = 0;
+    for (at, c) in written.char_indices() {
+        if c == '\r' && bytes.get(at + 1) == Some(&b'\n') {
+            continue;
+        }
+        read_at[at] = Some(read);
+        read += c.len_utf8();
+    }
+    ranges
+        .into_iter()
+        .filter_map(|range| {
+            let mut shown = written[range.clone()].char_indices().filter_map(|(at, c)| {
+                read_at[range.start + at].map(|read| read..read + c.len_utf8())
+            });
+            let first = shown.next()?;
+            let end = shown.next_back().map_or(first.end, |last| last.end);
+            Some(first.start..end)
+        })
+        .collect()
+}
+
+/// `bytes` without the pieces of a character a cut left: with `cut_head`
+/// (the ring cut the tail's head), the continuation bytes they begin with
+/// (at most three); and at the end, a character's first bytes without its
+/// last (a read stopped inside it). Every later rule then sees whole
+/// characters, so a value cut inside one is found as cut, never read as a
+/// U+FFFD that is in no value.
+fn whole_characters(bytes: &[u8], cut_head: bool) -> &[u8] {
+    let continuation = |byte: &u8| (0x80..0xC0).contains(byte);
+    let mut bytes = bytes;
+    if cut_head {
+        let left = bytes.iter().take(3).take_while(|b| continuation(b)).count();
+        bytes = &bytes[left..];
+    }
+    // The last character's first byte, at most three bytes back.
+    if let Some(back) = bytes.iter().rev().take(4).position(|b| !continuation(b)) {
+        let first = bytes.len() - 1 - back;
+        let len = match bytes[first] {
+            0xC0..=0xDF => 2,
+            0xE0..=0xEF => 3,
+            0xF0..=0xFF => 4,
+            _ => 1,
+        };
+        if first + len > bytes.len() {
+            bytes = &bytes[..first];
+        }
+    }
+    bytes
 }
 
 /// `secrets` with each `\r\n` read as `\n`, as step 1 reads the text, kept
@@ -137,9 +268,13 @@ fn as_read(secrets: &[String]) -> Vec<String> {
     read
 }
 
-/// Every occurrence of a `secrets` value replaced by [`MASKED`], the longest
-/// value first at each place; also the longest start of a value that `text`
-/// ends with (see [`value_ranges`]); with `cut_head` (the ring cut the tail's
+/// A rule of [`masked_ranges`]: the ranges it finds in a text with its
+/// values.
+type Rule<'a> = dyn Fn(&str, &[String]) -> Vec<std::ops::Range<usize>> + 'a;
+
+/// The ranges of `text` masked: every occurrence of a `secrets` value and
+/// every start of one that `text` ends with, at every place
+/// ([`Places::ranges_from`]); with `cut_head` (the ring cut the tail's
 /// head), the whole text when it lies wholly inside a value
 /// ([`lies_inside_a_value`]), else also the rest of a value holding a
 /// newline — what follows one of its newlines — that `text` begins with, at
@@ -161,33 +296,71 @@ fn as_read(secrets: &[String]) -> Vec<String> {
 /// several, followed by what the scan finds after it), every reading's
 /// masked ranges are taken, and ranges that overlap are shown as one
 /// [`MASKED`].
-fn mask_values(text: &str, secrets: &[String], cut_head: bool) -> String {
+///
+/// Each rule runs on `text` with `secrets` (as read), and on the text as
+/// [`Written`] with its values, the ranges found there mapped to `text`
+/// ([`as_read_ranges`]); whether a newline is left outside the masked
+/// values is judged on the ranges of both.
+fn masked_ranges(
+    text: &str,
+    secrets: &[String],
+    written: &Written<'_>,
+    cut_head: bool,
+) -> Vec<std::ops::Range<usize>> {
     if secrets.is_empty() {
-        return text.to_string();
+        return Vec::new();
     }
-    if cut_head && lies_inside_a_value(text, secrets) {
-        return MASKED.to_string();
-    }
-    let mut ranges = value_ranges(text, secrets, 0);
-    if cut_head {
-        let second_line = text.find('\n').map(|newline| newline + 1);
-        for anchor in std::iter::once(0).chain(second_line) {
-            for len in line_remainders(&text[anchor..], secrets) {
-                ranges.push(anchor..anchor + len);
-                ranges.extend(value_ranges(text, secrets, anchor + len));
-            }
+    // A rule run on the text as read, and on the text as written for the
+    // values holding a lone `\r`, its ranges mapped to the text as read.
+    let both = |rule: &Rule<'_>| {
+        let mut ranges = rule(text, secrets);
+        if !written.secrets.is_empty() {
+            let found = rule(written.text, written.secrets);
+            ranges.extend(as_read_ranges(written.text, found));
         }
         ranges.sort_by_key(|range| (range.start, range.end));
-        // Judged on the text the drop sees: trailing newlines are trimmed
-        // before it, so they are no whole line.
-        if !newline_outside(text.trim_end_matches('\n'), &ranges) {
+        ranges
+    };
+    // A tail lying inside a value is found as read for every value: a
+    // piece of a value as written is a piece of it as read, a lone `\r` at
+    // its end read as the start of a newline.
+    if cut_head && lies_inside_a_value(text, secrets) {
+        return std::iter::once(0..text.len()).collect();
+    }
+    let mut ranges = both(&|text, secrets| {
+        let mut places = Places::new(text, secrets);
+        let mut ranges = places.ranges_from(0);
+        if cut_head {
+            let second_line = text.find('\n').map(|newline| newline + 1);
+            for anchor in std::iter::once(0).chain(second_line) {
+                for len in line_remainders(&text[anchor..], secrets) {
+                    ranges.push(anchor..anchor + len);
+                    ranges.extend(places.ranges_from(anchor + len));
+                }
+            }
+        }
+        ranges
+    });
+    // Judged on the text the drop sees: trailing newlines are trimmed
+    // before it, so they are no whole line.
+    if cut_head && !newline_outside(text.trim_end_matches('\n'), &ranges) {
+        ranges.extend(both(&|text, secrets| {
+            let mut places = Places::new(text, secrets);
+            let mut ranges = Vec::new();
             for end in head_fragments(text, secrets) {
                 ranges.push(0..end);
-                ranges.extend(value_ranges(text, secrets, end));
+                ranges.extend(places.ranges_from(end));
             }
-            ranges.sort_by_key(|range| (range.start, range.end));
-        }
+            ranges
+        }));
+        ranges.sort_by_key(|range| (range.start, range.end));
     }
+    ranges
+}
+
+/// `text` with each of `ranges` (sorted by start) shown as [`MASKED`],
+/// ranges that overlap as one.
+fn masked(text: &str, ranges: Vec<std::ops::Range<usize>>) -> String {
     let mut out = String::with_capacity(text.len());
     let mut shown_to = 0;
     let mut ranges = ranges.into_iter().peekable();
@@ -239,31 +412,79 @@ fn lies_inside_a_value(text: &str, secrets: &[String]) -> bool {
     })
 }
 
-/// The byte ranges of `text` from `from` on that one scan masks: at each
-/// place the longest value that begins there; and, where no whole value
-/// begins, the rest of `text` when it is a proper start of a value
-/// ([`is_cut_start`]). A text whose last line is unterminated may end in
-/// any start of a value; one that ends with a newline, only in a start that
-/// ends at one of the value's own newlines.
-fn value_ranges(text: &str, secrets: &[String], from: usize) -> Vec<std::ops::Range<usize>> {
-    let mut ranges = Vec::new();
-    let mut at = from;
-    'scan: while let Some(c) = text[at..].chars().next() {
-        let rest = &text[at..];
-        for secret in secrets {
-            if !secret.is_empty() && rest.starts_with(secret.as_str()) {
-                ranges.push(at..at + secret.len());
-                at += secret.len();
-                continue 'scan;
-            }
+/// The places of `text` a scan visits, each place's longest whole value
+/// and whether the rest of `text` is a cut start there, each found once
+/// and reused by every scan ([`Places::ranges_from`]) over the same text
+/// and values.
+struct Places<'a> {
+    text: &'a str,
+    secrets: &'a [String],
+    seen: Vec<Option<(Option<usize>, bool)>>,
+}
+
+impl<'a> Places<'a> {
+    fn new(text: &'a str, secrets: &'a [String]) -> Self {
+        Self {
+            text,
+            secrets,
+            seen: vec![None; text.len() + 1],
         }
-        if secrets.iter().any(|secret| is_cut_start(secret, rest)) {
-            ranges.push(at..text.len());
-            break;
-        }
-        at += c.len_utf8();
     }
-    ranges
+
+    fn at(&mut self, at: usize) -> (Option<usize>, bool) {
+        if let Some(found) = self.seen[at] {
+            return found;
+        }
+        let rest = &self.text[at..];
+        let whole = self
+            .secrets
+            .iter()
+            .find(|secret| !secret.is_empty() && rest.starts_with(secret.as_str()))
+            .map(|secret| at + secret.len());
+        let cut = self.secrets.iter().any(|secret| is_cut_start(secret, rest));
+        self.seen[at] = Some((whole, cut));
+        (whole, cut)
+    }
+
+    /// The byte ranges of the text from `from` on that one scan masks,
+    /// tried at every place, inside a value already found too: the longest
+    /// value that begins there; and the rest of the text when it is a proper
+    /// start of a value ([`is_cut_start`]). A text whose last line is
+    /// unterminated may end in any start of a value; one that ends with a
+    /// newline, only in a start that ends at one of the value's own
+    /// newlines.
+    ///
+    /// What a place holds depends only on the text, the values and the
+    /// place, so it is found once ([`Places::at`]), and every scan over the
+    /// same text and values (from 0, after each rest of a line, after each
+    /// end of a value) reuses it: the ranges a scan that looked again would
+    /// find, without its cost.
+    ///
+    /// The masked bytes are the union of what is found. A range found starts
+    /// no earlier than the end of those found before it, so masks that only
+    /// touch stay two: two occurrences that overlap read `<masked><masked>`.
+    fn ranges_from(&mut self, from: usize) -> Vec<std::ops::Range<usize>> {
+        let mut ranges = Vec::new();
+        let mut found_to = from;
+        let mut at = from;
+        while let Some(c) = self.text[at..].chars().next() {
+            let (whole, cut) = self.at(at);
+            if let Some(end) = whole
+                && end > found_to
+            {
+                ranges.push(at.max(found_to)..end);
+                found_to = end;
+            }
+            if cut {
+                if self.text.len() > found_to {
+                    ranges.push(at.max(found_to)..self.text.len());
+                }
+                break;
+            }
+            at += c.len_utf8();
+        }
+        ranges
+    }
 }
 
 /// Is `rest` (the rest of the text) a proper start of `secret`: the tail
@@ -1076,5 +1297,979 @@ mod tests {
         for name in ["PATH", "HOME", "LANG", "DEBUG"] {
             assert!(!looks_like_a_secret(name), "{name}");
         }
+    }
+
+    /// The value pairs the oracle's first run found shown in part (none of
+    /// them needs a long tail): F, a cut inside a character of a value; G,
+    /// a whole shorter value that is a prefix of a longer one hiding the
+    /// longer one's cut start; the overlap, a whole value ending inside a
+    /// cut value's start; WW, two whole occurrences that overlap, in a tail
+    /// with no cut. Two masks that only touch stay two (the masked bytes
+    /// are the union).
+    #[test]
+    fn values_are_masked_where_occurrences_meet_or_a_character_is_cut() {
+        let cut = |text: &str, byte: &[u8]| [text.as_bytes(), byte].concat();
+        let cases: [(&[&str], Vec<u8>, bool, &str); 14] = [
+            // F: the ring cut inside the value's "\u{e9}" (C3 A9): the A9
+            // is left at the head.
+            (
+                &["x\u{e9}yz"],
+                [&[0xA9][..], b"yz rest"].concat(),
+                true,
+                "<masked> rest",
+            ),
+            // F: the read stopped inside it: the C3 is left at the end.
+            (
+                &["x\u{e9}yz"],
+                cut("using x", &[0xC3]),
+                false,
+                "using <masked>",
+            ),
+            // F: a 4-byte character cut after its third byte, at the end.
+            (
+                &["k\u{1F600}9"],
+                cut("a k", &"\u{1F600}".as_bytes()[..3]),
+                false,
+                "a <masked>",
+            ),
+            // G: "1" whole, then the rest of "1a2b3c4d5e"'s cut start.
+            (
+                &["1a2b3c4d5e", "1"],
+                b"token is 1a2b3".to_vec(),
+                false,
+                "token is <masked><masked>",
+            ),
+            // The overlap: a whole value ending inside a cut value's start.
+            (
+                &["is 1", "1a2b3c"],
+                b"token is 1a2b".to_vec(),
+                false,
+                "token <masked><masked>",
+            ),
+            (
+                &["yz1", "1a2b3c"],
+                b"say xyz1a2b".to_vec(),
+                false,
+                "say x<masked><masked>",
+            ),
+            // WW: two whole occurrences that overlap, of one value or of
+            // two, in a tail with no cut.
+            (&["33"], b"333b".to_vec(), false, "<masked><masked>b"),
+            (&["x2", "2y"], b"x2y".to_vec(), false, "<masked><masked>"),
+            (&["yb", "b1"], b"zyb1".to_vec(), false, "z<masked><masked>"),
+            // Regression guards (green before): occurrences that only touch
+            // are two masks, and an uncut tail with no overlap is as it was.
+            (&["yb", "b1"], b"ybb1".to_vec(), false, "<masked><masked>"),
+            (&["33"], b"33 b 33".to_vec(), false, "<masked> b <masked>"),
+            // The cost of F's trim: a stray first byte of a character that
+            // ends a tail is left out, where it read as U+FFFD; in a cut
+            // tail that leaves one line, which is shown, where the first
+            // line was dropped and the U+FFFD shown.
+            (&[], cut("done", &[0xC3]), false, "done"),
+            (&[], cut("abc\n", &[0xC3]), true, "abc"),
+            // The cost of G at a cut head: the whole shorter value and the
+            // longer one's cut start leave no newline outside the masks,
+            // so the partial first line's `a` is shown where the drop took
+            // it (and showed the `x` of the cut value).
+            (
+                &["1\nx2", "1"],
+                b"a1\nx".to_vec(),
+                true,
+                "a<masked><masked>",
+            ),
+        ];
+        let failures: Vec<String> = cases
+            .iter()
+            .filter_map(|(values, raw, truncated, shown)| {
+                let values: Vec<String> = values.iter().map(|v| v.to_string()).collect();
+                let detail = compose_detail("x", &snapshot(raw, *truncated), &values);
+                let tail = tail_of(&detail);
+                (tail != *shown)
+                    .then(|| format!("{values:?} {raw:?}: shown {tail:?}, expected {shown:?}"))
+            })
+            .collect();
+        assert!(failures.is_empty(), "{failures:#?}");
+    }
+
+    /// A value holding a `\r` not followed by `\n` (one read from a file
+    /// with CRLF line ends, its `\n` trimmed) is found as the server wrote
+    /// it: written before a `\n`, its `\r` is part of a `\r\n` that the
+    /// text as read holds as a `\n`, so it is looked for in the text as
+    /// written too. The newline after it is shown: its `\n` is no part of
+    /// the value.
+    #[test]
+    fn a_value_holding_a_lone_cr_is_found_as_the_server_wrote_it() {
+        let mut failures = mismatches(
+            &["32\r".to_string()],
+            &[
+                ("z cz  32\r32\r\n", false, "z cz  <masked><masked>"),
+                (
+                    "start\nusing 32\r\nnext",
+                    false,
+                    "start\nusing <masked>\nnext",
+                ),
+                // Regression guards (green before): a lone `\r` in the text
+                // is found as read, and a `\n` with no `\r` before it is no
+                // part of the value.
+                ("x 32\rz\n", false, "x <masked>z"),
+                ("x 32\n", false, "x 32"),
+            ],
+        );
+        failures.extend(mismatches(
+            &["y 2a\r".to_string()],
+            &[
+                ("xy 2a\r\n", false, "x<masked>"),
+                // The ring cut the head inside it, and the drop has no line
+                // to take.
+                ("a\r\n", true, "<masked>"),
+            ],
+        ));
+        // Regression guard (green before): a value of a `\r` alone shows no
+        // byte of itself in a `\r\n`, and masks nothing there.
+        failures.extend(mismatches(
+            &["\r".to_string()],
+            &[("a\r\nb", false, "a\nb")],
+        ));
+        assert!(failures.is_empty(), "{failures:#?}");
+    }
+
+    /// KNOWN LEAK, outside what the oracle holds (class NL): a window the
+    /// ring cut at its head that holds only newline bytes inside a run of a
+    /// value's newlines shows one of them today. The "only newlines"
+    /// exclusion of [`lies_inside_a_value`] (df4cdbd8) lets it through, a
+    /// second value beginning with a newline masks the last one as a cut
+    /// start, and the first-line drop takes only the first. Shown before
+    /// this change too. Pinned as shown today, with the oracle's predicate
+    /// for it, true on these windows and false on their near misses.
+    #[test]
+    fn a_head_cut_window_of_a_value_s_newlines_shows_one_of_them_today() {
+        // Each case: the values, a stream holding the window, the window.
+        let cases: [(&[&str], &[u8], std::ops::Range<usize>); 3] = [
+            (
+                &["\n3a 2\nxy31", "cxa\r\n\r\n\r\n2"],
+                b"cxa\r\n\r\n\r\n2",
+                4..9,
+            ),
+            (&["11\n\n\ny3 ", "\ny3  \nyc"], b"11\n\n\ny3 ", 2..5),
+            (&["y2y\r\n\r\n\r\n1", "\n1"], b"y2y\r\n\r\n\r\n1", 4..9),
+        ];
+        let mut failures = Vec::new();
+        for (values, stream, window) in cases {
+            let values: Vec<String> = values.iter().map(|v| v.to_string()).collect();
+            let occurrences = oracle_occurrences(stream, &values);
+            let detail = compose_detail("x", &snapshot(&stream[window.clone()], true), &values);
+            if tail_of(&detail) != "\n<masked>" {
+                failures.push(format!("{values:?} {window:?}: shown {detail:?}"));
+            }
+            let (head, end) = (window.start, window.end);
+            // Uncut, and one byte that is not a newline taken in.
+            let misses = [(0, end), (head, end + 1)];
+            if !oracle_nl_window(stream, &occurrences, head, end)
+                || misses
+                    .iter()
+                    .any(|(h, e)| oracle_nl_window(stream, &occurrences, *h, *e))
+            {
+                failures.push(format!("{values:?} {window:?}: the predicate"));
+            }
+            if oracle_nl_window(stream, &[], head, end) {
+                failures.push(format!("{values:?} {window:?}: no occurrence"));
+            }
+        }
+        assert!(failures.is_empty(), "{failures:#?}");
+    }
+
+    /// The costs of the union and of the written reading, pinned (more of
+    /// kinds already pinned, larger now): a value's start ending an uncut
+    /// tail is masked where a shorter whole value hid it, as at 0cd631ab;
+    /// masks that only touch are shown apart, so a run of a value that
+    /// overlaps itself reads one mask per place after its first; and in a
+    /// cut tail, a value holding a newline and a lone `\r` whose mask now
+    /// takes the head's first newline leaves no first line to drop, so the
+    /// ring's partial first line (ordinary text) is shown.
+    #[test]
+    fn the_union_s_and_the_written_reading_s_costs_are_pinned() {
+        let mut failures = mismatches(
+            &["1a2b3c4d5e".to_string(), "1".to_string()],
+            &[("token is 1a2b3", false, "token is <masked><masked>")],
+        );
+        failures.extend(mismatches(
+            &["aaaaa".to_string()],
+            &[
+                (&"a".repeat(12), false, &MASKED.repeat(8)),
+                ("aaaaa x", false, "<masked> x"),
+            ],
+        ));
+        failures.extend(mismatches(
+            &["k\nm\r".to_string()],
+            &[
+                ("zz k\nm\r\n", true, "zz <masked>"),
+                // With a line after it there is a first line to drop.
+                ("zz k\nm\r\nab\n", true, "ab"),
+            ],
+        ));
+        // Regression guard (green before): what a place holds is found
+        // once and reused by every later scan, never forgotten, so
+        // ranges that overlap are still shown as one mask.
+        failures.extend(mismatches(
+            &["2", "ya\r\n\r\n", "\n\r\n"].map(String::from),
+            &[("\n\r\n\n\r", true, "<masked>")],
+        ));
+        assert!(failures.is_empty(), "{failures:#?}");
+    }
+
+    // The oracle: the module doc's invariant, checked on generated streams.
+
+    /// A fixed-seed xorshift64* generator: the same cases on every run, and
+    /// no dependency.
+    struct Prng(u64);
+
+    impl Prng {
+        fn next(&mut self) -> u64 {
+            let mut x = self.0;
+            x ^= x >> 12;
+            x ^= x << 25;
+            x ^= x >> 27;
+            self.0 = x;
+            x.wrapping_mul(0x2545_F491_4F6C_DD1D)
+        }
+
+        fn below(&mut self, n: usize) -> usize {
+            let n = u64::try_from(n).expect("a small bound");
+            usize::try_from(self.next() % n).expect("below a usize bound")
+        }
+
+        fn chance(&mut self, percent: usize) -> bool {
+            self.below(100) < percent
+        }
+    }
+
+    const ORACLE_SEED: u64 = 0x005E_ED0F_7A11_0001;
+    const ORACLE_STREAMS: usize = 9_000;
+    const ORACLE_CUTS_PER_STREAM: usize = 24;
+
+    /// What streams and values are built from: ASCII, 2-, 3- and 4-byte
+    /// characters, LF and CRLF line ends. None spells a generic shape's
+    /// trigger (no `=`, `:`, `"`, `/`, `?`, `&`, `@`, no "bearer") or is a
+    /// hidden character, so masking by value is all an oracle case meets
+    /// but the escape of a lone `\r` a cut leaves.
+    const ORACLE_UNITS: [&str; 15] = [
+        "a",
+        "b",
+        "c",
+        "x",
+        "y",
+        "z",
+        "1",
+        "2",
+        "3",
+        " ",
+        "\n",
+        "\r\n",
+        "\u{e9}",
+        "\u{4e2d}",
+        "\u{1F600}",
+    ];
+    const ORACLE_PLAIN: usize = 10;
+
+    fn oracle_units(rng: &mut Prng, min: usize, max: usize, newlines: bool) -> String {
+        let count = min + rng.below(max - min + 1);
+        let pool = if newlines {
+            ORACLE_UNITS.len()
+        } else {
+            ORACLE_PLAIN
+        };
+        let mut out = String::new();
+        for _ in 0..count {
+            let unit = match rng.below(10) {
+                0..=5 => ORACLE_UNITS[rng.below(pool.min(ORACLE_PLAIN))],
+                _ => ORACLE_UNITS[rng.below(pool)],
+            };
+            out.push_str(unit);
+        }
+        out
+    }
+
+    /// A proper piece of `value` on character boundaries: its `start..end`
+    /// in characters, `None` when it has too few.
+    fn oracle_piece(value: &str, start: usize, end: usize) -> Option<String> {
+        let chars: Vec<char> = value.chars().collect();
+        (start < end && end <= chars.len() && end - start < chars.len())
+            .then(|| chars[start..end].iter().collect())
+    }
+
+    /// Does `value` hold a `\r` not followed by `\n`?
+    fn holds_a_lone_cr(value: &str) -> bool {
+        value
+            .match_indices('\r')
+            .any(|(at, _)| !value[at + 1..].starts_with('\n'))
+    }
+
+    /// The case classes the generator is built to hold, each counted.
+    #[derive(Default)]
+    struct OracleCoverage {
+        prefix_pairs: usize,
+        overlapping_pairs: usize,
+        value_inside_another: usize,
+        one_character_values: usize,
+        long_values: usize,
+        multi_line_values: usize,
+        crlf_values: usize,
+        trailing_newline_values: usize,
+        multi_byte_values: usize,
+        lone_cr_values: usize,
+        overlapping_occurrences: usize,
+        windows: usize,
+        uncut_windows: usize,
+        head_cut_in_a_character: usize,
+        end_cut_in_a_character: usize,
+        windows_inside_an_occurrence: usize,
+        windows_of_one_line: usize,
+        windows_ending_in_a_newline: usize,
+        adjacent_occurrences: usize,
+    }
+
+    fn oracle_value(rng: &mut Prng, values: &[String], cover: &mut OracleCoverage) -> String {
+        let chars = |v: &String| v.chars().count();
+        let pick = |rng: &mut Prng| values[rng.below(values.len())].clone();
+        loop {
+            let mut value = match rng.below(9) {
+                0 if !values.is_empty() => {
+                    let v = pick(rng);
+                    let n = chars(&v);
+                    let Some(prefix) = oracle_piece(&v, 0, 1 + rng.below(n.max(2) - 1)) else {
+                        continue;
+                    };
+                    cover.prefix_pairs += 1;
+                    prefix
+                }
+                1 if !values.is_empty() => {
+                    let v = pick(rng);
+                    let n = chars(&v);
+                    let Some(end) = oracle_piece(&v, 1 + rng.below(n.max(2) - 1), n) else {
+                        continue;
+                    };
+                    cover.overlapping_pairs += 1;
+                    end + &oracle_units(rng, 1, 4, true)
+                }
+                2 if !values.is_empty() => {
+                    let v = pick(rng);
+                    let n = chars(&v);
+                    let Some(start) = oracle_piece(&v, 0, 1 + rng.below(n.max(2) - 1)) else {
+                        continue;
+                    };
+                    cover.overlapping_pairs += 1;
+                    oracle_units(rng, 1, 4, true) + &start
+                }
+                3 if !values.is_empty() => {
+                    let v = pick(rng);
+                    let n = chars(&v);
+                    let start = rng.below(n.max(1));
+                    let end = start + 1 + rng.below((n - start).max(1));
+                    let Some(inside) = oracle_piece(&v, start, end) else {
+                        continue;
+                    };
+                    cover.value_inside_another += 1;
+                    inside
+                }
+                4 => {
+                    cover.one_character_values += 1;
+                    ORACLE_UNITS[rng.below(ORACLE_UNITS.len())].to_string()
+                }
+                5 => {
+                    cover.long_values += 1;
+                    oracle_units(rng, 30, 60, true)
+                }
+                6 => {
+                    let newline = if rng.chance(50) { "\n" } else { "\r\n" };
+                    let lines = 2 + rng.below(3);
+                    let mut v = String::new();
+                    for i in 0..lines {
+                        if i > 0 {
+                            v.push_str(newline);
+                        }
+                        if !rng.chance(20) {
+                            v.push_str(&oracle_units(rng, 1, 4, false));
+                        }
+                    }
+                    if rng.chance(30) {
+                        v.push_str(newline);
+                    }
+                    v
+                }
+                _ => {
+                    let newlines = rng.chance(30);
+                    oracle_units(rng, 1, 8, newlines)
+                }
+            };
+            if value.is_empty() {
+                continue;
+            }
+            if rng.chance(4) {
+                // A value ending in a lone `\r`, or holding one, as one
+                // read from a file with CRLF line ends can.
+                value.push('\r');
+                if rng.chance(50) {
+                    value.push_str(&oracle_units(rng, 1, 3, false));
+                }
+            }
+            if holds_a_lone_cr(&value) {
+                cover.lone_cr_values += 1;
+            }
+            if value.contains('\n') {
+                cover.multi_line_values += 1;
+            }
+            if value.contains("\r\n") {
+                cover.crlf_values += 1;
+            }
+            if value.ends_with('\n') {
+                cover.trailing_newline_values += 1;
+            }
+            if !value.is_ascii() {
+                cover.multi_byte_values += 1;
+            }
+            return value;
+        }
+    }
+
+    /// Every occurrence of a value in `haystack`, found by brute force at
+    /// every position, overlapping ones included, as `origin` ranges of the
+    /// stream's bytes.
+    fn oracle_matches(
+        haystack: &[u8],
+        origin: &[std::ops::Range<usize>],
+        values: &[String],
+    ) -> Vec<std::ops::Range<usize>> {
+        let mut found = Vec::new();
+        for value in values {
+            let needle = value.as_bytes();
+            if needle.is_empty() || needle.len() > haystack.len() {
+                continue;
+            }
+            for at in 0..=haystack.len() - needle.len() {
+                if &haystack[at..at + needle.len()] == needle {
+                    found.push(origin[at].start..origin[at + needle.len() - 1].end);
+                }
+            }
+        }
+        found
+    }
+
+    /// Every occurrence of a value in `stream`: as written, and as read
+    /// (`\r\n` as `\n` in the stream and the value, the occurrence then
+    /// covering both bytes of each `\r\n` it holds), so the oracle is at
+    /// least as strict as either reading.
+    fn oracle_occurrences(stream: &[u8], values: &[String]) -> Vec<std::ops::Range<usize>> {
+        let written: Vec<std::ops::Range<usize>> = (0..stream.len()).map(|i| i..i + 1).collect();
+        let mut found = oracle_matches(stream, &written, values);
+        let mut read = Vec::new();
+        let mut origin = Vec::new();
+        let mut i = 0;
+        while i < stream.len() {
+            if stream[i] == b'\r' && stream.get(i + 1) == Some(&b'\n') {
+                read.push(b'\n');
+                origin.push(i..i + 2);
+                i += 2;
+            } else {
+                read.push(stream[i]);
+                origin.push(i..i + 1);
+                i += 1;
+            }
+        }
+        found.extend(oracle_matches(&read, &origin, &as_read(values)));
+        found
+    }
+
+    /// Each byte of a stream of `len` bytes: inside an occurrence or not.
+    fn oracle_inside(len: usize, occurrences: &[std::ops::Range<usize>]) -> Vec<bool> {
+        let mut inside = vec![false; len];
+        for occurrence in occurrences {
+            inside[occurrence.clone()].fill(true);
+        }
+        inside
+    }
+
+    /// `bytes` decoded as `String::from_utf8_lossy` decodes them, then
+    /// `\r\n` read as `\n`: each character with the bytes of `bytes` it
+    /// shows. The oracle's rule for a newline read from `\r\n`: it shows
+    /// its `\n` byte, and the `\r` is shown only where a `\r` is (a lone
+    /// one, escaped); a U+FFFD shows every byte it replaces.
+    fn oracle_decode(bytes: &[u8]) -> Vec<(char, std::ops::Range<usize>)> {
+        let mut decoded = Vec::new();
+        let mut at = 0;
+        for chunk in bytes.utf8_chunks() {
+            for (offset, c) in chunk.valid().char_indices() {
+                decoded.push((c, at + offset..at + offset + c.len_utf8()));
+            }
+            at += chunk.valid().len();
+            if !chunk.invalid().is_empty() {
+                decoded.push(('\u{FFFD}', at..at + chunk.invalid().len()));
+                at += chunk.invalid().len();
+            }
+        }
+        let mut read: Vec<(char, std::ops::Range<usize>)> = Vec::new();
+        for (c, range) in decoded {
+            if c == '\n'
+                && let Some(last) = read.last_mut()
+                && last.0 == '\r'
+            {
+                *last = ('\n', range);
+                continue;
+            }
+            read.push((c, range));
+        }
+        read
+    }
+
+    /// The masked text as [`masked`] writes it (`plain`) and as escaped
+    /// (`written`), each byte of `written` with the character of the read
+    /// text it shows (none for a mask).
+    #[derive(Default)]
+    struct Traced {
+        plain: String,
+        written: String,
+        sources: Vec<Option<usize>>,
+    }
+
+    impl Traced {
+        fn text(&mut self, text: &str, part: std::ops::Range<usize>) {
+            for (index, (at, c)) in text.char_indices().enumerate() {
+                if part.contains(&at) {
+                    let mut buf = [0u8; 4];
+                    let escaped = escape_hidden(c.encode_utf8(&mut buf)).text;
+                    self.plain.push(c);
+                    self.written.push_str(&escaped);
+                    self.sources
+                        .extend(std::iter::repeat_n(Some(index), escaped.len()));
+                }
+            }
+        }
+
+        fn mask(&mut self) {
+            self.plain.push_str(MASKED);
+            self.written.push_str(MASKED);
+            self.sources.extend(std::iter::repeat_n(None, MASKED.len()));
+        }
+    }
+
+    /// One window's leak: the window's bytes, its head cut, what is shown,
+    /// and the window's bytes inside an occurrence that are shown.
+    #[derive(Debug)]
+    struct OracleLeak {
+        values: Vec<String>,
+        window: Vec<u8>,
+        truncated: bool,
+        shown: String,
+        leaked: Vec<usize>,
+    }
+
+    impl OracleLeak {
+        fn describe(&self) -> String {
+            format!(
+                "values {:?}, window {:?} ({:?}), head cut {}, shown {:?}, \
+                 window bytes shown inside an occurrence {:?}",
+                self.values,
+                self.window,
+                String::from_utf8_lossy(&self.window),
+                self.truncated,
+                self.shown,
+                self.leaked
+            )
+        }
+    }
+
+    /// The bytes of `stream[head..end]` that [`shown_tail`] (the path
+    /// [`compose_detail`] takes) shows, as offsets into the window, with
+    /// what it shows. The shown text is traced back to the window through
+    /// the steps' seams: [`read_and_find`] (its text must be a lossy decode
+    /// of a part of the window that leaves out at most three bytes at each
+    /// end) and [`masked`], then the escape, the
+    /// trailing-newline trim and the cuts at the head, which leave a suffix
+    /// of that text (both asserted).
+    fn oracle_shown(
+        stream: &[u8],
+        values: &[String],
+        head: usize,
+        end: usize,
+    ) -> (Vec<usize>, String) {
+        let window = &stream[head..end];
+        let tail = TailSnapshot {
+            bytes: window.to_vec(),
+            truncated: head > 0,
+            ended: true,
+        };
+        let (text, ranges) = read_and_find(&tail, values);
+        let n = window.len();
+        let (from, decoded) = (0..=n.min(3))
+            .flat_map(|from| (n.saturating_sub(3).max(from)..=n).map(move |to| (from, to)))
+            .find_map(|(from, to)| {
+                let decoded = oracle_decode(&window[from..to]);
+                (decoded.iter().map(|(c, _)| *c).collect::<String>() == text)
+                    .then_some((from, decoded))
+            })
+            .unwrap_or_else(|| panic!("step 1 read {text:?} from no part of {window:?}"));
+        let mut traced = Traced::default();
+        let mut shown_to = 0;
+        let mut ranges_iter = ranges.clone().into_iter().peekable();
+        while let Some(range) = ranges_iter.next() {
+            let mut range_end = range.end;
+            while let Some(next) = ranges_iter.next_if(|next| next.start < range_end) {
+                range_end = range_end.max(next.end);
+            }
+            traced.text(&text, shown_to..range.start);
+            traced.mask();
+            shown_to = range_end;
+        }
+        traced.text(&text, shown_to..text.len());
+        let Traced {
+            plain,
+            written,
+            sources,
+        } = traced;
+        assert_eq!(
+            plain,
+            masked(&text, ranges),
+            "the oracle's trace writes what `masked` writes"
+        );
+        let trimmed = written.trim_end_matches('\n').len();
+        let shown = shown_tail(&tail, values);
+        assert!(
+            written[..trimmed].ends_with(&shown),
+            "what is shown is a suffix of the masked text: {shown:?} of {written:?}"
+        );
+        let mut bytes: Vec<usize> = sources[trimmed - shown.len()..trimmed]
+            .iter()
+            .flatten()
+            .flat_map(|index| decoded[*index].1.clone())
+            .map(|byte| from + byte)
+            .collect();
+        bytes.sort_unstable();
+        bytes.dedup();
+        (bytes, shown)
+    }
+
+    /// The window `head..end` of `stream` checked against the invariant:
+    /// a leak when a byte it shows lies inside an occurrence.
+    fn oracle_check(
+        stream: &[u8],
+        inside: &[bool],
+        values: &[String],
+        head: usize,
+        end: usize,
+    ) -> Option<OracleLeak> {
+        let (bytes, shown) = oracle_shown(stream, values, head, end);
+        let leaked: Vec<usize> = bytes
+            .into_iter()
+            .filter(|byte| inside[head + byte])
+            .collect();
+        (!leaked.is_empty()).then(|| OracleLeak {
+            values: values.to_vec(),
+            window: stream[head..end].to_vec(),
+            truncated: head > 0,
+            shown,
+            leaked,
+        })
+    }
+
+    fn oracle_case(rng: &mut Prng, cover: &mut OracleCoverage) -> (Vec<String>, Vec<u8>) {
+        let count = 1 + rng.below(4);
+        let mut values: Vec<String> = Vec::new();
+        while values.len() < count {
+            let value = oracle_value(rng, &values, cover);
+            if !values.contains(&value) {
+                values.push(value);
+            }
+        }
+        let mut stream = String::new();
+        for _ in 0..1 + rng.below(5) {
+            stream.push_str(&oracle_units(rng, 0, 6, true));
+            let value = values[rng.below(values.len())].clone();
+            stream.push_str(&value);
+            if value.ends_with('\r') && rng.chance(50) {
+                // Written at a line end: its `\r` then a `\n`.
+                stream.push('\n');
+            }
+            if rng.chance(15) {
+                stream.push_str(&value);
+                cover.adjacent_occurrences += 1;
+            } else if rng.chance(15) {
+                stream.push_str(&values[rng.below(values.len())]);
+                cover.adjacent_occurrences += 1;
+            }
+        }
+        stream.push_str(&oracle_units(rng, 0, 6, true));
+        (values, stream.into_bytes())
+    }
+
+    /// The windows a stream is read through: the whole stream (no cut),
+    /// and cuts at arbitrary byte offsets, half of them near an
+    /// occurrence's edge (so inside a character, a value or a `\r\n`).
+    fn oracle_cuts(rng: &mut Prng, inside: &[bool]) -> Vec<(usize, usize)> {
+        let n = inside.len();
+        let edges: Vec<usize> = (0..=n)
+            .filter(|&i| (i > 0 && inside[i - 1]) != (i < n && inside[i]))
+            .collect();
+        let mut cuts = vec![(0, n)];
+        let at = |rng: &mut Prng| {
+            if !edges.is_empty() && rng.chance(50) {
+                (edges[rng.below(edges.len())] + rng.below(7))
+                    .saturating_sub(3)
+                    .min(n)
+            } else {
+                rng.below(n + 1)
+            }
+        };
+        while cuts.len() < ORACLE_CUTS_PER_STREAM {
+            let (a, b) = (at(rng), at(rng));
+            let (head, end) = (a.min(b), a.max(b));
+            cuts.push(match rng.below(10) {
+                0 => (0, end),
+                1 => (head, n),
+                _ => (head, end),
+            });
+        }
+        cuts
+    }
+
+    fn oracle_count(
+        cover: &mut OracleCoverage,
+        stream: &[u8],
+        inside: &[bool],
+        head: usize,
+        end: usize,
+    ) {
+        let continuation = |byte: u8| (0x80..0xC0).contains(&byte);
+        let window = &stream[head..end];
+        cover.windows += 1;
+        if (head, end) == (0, stream.len()) {
+            cover.uncut_windows += 1;
+        }
+        if head > 0 && head < stream.len() && continuation(stream[head]) {
+            cover.head_cut_in_a_character += 1;
+        }
+        if end < stream.len() && end > 0 && continuation(stream[end]) {
+            cover.end_cut_in_a_character += 1;
+        }
+        if head < end && inside[head..end].iter().all(|b| *b) {
+            cover.windows_inside_an_occurrence += 1;
+        }
+        let trimmed = window.strip_suffix(b"\n").unwrap_or(window);
+        if !window.is_empty() && !trimmed.contains(&b'\n') {
+            cover.windows_of_one_line += 1;
+        }
+        if window.ends_with(b"\n") {
+            cover.windows_ending_in_a_newline += 1;
+        }
+    }
+
+    /// A leak made smaller while it still leaks: values left out, the
+    /// stream's bytes outside the window left out, the window narrowed.
+    fn oracle_minimise(
+        mut values: Vec<String>,
+        mut stream: Vec<u8>,
+        mut head: usize,
+        mut end: usize,
+    ) -> OracleLeak {
+        let leaks = |values: &[String], stream: &[u8], head: usize, end: usize| {
+            let inside = oracle_inside(stream.len(), &oracle_occurrences(stream, values));
+            oracle_check(stream, &inside, values, head, end)
+        };
+        let mut last = leaks(&values, &stream, head, end).expect("a leak to minimise");
+        loop {
+            let mut smaller = false;
+            for i in 0..values.len() {
+                if values.len() > 1 {
+                    let mut fewer = values.clone();
+                    fewer.remove(i);
+                    if let Some(leak) = leaks(&fewer, &stream, head, end) {
+                        (values, last, smaller) = (fewer, leak, true);
+                        break;
+                    }
+                }
+            }
+            if smaller {
+                continue;
+            }
+            let mut tries: Vec<(Vec<u8>, usize, usize)> = Vec::new();
+            if head > 1 {
+                tries.push((stream[1..].to_vec(), head - 1, end - 1));
+            }
+            if end < stream.len() {
+                tries.push((stream[..stream.len() - 1].to_vec(), head, end));
+            }
+            if head + 1 < end {
+                if head > 0 {
+                    tries.push((stream.clone(), head + 1, end));
+                }
+                tries.push((stream.clone(), head, end - 1));
+            }
+            for (s, h, e) in tries {
+                if let Some(leak) = leaks(&values, &s, h, e) {
+                    (stream, head, end, last, smaller) = (s, h, e, leak, true);
+                    break;
+                }
+            }
+            if !smaller {
+                return last;
+            }
+        }
+    }
+
+    /// Class NL, the one named exception: a window the ring cut at its
+    /// head that holds only newline bytes (`\n`, `\r`) lying inside one
+    /// occurrence of a value (so inside a run of that value's newlines).
+    /// Judged from the stream and the brute-force occurrences alone, no
+    /// function of the module's.
+    fn oracle_nl_window(
+        stream: &[u8],
+        occurrences: &[std::ops::Range<usize>],
+        head: usize,
+        end: usize,
+    ) -> bool {
+        head > 0
+            && head < end
+            && stream[head..end].iter().all(|b| matches!(b, b'\n' | b'\r'))
+            && occurrences
+                .iter()
+                .any(|occurrence| occurrence.start <= head && end <= occurrence.end)
+    }
+
+    /// One oracle run: the classes met, the windows class NL's predicate
+    /// matched, the leaks it exempted (each showing only `\n` bytes of
+    /// such a window), and the windows that leak outside it, the first
+    /// `limit` of them minimised.
+    #[derive(Default)]
+    struct OracleRun {
+        cover: OracleCoverage,
+        nl_windows: usize,
+        nl_exempted: usize,
+        leaking: usize,
+        leaks: Vec<OracleLeak>,
+    }
+
+    /// Every case of `streams` streams from `seed`, its windows checked.
+    fn oracle_run(seed: u64, streams: usize, limit: usize) -> OracleRun {
+        let mut rng = Prng(seed);
+        let mut run = OracleRun::default();
+        for _ in 0..streams {
+            let (values, stream) = oracle_case(&mut rng, &mut run.cover);
+            let written: Vec<std::ops::Range<usize>> =
+                (0..stream.len()).map(|i| i..i + 1).collect();
+            let whole = oracle_matches(&stream, &written, &values);
+            if whole
+                .iter()
+                .any(|a| whole.iter().any(|b| a.start < b.start && b.start < a.end))
+            {
+                run.cover.overlapping_occurrences += 1;
+            }
+            let occurrences = oracle_occurrences(&stream, &values);
+            let inside = oracle_inside(stream.len(), &occurrences);
+            for (head, end) in oracle_cuts(&mut rng, &inside) {
+                oracle_count(&mut run.cover, &stream, &inside, head, end);
+                let nl_window = oracle_nl_window(&stream, &occurrences, head, end);
+                run.nl_windows += usize::from(nl_window);
+                let Some(leak) = oracle_check(&stream, &inside, &values, head, end) else {
+                    continue;
+                };
+                if nl_window && leak.leaked.iter().all(|byte| stream[head + byte] == b'\n') {
+                    run.nl_exempted += 1;
+                    continue;
+                }
+                run.leaking += 1;
+                if run.leaks.len() < limit {
+                    run.leaks
+                        .push(oracle_minimise(values.clone(), stream.clone(), head, end));
+                }
+            }
+        }
+        run
+    }
+
+    /// The oracle, a permanent fixed-seed sample ([`ORACLE_SEED`]):
+    /// [`ORACLE_STREAMS`] streams, each read through
+    /// [`ORACLE_CUTS_PER_STREAM`] windows (216,000), every class it is
+    /// built to hold met at least 200 times; about 4.8 s in a debug build.
+    /// Its rule: a byte of the window is shown if it appears in the output
+    /// (a newline read from `\r\n` shows its `\n`; a `\r` is shown only
+    /// where a `\r` is, escaped; a U+FFFD shows every byte it replaces).
+    /// No byte of the window that lies inside an occurrence of a value in
+    /// the stream — found by brute force at every position, as written and
+    /// as read — is shown, the occurrence inside the window or crossing a
+    /// cut, but in class NL ([`oracle_nl_window`], pinned as shown today by
+    /// `a_head_cut_window_of_a_value_s_newlines_shows_one_of_them_today`),
+    /// whose windows are counted and exempted. Without that exemption this
+    /// seed is green at 6,000 streams and red at 9,000 and at 20,000 (one
+    /// window each). A sample, not a proof.
+    ///
+    /// What it covers: values from 1 to about 60 characters, one to four
+    /// to a server, built as prefixes of each other, overlapping (one's
+    /// end another's start), inside each other, of one character, longer
+    /// than a window, of several lines (with blank lines, a trailing
+    /// newline, LF or CRLF line ends), with 2-, 3- and 4-byte characters,
+    /// and holding a `\r` not followed by `\n` (ending in one, or with one
+    /// inside); streams of those values, adjacent and repeated (a value
+    /// ending in a `\r` written at a line end, then a `\n`), between
+    /// ASCII, multi-byte characters and LF and CRLF line ends; windows cut
+    /// at any byte at either end (inside a character, a value or a
+    /// `\r\n`), uncut, of one line, ending in newlines, lying inside an
+    /// occurrence.
+    ///
+    /// What it leaves out: the generic shapes and hidden characters
+    /// (no unit spells one); a tail longer than [`TAIL_BYTES`] (step 5's
+    /// cut); which values are in the mask set.
+    #[test]
+    fn the_oracle_s_sample_shows_no_value_byte_outside_class_nl() {
+        let OracleRun {
+            cover,
+            nl_windows,
+            nl_exempted,
+            leaking,
+            leaks,
+        } = oracle_run(ORACLE_SEED, ORACLE_STREAMS, 1);
+        for (class, count) in [
+            ("prefix pairs", cover.prefix_pairs),
+            ("overlapping pairs", cover.overlapping_pairs),
+            ("a value inside another", cover.value_inside_another),
+            ("one-character values", cover.one_character_values),
+            ("values longer than a window", cover.long_values),
+            ("multi-line values", cover.multi_line_values),
+            ("CRLF values", cover.crlf_values),
+            ("values ending in a newline", cover.trailing_newline_values),
+            ("multi-byte values", cover.multi_byte_values),
+            ("values holding a lone CR", cover.lone_cr_values),
+            ("overlapping occurrences", cover.overlapping_occurrences),
+            ("uncut windows", cover.uncut_windows),
+            (
+                "head cuts inside a character",
+                cover.head_cut_in_a_character,
+            ),
+            ("end cuts inside a character", cover.end_cut_in_a_character),
+            (
+                "windows inside an occurrence",
+                cover.windows_inside_an_occurrence,
+            ),
+            ("windows of one line", cover.windows_of_one_line),
+            (
+                "windows ending in a newline",
+                cover.windows_ending_in_a_newline,
+            ),
+            ("adjacent occurrences", cover.adjacent_occurrences),
+        ] {
+            assert!(count >= 200, "the generator met {class} only {count} times");
+        }
+        assert_eq!(cover.windows, ORACLE_STREAMS * ORACLE_CUTS_PER_STREAM);
+        // The seed is fixed, so the exemption's reach is pinned exactly:
+        // one window of the 821 its predicate matches.
+        assert_eq!(
+            (nl_exempted, nl_windows),
+            (1, 821),
+            "class NL's exempted windows of those its predicate matched"
+        );
+        assert!(
+            leaks.is_empty(),
+            "{leaking} windows show a byte of a masked value outside class NL \
+             ({nl_exempted} exempted of the {nl_windows} its predicate matched); \
+             one, minimised: {}",
+            leaks[0].describe()
+        );
     }
 }

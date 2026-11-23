@@ -1243,18 +1243,59 @@ depends on the registry dropping the last reference.
   drains it in 1 KB chunks into the client's `StderrTail`
   (`McpClientConfig::stderr_tail`, the caller's handle, a fresh tail per
   spawn), keeping the last 4 KB, and stops 250 ms after the reap.
-  `tools::extensions::stderr` masks it (the load's values, a value's
-  `\r\n` read as `\n`; a value cut at the tail's head (for one holding
-  a newline, every later line of it; a cut tail lying wholly inside a
-  value, whole); a value cut at the end of an
-  unterminated last line (for one holding a newline, also just after
-  one of its newlines; not when a shorter value is a prefix of it: that
-  one is masked and the rest of the cut value shown); not a value cut
-  inside a multi-byte character, at either end; inherited
-  secret-named variables, generic shapes: `<masked>`), cuts it to 4 KB
-  from the end and escapes it (`escape_hidden`) into a `Failed` row's
-  `detail` only — at the four places a `Failed` detail is written — never
-  into an `McpError`'s text or `ConnectionSnapshot::Failed`'s reason.
+  `tools::extensions::stderr` masks it (`<masked>`: the load's values
+  and inherited secret-named variables, a value's `\r\n` read as `\n`;
+  every occurrence, looked for at every place, overlapping ones too,
+  the masked bytes their union; a value cut at the tail's head (for one
+  holding a newline, every later line of it; a cut tail lying wholly
+  inside a value, whole) or at the end of an unterminated last line
+  (for one holding a newline, also just after one of its newlines),
+  inside a multi-byte character too; a value holding a `\r` not
+  followed by `\n` also looked for in the text as written; generic
+  shapes), cuts it to 4 KB from the end and escapes it
+  (`escape_hidden`) into a `Failed` row's `detail` only — at the four
+  places a `Failed` detail is written — never into an `McpError`'s
+  text or `ConnectionSnapshot::Failed`'s reason.
+  What that masking holds is claimed only as a fixed-seed sample: the
+  oracle test `the_oracle_s_sample_shows_no_value_byte_outside_class_nl`
+  reads 216,000 windows generated from the fixed seed
+  `0x005E_ED0F_7A11_0001` (9,000 streams, about 5 s in a debug build;
+  its doc lists the classes its generator builds: values that are
+  prefixes of, overlap or lie inside each other, of one character or
+  longer than a window, multi-line, CRLF, multi-byte, holding a lone
+  `\r`; windows cut at any byte), and five seeds of 20,000 streams
+  (`0x005EED0F7A110001`, `0x123456789ABCDEF1`, `0x9E3779B97F4A7C15`,
+  `0xD1B54A32D192ED03`, `0x0BAD5EED00000003`; 480,000 windows each,
+  about 11 s a seed) when it was written; it finds no byte of an
+  occurrence of a value shown, inside the window or crossing a cut,
+  but in class NL — a window the ring cut at its head holding only
+  newline bytes inside a run of a value's newlines can show one of
+  them, as before (pinned as shown today; values `y2y\r\n\r\n\r\n1`
+  and `\n1`, window `\n\r\n\r\n`, shown `\n<masked>`). Without the
+  test's NL exemption the official seed is green at 6,000 streams and
+  red at 9,000 and 20,000. Outside the sample: the
+  generic shapes, hidden characters, tails beyond 4 KB, which values
+  are masked. Its limits: masks that only touch are shown apart (a run
+  of a value that overlaps itself reads one `<masked>` per place); a
+  cut tail whose first newline a lone-`\r` value's mask takes shows the
+  ring's partial first line; and its cost. Searched inside the exec
+  bound (one ARG_MAX, 1,048,576 bytes, of `NAME=value` entries) in
+  release builds, the old and new code timed on the same inputs (32.5
+  minutes of cases, and 9.9 more of the new code alone), its worst
+  case found takes 2.8 s where the code before it took 384 s in its
+  worst finished case and ran one case for about 28 minutes without
+  finishing (that code scanned again from each end of a value; each
+  place is now looked at once), but
+  with every value holding a lone `\r` the two readings double the
+  work: 2.76 s against 1.38 s (88,552 values `<i>\ra`, a head-cut tail
+  of `a`), 2.74 s against 1.38 s (`a`×1999 `\r`, `x\ra` and 88,384
+  values `b<i>\r`, tail `a`×4095 `c`), 2.72 s against 1.39 s (the same
+  with `a`×500). An ordinary set (5 to 50 keys, tokens, a URL, a port)
+  against the worst tail built for it: under 1 ms in a release build,
+  about 6 ms in a debug one. The masking runs synchronously on the
+  async worker thread that composes the detail (a failed connect or
+  list, a tool-list change, an exit, a failed call), as before, so an
+  extreme set holds that thread for seconds.
 
 ---
 
