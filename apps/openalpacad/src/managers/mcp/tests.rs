@@ -1962,6 +1962,7 @@ async fn every_registration_site_shares_the_registrys_output_checks() {
         let check = output_check
             .as_ref()
             .expect("a tool that declares a schema carries its check");
+        assert!(!openalpaca_core::tools::mcp::OutputChecks::default().owns(check));
         h.registry.output_checks().owns(check)
     };
     assert!(shares_the_registrys("srv__first"), "the bring-up's pool");

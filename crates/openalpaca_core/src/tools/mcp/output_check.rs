@@ -22,10 +22,15 @@
 //! - **A bounded wait** (I2). A call waits at most [`OUTPUT_CHECK_WAIT`] for
 //!   its answer, asynchronously; past it, while the thread has been busy
 //!   longer than that, or before the tool's schema is compiled, the result
-//!   is kept unchanged with [`NOT_CHECKED_LINE`]. Nothing is refused because
-//!   of a check. The wait runs inside the sandbox's cut of the call, so a
-//!   result that arrives at the very end of the call's time limit can still
-//!   be cut there, as a timeout (counted toward the tool's circuit breaker).
+//!   is kept unchanged with [`NOT_CHECKED_LINE`], but for one case. Nothing
+//!   is refused because of a check. The wait runs inside the sandbox's cut
+//!   of the call (the server's request timeout, or the per-tool bound when
+//!   lower), so a result that arrives less than [`OUTPUT_CHECK_WAIT`] before
+//!   that limit, and whose check has not answered by then, is cut there as
+//!   a timeout: the result is not kept, and the cut counts toward the tool's
+//!   circuit breaker. Nothing puts a minimum on a server's
+//!   `request_timeout_secs`, so a short one puts every call whose check is
+//!   not quick inside that window.
 //! - **Yes or no** (I3). A check is `Validator::is_valid` and nothing else; a
 //!   mismatch is one fixed line, [`MISMATCH_LINE`], with no detail, so no
 //!   third-party text enters a result from here and there is nothing to

@@ -550,6 +550,23 @@ async fn two_servers_have_a_thread_each() {
     assert!(threads.contains(&"mcp-output-check:srv-two".to_string()));
 }
 
+/// `owns` answers for its own pool only: a check registered through pool A
+/// is A's and not B's, even under the same server and tool name. The
+/// daemon's I1 wiring test relies on it: with an `owns` that always says
+/// yes, a site that hands a tool a pool of its own would pass it.
+#[test]
+fn a_check_is_owned_by_its_own_pool_only() {
+    let (probe, _release) = probe();
+    let first = pool(&probe);
+    let second = pool(&probe);
+    let a = first.register("srv-own", "srv-own__get", &any_schema());
+    let b = second.register("srv-own", "srv-own__get", &any_schema());
+    assert!(first.owns(&a), "A's check is A's");
+    assert!(!second.owns(&a), "A's check is not B's");
+    assert!(second.owns(&b), "B's check is B's");
+    assert!(!first.owns(&b), "B's check is not A's");
+}
+
 /// An idle server's thread ends when its last tool is gone, and a later
 /// registration starts it again: one at a time.
 #[test]

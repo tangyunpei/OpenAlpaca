@@ -1167,12 +1167,18 @@ depends on the registry dropping the last reference.
     `[This tool declares an output schema, but its result has no
     structured output.]`; an error result (`isError`) — no check and no
     line. A tool with no schema is unchanged. Nothing is refused because of
-    the check, and no call fails because of it except through the call's
-    time limit (the wait, below); no third-party text enters a result
-    from it. The line closes the full result, before the agentic loop's
-    spill or cut: the model reads it inline only when the result is under
-    `tool_result_inline_bytes`; a larger result reaches it as a stub (or
-    a cut), and the line is then at the end of the spilled file.
+    the check, and no call fails because of it except one that the call's
+    time limit cuts during the wait (below), whose result is then not
+    kept; no third-party text enters a result from it. The line closes
+    the full result, before the agentic loop's spill or cut
+    (`model_visible_result`): the model reads it inline only when the
+    result is at most `tool_result_inline_bytes`. A larger one spills
+    only where the loop has a session log (`spill_plan`): the model gets
+    a stub with the first 2 KB, and the line is at the end of the
+    spilled file, which `read_result` pages. With no session log, or
+    when the spill record was not accepted, nothing spills: the result
+    is cut to its head (`truncate_tool_result_to`) and the line, at its
+    tail, is not shown.
   - *A schema that does not compile* (a remote, relative or file `$ref`, an
     unknown `$schema`, a malformed schema, a pattern the engine refuses):
     the tool is registered and works as before, its results get no line,
@@ -1197,10 +1203,14 @@ depends on the registry dropping the last reference.
     constant, not a config key), asynchronously and inside the sandbox's
     one clock: the wait counts against the call's time limit (the server's
     own request timeout when it is below the per-tool bound, else the
-    bound), so a result that arrives at the very end of that limit can
-    still be cut there — reported as `Tool '…' timed out after Ns` with the
-    reason `timeout`, and counted toward the tool's circuit breaker as any
-    timeout is. At most `CHECK_QUEUE_MAX`, 8, calls of a server are inside
+    bound), so a result that arrives less than `OUTPUT_CHECK_WAIT` before
+    that limit, and whose check has not answered by then, is cut there:
+    reported as `Tool '…' timed out after Ns` with the reason `timeout`,
+    the result that arrived not kept, and counted toward the tool's
+    circuit breaker as any timeout is. Nothing puts a minimum on
+    `request_timeout_secs` (`tools/mcp/config.rs`: a plain `u64`, default
+    30), so a server given a short one puts every call whose check is not
+    quick inside that window. At most `CHECK_QUEUE_MAX`, 8, calls of a server are inside
     a check at once — the one its thread runs and those waiting their turn,
     each holding its own structured value for at most the wait; one more
     is not accepted and reads "not checked" at once. Beyond that, a thread
