@@ -1496,6 +1496,8 @@ mod tests {
             &["aaaaa".to_string()],
             &[
                 (&"a".repeat(12), false, &MASKED.repeat(8)),
+                // Regression guard (green before): one whole occurrence
+                // is one mask, and the text after it is shown.
                 ("aaaaa x", false, "<masked> x"),
             ],
         ));
