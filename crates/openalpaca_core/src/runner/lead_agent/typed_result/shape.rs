@@ -29,17 +29,17 @@ mod tests;
 mod shape_bench;
 
 /// The most bytes a schema may take as compact JSON (L3).
-pub(super) const SCHEMA_MAX_BYTES: usize = 16_384;
+const SCHEMA_MAX_BYTES: usize = 16_384;
 /// The most levels of JSON nesting a schema may have (L3).
-pub(super) const SCHEMA_MAX_NESTING: usize = 64;
+const SCHEMA_MAX_NESTING: usize = 64;
 /// The most object levels on one path of a schema (Y-12 (5), kept by L3).
-pub(super) const MAX_OBJECT_LEVELS: usize = 10;
+const MAX_OBJECT_LEVELS: usize = 10;
 /// The most bytes a submitted result may take as compact JSON (L3).
-pub(super) const RESULT_MAX_BYTES: usize = 65_536;
+const RESULT_MAX_BYTES: usize = 65_536;
 /// The most violation lines a rejection shows; the rest are counted.
-pub(super) const MAX_LINES: usize = 19;
+const MAX_LINES: usize = 19;
 /// Each violation line is cut at this many characters of escaped text.
-pub(super) const LINE_MAX_CHARS: usize = 200;
+const LINE_MAX_CHARS: usize = 200;
 /// A name, a violation line's path segment or a refusal's whole path is
 /// first cut to this many bytes …
 const NAME_PREFIX_BYTES: usize = 256;
@@ -213,8 +213,13 @@ fn number_cmp(a: &Number, b: &Number) -> Ordering {
 }
 
 /// Deep equality as JSON Schema means it (L4): numbers by [`number_cmp`],
-/// strings byte for byte, arrays pairwise, objects member by member. Its
-/// own cycle, entered at a leaf of the check; it never calls `check_node`.
+/// strings byte for byte, arrays pairwise, objects by key: the same number
+/// of members, and each member of one found by its key in the other with an
+/// equal value, so the answer never depends on member order (a `Map` is a
+/// `BTreeMap` only while serde_json's `preserve_order` is off). A key's
+/// lookup is inside the map's search, which the test counter cannot see
+/// (§5.3.4); each node pair it yields is one step. Its own cycle, entered
+/// at a leaf of the check; it never calls `check_node`.
 fn json_equal(a: &Value, b: &Value) -> bool {
     #[cfg(test)]
     probe::step();
@@ -231,8 +236,7 @@ fn json_equal(a: &Value, b: &Value) -> bool {
         (Value::Object(x), Value::Object(y)) => {
             x.len() == y.len()
                 && x.iter()
-                    .zip(y)
-                    .all(|((k1, v1), (k2, v2))| k1 == k2 && json_equal(v1, v2))
+                    .all(|(key, p)| y.get(key).is_some_and(|q| json_equal(p, q)))
         }
         _ => false,
     }

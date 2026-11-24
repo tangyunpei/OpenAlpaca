@@ -20,7 +20,7 @@ pub(crate) const SUBMIT_RESULT: &str = "submit_result";
 
 /// Submissions in all: the first and three repairs (Y-4); the fourth
 /// rejection ends the child.
-pub(crate) const MAX_SUBMISSIONS: usize = 4;
+const MAX_SUBMISSIONS: usize = 4;
 
 /// What `submit_result` tells the model (Y-2, Y-13, Y-20 (7)).
 const DESCRIPTION: &str = "Deliver your result: call this with the result as `result`, \

@@ -152,6 +152,57 @@ fn const_is_checked() {
     assert!(!passes(&null, &json!(0)));
 }
 
+/// A regression guard, green on the parent: two objects are equal when
+/// they hold the same members, whatever the order they were built in, and
+/// unequal when a key, a value or the member count differs. With
+/// serde_json's `preserve_order` off, as in today's graph, `Map` is a
+/// `BTreeMap` and the two build orders below give the same map: the test
+/// guards the by-key lookup's results, and the mutation "compare by zipped
+/// order" is not distinguishable from it today.
+#[test]
+fn object_equality_is_by_key_whatever_the_build_order() {
+    let mut ab = Map::new();
+    ab.insert("a".to_string(), json!(1));
+    ab.insert("b".to_string(), json!([2, {"c": 3}]));
+    let mut ba = Map::new();
+    ba.insert("b".to_string(), json!([2, {"c": 3}]));
+    ba.insert("a".to_string(), json!(1));
+    let (ab, ba) = (Value::Object(ab), Value::Object(ba));
+    assert!(json_equal(&ab, &ba));
+    assert!(json_equal(&ba, &ab));
+    let constant = admit(&json!({"const": ab.clone()}));
+    assert!(passes(&constant, &ba));
+    let members = admit(&json!({"enum": ["x", ba.clone()]}));
+    assert!(passes(&members, &ab));
+
+    // A key, a value, an inner key or the member count differs.
+    let differs = [
+        json!({"a": 1, "c": [2, {"c": 3}]}),
+        json!({"a": 1, "b": [2, {"c": 4}]}),
+        json!({"a": 1, "b": [2, {"d": 3}]}),
+        json!({"b": 1, "a": [2, {"c": 3}]}),
+        json!({"a": 1}),
+        json!({"a": 1, "b": [2, {"c": 3}], "z": null}),
+    ];
+    for other in &differs {
+        assert!(!json_equal(&ab, other), "{other}");
+        assert!(!json_equal(other, &ab), "{other}");
+        assert!(!passes(&constant, other), "{other}");
+        assert!(!passes(&members, other), "{other}");
+    }
+
+    // The counter (§5.3.4) charges node pairs only; a key's lookup is
+    // inside the map's search, which it cannot see. An equal pair costs
+    // one step a node, and an unequal one no more than that.
+    probe::reset();
+    assert!(json_equal(&ab, &ba));
+    assert_eq!(probe::steps(), nodes(&ab));
+    let (left, right) = (json!({"b": 1, "c": 2}), json!({"a": 1, "b": 1}));
+    probe::reset();
+    assert!(!json_equal(&left, &right));
+    assert!(probe::steps() <= nodes(&right));
+}
+
 #[test]
 fn any_of_passes_on_one_branch_and_fails_in_one_line() {
     let shape = admit(&json!({"anyOf": [{"type": "string"}, {"type": "integer", "minimum": 5}]}));
