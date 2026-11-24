@@ -709,6 +709,10 @@ pub(super) fn completion_status_line(
         LoopFinishReason::Truncated => Some("Task ended early (output truncated):"),
         LoopFinishReason::Cancelled => Some("Task was cancelled before finishing:"),
         LoopFinishReason::Error(_) => Some("Task ended with an error:"),
+        LoopFinishReason::ResultSubmitted => None,
+        LoopFinishReason::ResultRejected => {
+            Some("Task ended early (result did not match its result_schema):")
+        }
     }
 }
 

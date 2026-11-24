@@ -1025,8 +1025,12 @@ impl Orchestrator {
             let call_cost = result.requests_cost;
 
             let call_status = match &result.finish_reason {
-                LoopFinishReason::Complete | LoopFinishReason::MaxRounds | LoopFinishReason::Truncated => "success",
+                LoopFinishReason::Complete
+                | LoopFinishReason::MaxRounds
+                | LoopFinishReason::Truncated
+                | LoopFinishReason::ResultSubmitted => "success",
                 LoopFinishReason::CostExceeded => "cost_exceeded",
+                LoopFinishReason::ResultRejected => "result_rejected",
                 LoopFinishReason::Cancelled => "cancelled",
                 LoopFinishReason::Error(_) => "error",
             };
@@ -1327,8 +1331,12 @@ impl Orchestrator {
         let call_cost = result.requests_cost;
 
         let call_status = match &result.finish_reason {
-            LoopFinishReason::Complete | LoopFinishReason::MaxRounds | LoopFinishReason::Truncated => "success",
+            LoopFinishReason::Complete
+            | LoopFinishReason::MaxRounds
+            | LoopFinishReason::Truncated
+            | LoopFinishReason::ResultSubmitted => "success",
             LoopFinishReason::CostExceeded => "cost_exceeded",
+            LoopFinishReason::ResultRejected => "result_rejected",
             LoopFinishReason::Cancelled => "cancelled",
             LoopFinishReason::Error(_) => "error",
         };

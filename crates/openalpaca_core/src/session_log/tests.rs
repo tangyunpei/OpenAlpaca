@@ -3802,3 +3802,59 @@ fn a_subagents_round_is_not_the_leads_when_its_open_was_trimmed_away() {
         plan.messages
     );
 }
+
+/// **SA-4 (Y-15 (4)).** A subagent spawned with a `result_schema` opens its
+/// lane with `"typed": true`, and the replay names it among the run's typed
+/// runs; an untyped one is not named, and its `ReplayedSubagent` is as
+/// before.
+#[test]
+fn a_typed_spawn_is_replayed_as_typed() {
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path();
+    let mut typed = subagent_open("span-a", "worker::aaaaaaaa");
+    typed["typed"] = serde_json::json!(true);
+    seed_spanned_records(
+        root,
+        "s1",
+        &[
+            (
+                "round",
+                "t1",
+                "lead::t1",
+                round_record(
+                    1,
+                    "",
+                    &[(
+                        "tu-1",
+                        "spawn_subagent",
+                        serde_json::json!({"agent_id": "worker"}),
+                    )],
+                ),
+            ),
+            ("subagent_open", "t1", "span-a", typed),
+            (
+                "subagent_open",
+                "t1",
+                "span-b",
+                subagent_open("span-b", "worker::bbbbbbbb"),
+            ),
+        ],
+    );
+
+    let plan = replay::rebuild(&root.join("s1"), "t1", 4).unwrap();
+
+    assert_eq!(plan.typed_runs, vec!["worker::aaaaaaaa".to_string()]);
+    assert_eq!(
+        plan.subagents,
+        vec![
+            replay::ReplayedSubagent {
+                run_id: "worker::aaaaaaaa".to_string(),
+                close: None,
+            },
+            replay::ReplayedSubagent {
+                run_id: "worker::bbbbbbbb".to_string(),
+                close: None,
+            },
+        ]
+    );
+}

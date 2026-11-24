@@ -151,6 +151,13 @@ pub struct LoopConfig {
     /// never taken away. `None` (every other caller: the lead, subagents,
     /// skills, compaction) reviews nothing and costs nothing.
     pub answer_guard: Option<Arc<dyn AnswerGuard>>,
+    /// SA-4 (Y-9): the typed-result slot of a child spawned with a
+    /// `result_schema` — shared with its `submit_result` tool. After each
+    /// tool round the loop reads it: an accepted submission ends the run
+    /// `ResultSubmitted`, the fourth rejection `ResultRejected`; a
+    /// `submit_result` call a cap refused is recorded in it; and a round
+    /// that ends with text alone is nudged once. `None` on every other loop.
+    pub typed_result: Option<Arc<crate::runner::lead_agent::TypedResultSlot>>,
 }
 
 impl Clone for LoopConfig {
@@ -184,6 +191,7 @@ impl Clone for LoopConfig {
             span_id: self.span_id.clone(),
             tool_result_inline_bytes: self.tool_result_inline_bytes,
             answer_guard: self.answer_guard.clone(),
+            typed_result: self.typed_result.clone(),
         }
     }
 }
@@ -222,6 +230,7 @@ impl std::fmt::Debug for LoopConfig {
             .field("span_id", &self.span_id)
             .field("tool_result_inline_bytes", &self.tool_result_inline_bytes)
             .field("answer_guard", &self.answer_guard.is_some())
+            .field("typed_result", &self.typed_result.is_some())
             .finish()
     }
 }
@@ -257,6 +266,7 @@ impl Default for LoopConfig {
             span_id: None,
             tool_result_inline_bytes: super::tool_helpers::MAX_TOOL_RESULT_SIZE,
             answer_guard: None,
+            typed_result: None,
         }
     }
 }
@@ -329,6 +339,7 @@ impl LoopConfig {
             span_id: None,
             tool_result_inline_bytes: super::tool_helpers::MAX_TOOL_RESULT_SIZE,
             answer_guard: None,
+            typed_result: None,
         }
     }
 
@@ -466,8 +477,11 @@ impl LoopResult {
             LoopFinishReason::Error(e) => {
                 format!("I could not finish this turn: {e}")
             }
-            LoopFinishReason::Complete => {
+            LoopFinishReason::Complete | LoopFinishReason::ResultSubmitted => {
                 "I finished this turn without writing an answer.".to_string()
+            }
+            LoopFinishReason::ResultRejected => {
+                format!("I {STOPPED_SHORT}: my result did not match its result_schema.")
             }
         };
         Some(self.with_last_tool_error(reason))
@@ -522,8 +536,11 @@ impl LoopResult {
                     None => format!("Agent '{agent}' could not finish: {e}"),
                 }
             }
-            LoopFinishReason::Complete => {
+            LoopFinishReason::Complete | LoopFinishReason::ResultSubmitted => {
                 format!("Agent '{agent}' finished without writing an answer.")
+            }
+            LoopFinishReason::ResultRejected => {
+                format!("Agent '{agent}' ended without a result matching its result_schema.")
             }
         };
         self.with_last_tool_error(reason)
@@ -700,4 +717,9 @@ pub enum LoopFinishReason {
     Truncated,
     Cancelled,
     Error(String),
+    /// SA-4 (Y-9): a child spawned with a `result_schema` had a
+    /// `submit_result` call accepted. Only such a child ends this way.
+    ResultSubmitted,
+    /// SA-4 (Y-9): such a child's fourth `submit_result` call was rejected.
+    ResultRejected,
 }

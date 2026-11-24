@@ -431,6 +431,28 @@ differ). Where nothing is routable the reply says the subagent will fail at
 its first round, `model` is null and `model_refused` is true. A subagent sent to the default is
 budgeted on that model's context window.
 
+The lead can also ask a subagent for a result of a stated shape:
+`spawn_subagent` and each `spawn_subagents_batch` entry take an optional
+`result_schema`, a JSON object in a small subset of JSON Schema that
+OpenAlpaca checks itself. It may use `type`, `enum`, `const`, `anyOf`,
+`properties`, `required`, `additionalProperties` (true or false), `items`
+(one schema), `minItems`, `maxItems`, `minimum`, `maximum`,
+`exclusiveMinimum` and `exclusiveMaximum`; `format` and annotations such as
+`title` and `description` are let through unchecked; any other keyword —
+`pattern`, `$ref` and `$defs` among them — refuses the spawn, as does a
+schema over 16,384 bytes, 64 levels of nesting or 10 object levels, each
+with `result_schema is not usable: <reason>.` and nothing spawned. A plugin's
+template refuses a schema. `null`, or a schema that asks for nothing
+(`{}`), is an ordinary spawn, the reply saying so for the latter. Such a
+subagent delivers its result by calling its own `submit_result` tool, which
+counts against its template's `max_tool_calls` like any call: a result that
+does not match is answered with what is wrong, four submissions in all, and
+a result is at most 65,536 bytes. The lead then reads either
+`result (matches result_schema): <the value as compact JSON>` or a failure
+that begins "ended without a result matching its result_schema" or "ended
+without submitting a result", the lane `failed` and its usage row
+`result_rejected`; the lane's `subagent_open` record carries `typed`.
+
 | Alias | Anthropic | OpenAI (its own API) | Ollama, an OpenAI-compatible server, or any provider with no row |
 |---|---|---|---|
 | `fast` | `claude-haiku-5-5` | `gpt-6-luna` | the parent's model |

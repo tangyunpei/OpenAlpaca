@@ -167,5 +167,7 @@ pub(crate) fn finish_reason_to_string(reason: &LoopFinishReason) -> &'static str
         LoopFinishReason::Truncated => "truncated",
         LoopFinishReason::Cancelled => "cancelled",
         LoopFinishReason::Error(_) => "error",
+        LoopFinishReason::ResultSubmitted => "result_submitted",
+        LoopFinishReason::ResultRejected => "result_rejected",
     }
 }

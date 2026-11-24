@@ -7020,3 +7020,71 @@ fn truncate_tool_result_to_backs_off_inside_a_multi_byte_char() {
         "\u{e9}\u{e9}\n\n[... truncated: showing first 4 of 20 bytes]"
     );
 }
+
+// ── SA-4: the typed-result slot on the loop's config ──────────────────
+
+/// `LoopConfig`'s clone shares a typed child's slot (one `Arc`, so the
+/// loop and the child's `submit_result` read the same verdict), and its
+/// `Debug` says only that a slot is present — never what it holds.
+#[test]
+fn a_loop_config_clone_shares_the_slot_and_debug_hides_its_values() {
+    let slot = Arc::new(crate::runner::lead_agent::TypedResultSlot::default());
+    slot.record_cap_refusal(crate::runner::lead_agent::CapRefusal::Run, 1);
+    let config = LoopConfig {
+        typed_result: Some(slot.clone()),
+        ..Default::default()
+    };
+    let copy = config.clone();
+    assert!(Arc::ptr_eq(copy.typed_result.as_ref().unwrap(), &slot));
+    let shown = format!("{copy:?}");
+    assert!(shown.contains("typed_result: true"), "{shown}");
+    assert!(!shown.contains("cap_refused"), "{shown}");
+    assert!(!shown.contains("Run"), "{shown}");
+    assert!(format!("{:?}", LoopConfig::default()).contains("typed_result: false"));
+}
+
+/// **Regression guard** (Y-18 (5), red nowhere): with a typed slot in the
+/// config the answer guard keeps its one bonus round and then its appended
+/// note, as without one — on the last affordable round no nudge is due, so
+/// the guard's policy is what decides.
+#[tokio::test]
+async fn the_answer_guard_keeps_its_one_bonus_round_with_a_typed_slot_present() {
+    let provider = MockProvider::new(vec![
+        Ok(MockProvider::simple_response("a false claim")),
+        Ok(MockProvider::simple_response("a false claim")),
+    ]);
+    let seen = Arc::new(std::sync::Mutex::new(Vec::new()));
+    let config = LoopConfig {
+        max_rounds: 1,
+        answer_guard: Some(Arc::new(CountingGuard {
+            reject: "false",
+            seen: seen.clone(),
+        })),
+        typed_result: Some(Arc::new(
+            crate::runner::lead_agent::TypedResultSlot::default(),
+        )),
+        ..Default::default()
+    };
+
+    let result = run_agentic_loop(
+        DynLlmProvider::from_ref(&provider),
+        vec![ChatMessage::user("start something")],
+        vec![],
+        &config,
+        None,
+        "test",
+        None,
+        None,
+        None,
+        None,
+    )
+    .await;
+
+    assert_eq!(result.finish_reason, LoopFinishReason::Complete);
+    assert_eq!(
+        result.rounds_used, 2,
+        "the one bonus round, paid by the guard"
+    );
+    assert_eq!(result.final_content, "a false claim\n\nthe runtime line");
+    assert_eq!(seen.lock().unwrap().len(), 2, "reviewed exactly twice");
+}

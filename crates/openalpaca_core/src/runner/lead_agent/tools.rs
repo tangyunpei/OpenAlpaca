@@ -576,6 +576,15 @@ impl BuiltInTool for SpawnSubagentTool {
                 );
             }
         };
+        // SA-4 (Y-1, §5.3.2): an absent or `null` `result_schema` is no
+        // schema; one that asks for nothing (L5 (i), the owner's) is treated
+        // as absent too, and the reply says so in one clause.
+        let schema_arg = match arguments.get("result_schema") {
+            None | Some(serde_json::Value::Null) => None,
+            Some(schema) => Some(schema),
+        };
+        let constrains_nothing = schema_arg.is_some_and(super::typed_result::asks_nothing);
+        let schema_arg = schema_arg.filter(|_| !constrains_nothing);
 
         tracing::info!(
             target_agent = agent_id,
@@ -635,6 +644,34 @@ impl BuiltInTool for SpawnSubagentTool {
                 &value,
                 self.parent_model().as_deref(),
             )?),
+        };
+
+        // SA-4 (Y-7, Y-13, §5.3.2): a schema is refused before anything is
+        // reserved — for a plugin-backed template, which returns its own
+        // result, and wherever the checker does not admit it — so a refused
+        // spawn leaves no instance, lane or slot behind.
+        let typed = match schema_arg {
+            None => None,
+            Some(_) if plugin_backed => {
+                let plugin = self
+                    .shared_context
+                    .agent_registry
+                    .get_template(agent_id)
+                    .and_then(|t| match t.source {
+                        AgentSource::Plugin { plugin_id, .. } => Some(plugin_id),
+                        AgentSource::Internal => None,
+                    })
+                    .unwrap_or_default();
+                return Err(format!(
+                    "agent '{agent_id}' is provided by plugin '{plugin}', which returns its own \
+                     result: omit result_schema."
+                ));
+            }
+            Some(schema) => {
+                let shape = super::typed_result::ResultShape::admit(schema)
+                    .map_err(|why| format!("result_schema is not usable: {why}."))?;
+                Some((schema.clone(), Arc::new(shape)))
+            }
         };
 
         // N-LEAD-6: the run's lifetime bound, before anything is registered —
@@ -834,6 +871,11 @@ impl BuiltInTool for SpawnSubagentTool {
             if refused {
                 open["model_refused"] = serde_json::json!(true);
             }
+            // SA-4 (Y-15 (4)): a child spawned with a `result_schema` says
+            // so, for a resumed run's replay; absent for every other.
+            if typed.is_some() {
+                open["typed"] = serde_json::json!(true);
+            }
             log.emit(
                 crate::session_log::Record::new(crate::session_log::RecordType::SubagentOpen)
                     .task(Some(&self.task_id))
@@ -861,8 +903,27 @@ impl BuiltInTool for SpawnSubagentTool {
             // dispatch (T28).
             ..Default::default()
         };
+        // SA-4 (Y-11): a typed child runs on a clone of the registry that
+        // also holds its own `submit_result`, sharing its slot; every other
+        // child runs on the shared registry, as before. The shared one
+        // never holds `submit_result`.
+        let typed_slot = typed
+            .as_ref()
+            .map(|_| Arc::new(super::typed_result::TypedResultSlot::default()));
+        let child_registry = match (&typed, &typed_slot) {
+            (Some((_, shape)), Some(slot)) => {
+                let registry = (*self.tool_registry).clone();
+                super::typed_result::register_submit_result(
+                    &registry,
+                    Arc::clone(shape),
+                    Arc::clone(slot),
+                );
+                Arc::new(registry)
+            }
+            _ => self.tool_registry.clone(),
+        };
         let mut sandbox = SandboxManager::new(
-            self.tool_registry.clone(),
+            child_registry.clone(),
             self.bus.clone(),
             &self.daemon_config.load().security.circuit_breaker,
         );
@@ -876,8 +937,15 @@ impl BuiltInTool for SpawnSubagentTool {
         }
 
         // 6. Resolve tools for subagent's skills
-        let tools =
-            crate::tools::resolve_agent_tools(&agent, &self.tool_registry, Some(&subagent_tool_ctx));
+        let mut tools =
+            crate::tools::resolve_agent_tools(&agent, &child_registry, Some(&subagent_tool_ctx));
+        // SA-4 (Y-11 (1), (3)): the definition a typed child is sent — the
+        // wrapper around its schema — is appended by hand, never resolved
+        // through a capability (which would return the registered,
+        // permissive one).
+        if let Some((schema, _)) = &typed {
+            tools.push(super::typed_result::submit_result_tool_definition(schema));
+        }
 
         // 7. Build LoopConfig from daemon defaults + agent constraints
         let mut loop_config =
@@ -905,6 +973,8 @@ impl BuiltInTool for SpawnSubagentTool {
             .orchestrator
             .sessions
             .tool_result_inline_bytes;
+        // SA-4 (Y-9): the loop reads a typed child's slot after each round.
+        loop_config.typed_result = typed_slot.clone();
 
         // 8. Build messages with context distillation via PromptBuilder.
         // The window is the *answering* model's (M5): a subagent template
@@ -966,6 +1036,30 @@ impl BuiltInTool for SpawnSubagentTool {
         let output_block = "<output-format>\nProvide a clear, complete result. Start with a brief summary of what you accomplished, \
                  followed by the detailed output. The lead agent will use your result to synthesize a \
                  final response, so be thorough and specific.\n</output-format>";
+        // SA-4 (Y-16, Y-20 (7)): a typed child's block swaps its one
+        // sentence for one that says to deliver the result by calling
+        // `submit_result` — no schema text — and, when its template sets
+        // `max_tool_calls`, says the budget.
+        let typed_output_block = typed.as_ref().map(|_| {
+            let budget = agent
+                .constraints
+                .max_tool_calls
+                .map(|n| {
+                    format!(
+                        " You have {n} tool calls in all, and submit_result is one of them: \
+                         keep at least one for it (two, if it may need a repair). A call past \
+                         {n} is refused, and then no result can be delivered."
+                    )
+                })
+                .unwrap_or_default();
+            format!(
+                "<output-format>\nProvide a clear, complete result. Deliver it by calling \
+                 submit_result: your final text is not the result.{budget} The lead agent will \
+                 use your result to synthesize a final response, so be thorough and \
+                 specific.\n</output-format>"
+            )
+        });
+        let output_block = typed_output_block.as_deref().unwrap_or(output_block);
         let constraints_block = "<constraints>\nYou operate independently — you cannot communicate with other subagents directly. \
                  Use workspace_read and workspace_write tools to access or share data across agents.\n</constraints>";
 
@@ -1124,6 +1218,11 @@ impl BuiltInTool for SpawnSubagentTool {
         // deny list still wins, and this policy is also the one a
         // plugin-backed template's proxied tool calls are checked against.
         sandbox_policy.admit_tool_surface(&tools);
+        // SA-4 (Y-11): a typed child's `submit_result` is admitted beside
+        // that surface even when its allow list resolved to nothing.
+        if typed.is_some() {
+            super::typed_result::admit_submit_result(&mut sandbox_policy);
+        }
         // M6: inherited from the run — a subagent's confirmation reaches the
         // same (absent) responder as the lead's.
         sandbox_policy.unattended = self.unattended;
@@ -1383,12 +1482,25 @@ impl BuiltInTool for SpawnSubagentTool {
 
             let duration_ms = agent_start.elapsed().as_millis() as u64;
 
-            let agent_success = matches!(
-                &result.finish_reason,
-                crate::runner::LoopFinishReason::Complete
-                    | crate::runner::LoopFinishReason::MaxRounds
-                    | crate::runner::LoopFinishReason::Truncated
-            );
+            // SA-4 (Y-5, Y-9, Y-15, Y-19): a typed child's outcome is its
+            // slot's verdict, never its finish reason — an accepted
+            // submission is its only success, anything else its typed
+            // failure — but a cancelled one closes as any cancelled run
+            // does, its slot unread. `None` for every other child.
+            let typed_close = typed_slot
+                .as_ref()
+                .filter(|_| result.finish_reason != crate::runner::LoopFinishReason::Cancelled)
+                .map(|slot| typed_close(&slot.outcome(), &result, &sandbox_policy, &run_id_clone));
+
+            let agent_success = match &typed_close {
+                Some(close) => close.success,
+                None => matches!(
+                    &result.finish_reason,
+                    crate::runner::LoopFinishReason::Complete
+                        | crate::runner::LoopFinishReason::MaxRounds
+                        | crate::runner::LoopFinishReason::Truncated
+                ),
+            };
 
             // Destroy instance (explicit restore; guard is backup for panics)
             busy_guard.restore();
@@ -1397,21 +1509,26 @@ impl BuiltInTool for SpawnSubagentTool {
             // into `false` because the lead agent needs a boolean; the span
             // maps `Cancelled` explicitly, because "cancelled" and "failed"
             // read differently and the UI has separate copy for each.
-            let span_state = crate::runner::span::span_state_for(&result.finish_reason);
-            let span_detail = match result.finish_reason {
-                crate::runner::LoopFinishReason::Cancelled => {
-                    Some(lane.cancel_detail("cancelled").to_string())
-                }
-                ref finish => crate::runner::span::span_detail_for(finish),
-            };
-            lane.close(
-                span_state,
-                span_detail.as_deref(),
-                Some(result.final_content.as_str()),
-            );
+            if let Some(close) = &typed_close {
+                lane.close(close.state, close.detail.as_deref(), Some(&close.output));
+            } else {
+                let span_state = crate::runner::span::span_state_for(&result.finish_reason);
+                let span_detail = match result.finish_reason {
+                    crate::runner::LoopFinishReason::Cancelled => {
+                        Some(lane.cancel_detail("cancelled").to_string())
+                    }
+                    ref finish => crate::runner::span::span_detail_for(finish),
+                };
+                lane.close(
+                    span_state,
+                    span_detail.as_deref(),
+                    Some(result.final_content.as_str()),
+                );
+            }
 
-            // Record LLM usage + agent history
-            crate::orchestrator::dispatcher::usage::record_llm_usage(
+            // Record LLM usage + agent history. A typed failure is recorded
+            // `result_rejected` whatever its loop's finish (Y-15 (3)).
+            crate::orchestrator::dispatcher::usage::record_llm_usage_with_status(
                 &router,
                 &result,
                 loop_config.model.as_deref(),
@@ -1420,6 +1537,10 @@ impl BuiltInTool for SpawnSubagentTool {
                 duration_ms as i64,
                 db.as_ref(),
                 &bus,
+                typed_close
+                    .as_ref()
+                    .filter(|close| !close.success)
+                    .map(|_| "result_rejected"),
             );
 
             if let Some(ref db) = db {
@@ -1446,7 +1567,19 @@ impl BuiltInTool for SpawnSubagentTool {
             );
 
             // Update tracker with result
-            if agent_success {
+            if let Some(close) = typed_close {
+                // SA-4 (Y-15 (2), (3)): the marked value, or the typed
+                // failure with the last rejected value and the final text.
+                if close.success {
+                    tracker.complete(&run_id_clone, close.output, true);
+                } else {
+                    tracker.fail_with_output(
+                        &run_id_clone,
+                        close.detail.unwrap_or_default(),
+                        close.output,
+                    );
+                }
+            } else if agent_success {
                 let content = if result.final_content.is_empty() {
                     format!(
                         "Agent '{}' completed in {} rounds ({} tool calls) but produced no text output.",
@@ -1567,12 +1700,73 @@ impl BuiltInTool for SpawnSubagentTool {
                 _ => String::new(),
             }
         };
+        // SA-4 (L5 (i)): a schema that asks for nothing was treated as none.
+        let schema_note = if constrains_nothing {
+            " (result_schema constrains nothing, so the result comes back as text)"
+        } else {
+            ""
+        };
         Ok(format!(
-            "Subagent '{agent_id}'{default_note} spawned (run_id: '{run_id}'){model_note}, \
-             {start}. Spawn more subagents if needed, then call `wait_for_subagents` to \
+            "Subagent '{agent_id}'{default_note} spawned (run_id: '{run_id}'){model_note}\
+             {schema_note}, {start}. Spawn more subagents if needed, then call \
+             `wait_for_subagents` to \
              collect all results, or `check_subagent_status` with this run_id to check \
              individually."
         ))
+    }
+}
+
+/// How a typed child's lane closes (SA-4, Y-15): its state, its detail, its
+/// output, and whether it is a success.
+struct TypedClose {
+    success: bool,
+    state: openalpaca_storage::SpanState,
+    detail: Option<String>,
+    output: String,
+}
+
+/// A typed child's close from its slot (Y-15): an accepted value closes
+/// `Done` with the marked compact JSON as its answer; anything else is the
+/// typed failure, `Failed` with the typed text as its detail and, as its
+/// output, the last rejected value (when one was kept) then the final text.
+/// For an `Error` end the loop's message stands in for the final text.
+fn typed_close(
+    outcome: &super::typed_result::SlotOutcome,
+    result: &crate::runner::LoopResult,
+    policy: &SandboxPolicy,
+    run_id: &str,
+) -> TypedClose {
+    if let Some(value) = &outcome.accepted {
+        return TypedClose {
+            success: true,
+            state: openalpaca_storage::SpanState::Done,
+            detail: None,
+            output: format!("result (matches result_schema): {value}"),
+        };
+    }
+    let final_text = match &result.finish_reason {
+        crate::runner::LoopFinishReason::Error(message) => message.as_str(),
+        _ => result.final_content.as_str(),
+    };
+    let detail = super::typed_result::failure_text(
+        outcome,
+        result.finish_reason == crate::runner::LoopFinishReason::ResultRejected,
+        result.tool_calls_made,
+        policy.max_tool_calls,
+        result.rounds_used,
+        final_text,
+        run_id,
+    );
+    let output = match (&outcome.last_rejected, result.final_content.is_empty()) {
+        (Some(rejected), false) => format!("{rejected}\n\n{}", result.final_content),
+        (Some(rejected), true) => rejected.clone(),
+        (None, _) => result.final_content.clone(),
+    };
+    TypedClose {
+        success: false,
+        state: openalpaca_storage::SpanState::Failed,
+        detail: Some(detail),
+        output,
     }
 }
 
@@ -1668,6 +1862,21 @@ const OBJECTIVE_DESCRIPTION: &str = "A self-contained brief for the subagent: th
      (what its answer must hold, and any file or workspace key it is to write). The subagent \
      is given neither the user's request nor this conversation, only this brief.";
 
+/// The `result_schema` parameter's description on both spawn tools (SA-4:
+/// L1's sentence naming the list, and Y-20 (7)'s on the tool-call limit).
+/// The parameter has no `type`, so every value reaches `spawn_subagent` on
+/// both tools alike and is answered there (`null` is no schema; anything
+/// else not an object is refused with the checker's reason). Kept short: it
+/// is in every lead's tool definitions, which a small window pays for
+/// (`the_leads_compaction_folds_into_the_chats_working_state` sits close to
+/// that edge: a longer form tipped its 8,192-token lead into a second
+/// compaction).
+const RESULT_SCHEMA_DESCRIPTION: &str = "A JSON Schema for the result. Checked: type, enum, \
+     const, anyOf, properties, required, additionalProperties (true/false), items, minItems, \
+     maxItems, minimum, maximum, exclusiveMinimum, exclusiveMaximum; format and annotations are \
+     not; other keywords refuse the spawn. Each submission counts against the subagent's \
+     tool-call limit: few calls need a narrow brief.";
+
 /// Tool definition for `spawn_subagents_batch`, with the `model`
 /// parameter's description of no install ([`ModelMenu::default`]); a lead's
 /// run builds it with its own menu
@@ -1737,6 +1946,9 @@ pub fn spawn_subagents_batch_tool_definition_with_models(
                             "model": {
                                 "type": "string",
                                 "description": menu.description()
+                            },
+                            "result_schema": {
+                                "description": RESULT_SCHEMA_DESCRIPTION
                             }
                         },
                         "required": ["objective"]
@@ -2344,6 +2556,9 @@ pub fn spawn_subagent_tool_definition_with_models(
                 "model": {
                     "type": "string",
                     "description": menu.description()
+                },
+                "result_schema": {
+                    "description": RESULT_SCHEMA_DESCRIPTION
                 }
             },
             "required": ["objective"]

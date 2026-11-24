@@ -387,6 +387,51 @@ pub fn escape_hidden_line(text: &str) -> Escaped {
     escape_where(text, usize::MAX, needs_escape_in_line)
 }
 
+/// [`escape_hidden_line`], cut to at most `max_chars` **characters** of
+/// escaped text (SA-4: a typed subagent's violation lines, cut at 200
+/// characters, design §5.3.6). The cut never lands inside an escape: the
+/// first piece — a character, or a whole `<U+XXXX>` — that would cross the
+/// budget is left out, with everything after it. Characters, not bytes, so
+/// a line in a non-Latin script keeps as many characters as a Latin one.
+/// `hidden` and `left_out` count as [`escape_hidden_within`]'s do.
+pub fn escape_hidden_line_within(text: &str, max_chars: usize) -> Escaped {
+    use std::fmt::Write as _;
+
+    let mut shown = String::with_capacity(text.len().min(max_chars));
+    let mut chars = 0;
+    let mut hidden = 0;
+    let mut left_out = 0;
+    for c in text.chars() {
+        let escape = needs_escape_in_line(c);
+        hidden += usize::from(escape);
+        if left_out > 0 {
+            left_out += 1;
+            continue;
+        }
+        let before = shown.len();
+        let width = if escape {
+            // Writing into a `String` cannot fail; the escape is ASCII, so
+            // its bytes are its characters.
+            let _ = write!(shown, "<U+{:04X}>", u32::from(c));
+            shown.len() - before
+        } else {
+            shown.push(c);
+            1
+        };
+        if chars + width > max_chars {
+            shown.truncate(before);
+            left_out = 1;
+        } else {
+            chars += width;
+        }
+    }
+    Escaped {
+        text: shown,
+        hidden,
+        left_out,
+    }
+}
+
 /// The one pass behind the escapes: every `shown_escaped` character written
 /// as `<U+XXXX>`, cut to `max_bytes` of escaped text on a whole piece,
 /// counting the whole input.
@@ -1205,5 +1250,58 @@ mod tests {
         assert_eq!(head_tail("small", 1024), "small");
         assert_eq!(head_tail("日本語", 9), "日本語");
         assert_eq!(head_tail("", 0), "");
+    }
+
+    /// SA-4 (design §5.3.6): a violation line is cut at a **character**
+    /// count of escaped text, and never inside an escape form — the escape
+    /// that would cross the budget is left out whole, with the rest.
+    #[test]
+    fn escape_hidden_line_within_cuts_on_characters_never_inside_an_escape() {
+        use super::escape_hidden_line_within;
+        // Within the budget: the whole line.
+        assert_eq!(
+            escape_hidden_line_within("abc", 3),
+            Escaped {
+                text: "abc".to_string(),
+                hidden: 0,
+                left_out: 0,
+            }
+        );
+        // Characters, not bytes: ten CJK characters (30 bytes) fit a budget
+        // of ten.
+        assert_eq!(
+            escape_hidden_line_within(&"日".repeat(10), 10).text,
+            "日".repeat(10)
+        );
+        assert_eq!(escape_hidden_line_within(&"日".repeat(11), 10).left_out, 1);
+        // `ab` then U+202E (eight characters escaped): a budget of 9 cannot
+        // hold the escape, so it and everything after it are left out.
+        let cut = escape_hidden_line_within("ab\u{202e}cd", 9);
+        assert_eq!(cut.text, "ab");
+        assert_eq!(cut.left_out, 3);
+        assert_eq!(
+            cut.hidden, 1,
+            "the whole input's hidden characters are counted"
+        );
+        // A budget of 10 holds it exactly.
+        assert_eq!(
+            escape_hidden_line_within("ab\u{202e}cd", 10).text,
+            "ab<U+202E>"
+        );
+        // Zero keeps nothing.
+        assert_eq!(escape_hidden_line_within("x", 0).text, "");
+    }
+
+    /// The one-line set: a newline, a tab, U+202E and U+200B are shown as
+    /// their code points, as `escape_hidden_line` shows them.
+    #[test]
+    fn escape_hidden_line_within_escapes_newline_tab_and_u202e() {
+        use super::escape_hidden_line_within;
+        let text = "a\nb\tc\u{202e}d\u{200b}e";
+        let shown = escape_hidden_line_within(text, 200);
+        assert_eq!(shown.text, "a<U+000A>b<U+0009>c<U+202E>d<U+200B>e");
+        assert_eq!(shown.hidden, 4);
+        assert_eq!(shown.left_out, 0);
+        assert_eq!(shown.text, escape_hidden_line(text).text);
     }
 }

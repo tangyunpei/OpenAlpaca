@@ -399,7 +399,8 @@ impl<'a> LlmUsageRepository<'a> {
     }
 
     /// Record a completed LLM call: inserts into call log and upserts daily aggregate.
-    /// Use status "success" for successful calls, "error" or "cost_exceeded" for failures.
+    /// Use status "success" for successful calls, "error" or "cost_exceeded" for failures,
+    /// and "result_rejected" for a typed subagent that ended without a matching result.
     #[expect(
         clippy::too_many_arguments,
         reason = "the call's facts, for its call log row and the daily total"

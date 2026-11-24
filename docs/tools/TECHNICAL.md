@@ -869,12 +869,13 @@ tools of extensions that are not enabled.  The chat loop's tool identity is
 
 For each lead-agent run, `run_lead_agent` clones the registry and calls
 `register_coordination_tools()` (capability `orchestration`).  This is also
-why custom TOML tools may not use the four coordination names.
+why custom TOML tools may not use the four coordination names, nor
+`submit_result`, a typed subagent's own tool (SA-4).
 
 | Tool | Parameters | Notes |
 |------|-----------|-------|
-| `spawn_subagent` | `objective` (required), `agent_id` (optional: omitted, `null` or empty spawns `general_agent`, the default — SA-1), `model` (optional: `inherit`, `fast`, `balanced`, `strong` or a routable id, over the template's `model:`; refused with the routable list when not routable — C8) | Non-blocking; returns a `run_id`. The tool description embeds the catalog of worker templates. Guards: a lead cannot spawn its own template; depth limit `MAX_SUBAGENT_DEPTH` (3); concurrency bound `max_concurrent_subagents`: past it the subagent is registered `queued`, its `run_id` returned at once, and it starts when a slot frees (N-LEAD-2, 2026-10-17); run bound `max_subagents_per_run` (48): a run's next spawn past it, here or in a batch, is refused before anything is registered, naming the figure, which the lead's prompt states (N-LEAD-6). The `objective` is the subagent's brief — the goal, the inputs it needs, the constraints, what to return and where — as the tool's description, its parameter and the lead's prompt say; the subagent is given it once, whole, as its last user turn and in no system message, kept by the assembly's trim and by every compaction (SA-2, SA-2b). A default the run cannot use — the lead is itself `general_agent`, or `general_agent` is withheld, switched off or not installed — is refused naming the agents the lead can spawn, sorted by id; the `subagent_open` record carries `agent_id_defaulted` (SA-1), and `model_choice` and `model` (C8) |
-| `spawn_subagents_batch` | `subagents`: 1–8 × `{agent_id?, objective}` | Registered when `execution.lead_agent_defaults.batch_spawn_enabled` (default `true`); more than 8 items is an error; each `objective` a brief, as for `spawn_subagent` (SA-2); each item goes to `spawn_subagent` whole, and one that cannot spawn is its own `[n] FAILED (<agent_id or general_agent>): <reason>` line while the batch goes on (SA-1) |
+| `spawn_subagent` | `objective` (required), `agent_id` (optional: omitted, `null` or empty spawns `general_agent`, the default — SA-1), `model` (optional: `inherit`, `fast`, `balanced`, `strong` or a routable id, over the template's `model:`; refused with the routable list when not routable — C8) | Non-blocking; returns a `run_id`. The tool description embeds the catalog of worker templates. Guards: a lead cannot spawn its own template; depth limit `MAX_SUBAGENT_DEPTH` (3); concurrency bound `max_concurrent_subagents`: past it the subagent is registered `queued`, its `run_id` returned at once, and it starts when a slot frees (N-LEAD-2, 2026-10-17); run bound `max_subagents_per_run` (48): a run's next spawn past it, here or in a batch, is refused before anything is registered, naming the figure, which the lead's prompt states (N-LEAD-6). The `objective` is the subagent's brief — the goal, the inputs it needs, the constraints, what to return and where — as the tool's description, its parameter and the lead's prompt say; the subagent is given it once, whole, as its last user turn and in no system message, kept by the assembly's trim and by every compaction (SA-2, SA-2b). A default the run cannot use — the lead is itself `general_agent`, or `general_agent` is withheld, switched off or not installed — is refused naming the agents the lead can spawn, sorted by id; the `subagent_open` record carries `agent_id_defaulted` (SA-1), and `model_choice` and `model` (C8). `result_schema` (optional, SA-4): a JSON object in the checker's subset — `type`, `enum`, `const`, `anyOf`, `properties`, `required`, `additionalProperties` (true or false), `items` (one schema), `minItems`, `maxItems` and the four number bounds checked; `format` and annotations unchecked; any other keyword refused by name; at most 16,384 bytes, 64 levels of nesting, 10 object levels — admitted before anything is reserved or refused as `result_schema is not usable: <reason>.`; absent, `null` or a schema that asks for nothing is an ordinary spawn (the last with one clause in the reply); refused for a plugin-backed template. The child then gets its own `submit_result` tool, its result checked on each call (at most 65,536 bytes; four submissions in all), and the lead reads `result (matches result_schema): <compact JSON>` or a typed failure beginning `ended without …`; its `subagent_open` record carries `typed` |
+| `spawn_subagents_batch` | `subagents`: 1–8 × `{agent_id?, objective, result_schema?}` | Registered when `execution.lead_agent_defaults.batch_spawn_enabled` (default `true`); more than 8 items is an error; each `objective` a brief, as for `spawn_subagent` (SA-2); each item goes to `spawn_subagent` whole, and one that cannot spawn is its own `[n] FAILED (<agent_id or general_agent>): <reason>` line while the batch goes on (SA-1) |
 | `check_subagent_status` | `subagent_run_id` (required) | `exempt_from_timeout: true` |
 | `wait_for_subagents` | none | Blocks until every spawned subagent finishes, or returns early when the user steers the run. `exempt_from_timeout: true` |
 | `post_update` | `message` (required) | Posts a progress note to the lane. Only when `steering_enabled` |
@@ -1019,7 +1020,8 @@ warning if its name collides with
    after built-in registration — every name in the
    [inventory](#61-tool-inventory)), or
 2. the lead-agent coordination names: `spawn_subagent`,
-   `spawn_subagents_batch`, `check_subagent_status`, `wait_for_subagents`.
+   `spawn_subagents_batch`, `check_subagent_status`, `wait_for_subagents`,
+   and `submit_result`, a typed subagent's own tool (SA-4).
 
 Tools that fail registry name validation are also skipped with a warning.
 Custom tools load before MCP servers connect.
@@ -1510,7 +1512,7 @@ How each caller fills the allow list:
 | Skill (file-based or nested) | The names of the tools resolved for it |
 | Plugin-backed skill | The resolved names; an empty list admits nothing |
 | Lead agent | Template capabilities + coordination names + the assembled surface |
-| Subagent | Template capabilities + `workspace_read`/`workspace_write` + the surface those capabilities resolved to |
+| Subagent | Template capabilities + `workspace_read`/`workspace_write` + the surface those capabilities resolved to + `submit_result` for a child spawned with a `result_schema` |
 
 A template grants **capability names**; the check in 11.3 compares the
 called **tool's name**.  The two are the same word for `file_read`,
@@ -1783,7 +1785,9 @@ When the LLM response contains tool calls:
 4. Partition into *executable* and *over-limit* calls.  Over-budget calls
    get a `max_tool_calls limit reached` error; overflow beyond the
    per-round cap gets `max tools per round exceeded` — every tool call ID
-   receives a tool-result message.
+   receives a tool-result message.  A typed subagent's `submit_result`
+   (SA-4) is an ordinary call at both caps: every executed one counts, and
+   one a cap refuses is not executed, not counted and not a rejection.
 5. Executable calls run **in groups**, in the model's order
    (`tool_helpers::call_groups` over `ToolRegistry::runs_concurrently`;
    N-TOOL-3, 2026-11-01): consecutive calls whose tool declares
@@ -1804,7 +1808,9 @@ When the LLM response contains tool calls:
    ([Section 13](#13-tool-result-handling)).
 7. Push `ChatMessage::tool_result(id, text)` per call, bump
    `state.tool_calls_made`, continue to the next round (until
-   `max_rounds`, `EndTurn`, cost limit, cancellation, or error).
+   `max_rounds`, `EndTurn`, cost limit, cancellation, or error; a typed
+   subagent's round also ends the loop `ResultSubmitted` on an accepted
+   `submit_result` and `ResultRejected` on its fourth rejection).
 
 ---
 

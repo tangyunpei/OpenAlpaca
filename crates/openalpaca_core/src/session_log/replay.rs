@@ -102,6 +102,11 @@ pub struct ReplayPlan {
     /// `subagent_open` and `subagent_close` records left them (N-LEAD-4) —
     /// what the resumed run's tracker is rebuilt from.
     pub subagents: Vec<ReplayedSubagent>,
+    /// The run ids of the subagents spawned with a `result_schema` — those
+    /// whose `subagent_open` record carried `"typed": true` (SA-4, Y-15
+    /// (4)) — so a resumed run can tell a typed lane. Its close already
+    /// holds the typed outcome, which `restore` rebuilds as any close.
+    pub typed_runs: Vec<String>,
 }
 
 /// One subagent of the run, as the log left it (N-LEAD-4).
@@ -377,6 +382,9 @@ pub fn rebuild(session_dir: &Path, task_id: &str, tail_keep: usize) -> io::Resul
                         && let (Some(span), Some(run_id)) =
                             (&record.span_id, subagent_run_id(record)) =>
                 {
+                    if record.data.get("typed") == Some(&Value::Bool(true)) {
+                        plan.typed_runs.push(run_id.clone());
+                    }
                     subagent_lanes.insert(span.clone(), plan.subagents.len());
                     plan.subagents.push(ReplayedSubagent {
                         run_id,

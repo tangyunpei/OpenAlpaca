@@ -1820,7 +1820,33 @@ fn every_builtin_goes_to_openai_with_strict_only_where_strict_mode_accepts_it() 
     for def in &spawns {
         assert_eq!(def.strict, None, "{} is pinned non-strict", def.name);
     }
+    // SA-4 (Y-18 (3)): both spawn definitions carry `result_schema`, and stay
+    // non-strict.
+    assert!(spawns[0].parameters["properties"]["result_schema"].is_object());
+    assert!(
+        spawns[1].parameters["properties"]["subagents"]["items"]["properties"]["result_schema"]
+            .is_object()
+    );
     definitions.extend(spawns);
+    // SA-4 (Y-18 (3)): a typed child's `submit_result`, strict-marked, with a
+    // schema of the checker's keywords only — a closed, fully required one
+    // goes strict; an open, optional one goes non-strict.
+    definitions.extend([
+        crate::runner::lead_agent::typed_result::submit_result_tool_definition(
+            &serde_json::json!({
+                "type": "object",
+                "properties": {"summary": {"type": "string"}, "score": {"type": "integer"}},
+                "required": ["summary", "score"],
+                "additionalProperties": false
+            }),
+        ),
+        crate::runner::lead_agent::typed_result::submit_result_tool_definition(
+            &serde_json::json!({
+                "type": "object",
+                "properties": {"summary": {"type": "string"}}
+            }),
+        ),
+    ]);
 
     let mut kept = Vec::new();
     let mut marked = 0;
@@ -1852,12 +1878,18 @@ fn every_builtin_goes_to_openai_with_strict_only_where_strict_mode_accepts_it() 
             ),
         }
     }
-    // The walk saw what it is meant to: all 22 strict-marked builtins, and
-    // the two schemas already written in strict mode's shape (memory_confirm's and
-    // file_list's) keep their flag.
-    assert_eq!(marked, 22, "strict-marked builtins seen");
+    // The walk saw what it is meant to: all 22 strict-marked builtins and the
+    // two `submit_result` samples (SA-4), and the schemas already written in
+    // strict mode's shape (memory_confirm's, file_list's and the closed
+    // `submit_result`'s) keep their flag.
+    assert_eq!(marked, 24, "strict-marked builtins seen");
     assert!(kept.contains(&"memory_confirm".to_string()), "{kept:?}");
     assert!(kept.contains(&"file_list".to_string()), "{kept:?}");
+    assert_eq!(
+        kept.iter().filter(|name| *name == "submit_result").count(),
+        1,
+        "the closed sample keeps strict, the open one does not: {kept:?}"
+    );
 
     // The serializer and this restatement agree beyond today's builtins:
     // closed, fully required schemas carrying a keyword strict mode refuses

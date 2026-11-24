@@ -25,6 +25,38 @@ pub(crate) fn record_llm_usage(
     db: Option<&Database>,
     bus: &EventBus,
 ) {
+    record_llm_usage_with_status(
+        router,
+        loop_result,
+        model_override,
+        agent_id,
+        task_id,
+        latency_ms,
+        db,
+        bus,
+        None,
+    );
+}
+
+/// [`record_llm_usage`], its row's status `status_override` when one is
+/// given, else the word the loop's finish reason reads (SA-4, Y-15 (3)):
+/// a typed child's failure — whatever its loop's finish — is recorded
+/// `result_rejected`, so a reader can count typed failures as one word.
+#[expect(
+    clippy::too_many_arguments,
+    reason = "the call's figures, the two places they are written and the status"
+)]
+pub(crate) fn record_llm_usage_with_status(
+    router: &LlmRouter,
+    loop_result: &LoopResult,
+    model_override: Option<&str>,
+    agent_id: &str,
+    task_id: &str,
+    latency_ms: i64,
+    db: Option<&Database>,
+    bus: &EventBus,
+    status_override: Option<&'static str>,
+) {
     let default_model = router.default_model();
     let actual_model = loop_result
         .model_used
@@ -44,12 +76,16 @@ pub(crate) fn record_llm_usage(
     // for a singleton's reused instance id, holds its earlier runs.
     let call_cost = loop_result.requests_cost;
 
-    let call_status = match &loop_result.finish_reason {
-        LoopFinishReason::Complete | LoopFinishReason::MaxRounds | LoopFinishReason::Truncated => "success",
+    let call_status = status_override.unwrap_or(match &loop_result.finish_reason {
+        LoopFinishReason::Complete
+        | LoopFinishReason::MaxRounds
+        | LoopFinishReason::Truncated
+        | LoopFinishReason::ResultSubmitted => "success",
         LoopFinishReason::CostExceeded => "cost_exceeded",
+        LoopFinishReason::ResultRejected => "result_rejected",
         LoopFinishReason::Cancelled => "cancelled",
         LoopFinishReason::Error(_) => "error",
-    };
+    });
     let call_error = match &loop_result.finish_reason {
         LoopFinishReason::Error(msg) => Some(msg.as_str()),
         _ => None,

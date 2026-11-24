@@ -10,6 +10,9 @@ mod guard;
 mod prompt;
 mod tools;
 mod tracker;
+// `pub(crate)`: `submit_result_tool_definition` is the strict pin's too
+// (CLAUDE.md: every per-request builtin joins that pin's list).
+pub(crate) mod typed_result;
 
 // External API (unchanged)
 pub use prompt::build_lead_agent_prompt_from_templates;
@@ -25,6 +28,9 @@ pub use tools::{
     DEFAULT_SUBAGENT_TEMPLATE, SUBAGENT_DAEMON_STOP_DETAIL, SUBAGENT_RUN_ENDED_DETAIL,
 };
 pub use tracker::{SubagentStatus, SubagentTracker};
+// SA-4: a typed child's slot, which `LoopConfig::typed_result` names.
+pub use typed_result::TypedResultSlot;
+pub(crate) use typed_result::{CapRefusal, NUDGE, SUBMIT_RESULT, SlotVerdict};
 
 use crate::agent::subagent::SubAgent;
 use crate::agent::template::AgentTemplate;
@@ -838,6 +844,9 @@ pub async fn run_lead_agent(
     // ended before this subagent finished" — which the run's report lists.
     let stopped = spawn_tool.stop_subagents().await;
 
+    // SA-4: a lead holds no typed-result slot (only a child spawned with a
+    // `result_schema` does), so its loop never ends `ResultSubmitted` or
+    // `ResultRejected`.
     let success = matches!(
         &result.finish_reason,
         crate::runner::LoopFinishReason::Complete
@@ -947,3 +956,6 @@ mod tests;
 
 #[cfg(test)]
 mod model_tests;
+
+#[cfg(test)]
+mod typed_result_flow_tests;

@@ -958,8 +958,10 @@ impl Orchestrator {
             let call_status = match &result.finish_reason {
                 LoopFinishReason::Complete
                 | LoopFinishReason::MaxRounds
-                | LoopFinishReason::Truncated => "success",
+                | LoopFinishReason::Truncated
+                | LoopFinishReason::ResultSubmitted => "success",
                 LoopFinishReason::CostExceeded => "cost_exceeded",
+                LoopFinishReason::ResultRejected => "result_rejected",
                 LoopFinishReason::Cancelled => "cancelled",
                 LoopFinishReason::Error(_) => "error",
             };

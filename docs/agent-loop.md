@@ -64,7 +64,7 @@ field out for it (TEMPLATE-TEMP-OPTIONAL).
 ## How a Loop Ends
 
 Every invocation returns a `LoopResult` whose `finish_reason` is one of
-six values (`runner/agentic_loop/config.rs`). With a session log
+eight values (`runner/agentic_loop/config.rs`). With a session log
 attached, the exit is also written as a `workflow_done` record using the
 lower-case word in the second column.
 
@@ -76,6 +76,8 @@ lower-case word in the second column.
 | `Truncated` | `truncated` | The model stopped on its output limit three times running. The first two times the loop appends the partial text and a "continue from where you left off" message (`MAX_TOKENS_RETRIES = 2`); the third returns the partial text. |
 | `Cancelled` | `cancelled` | The cancel token fired — at the top of a round, during the LLM call, or during a retry backoff. |
 | `Error(msg)` | `error` | A non-transient LLM error, a transient one that outlived its retries, or a runtime model-access denial. |
+| `ResultSubmitted` | `result_submitted` | A child spawned with a `result_schema` had a `submit_result` call accepted; only such a child ends this way. |
+| `ResultRejected` | `result_rejected` | Such a child's fourth `submit_result` call was rejected. |
 
 `final_content` is the model's answer on `Complete` and the partial text
 on `Truncated`. On every other exit it is the last assistant text the
@@ -200,6 +202,39 @@ alias's model here, the routable ids and the model the lead's id reaches
 non-strict (M-9). The reply names the child's model, what chose it and that
 the lead stays on its own; `subagent_open` records `model_choice` (`choice`,
 `per_call`) and `model`.
+
+**A typed result** (SA-4). `spawn_subagent`, and each
+`spawn_subagents_batch` entry, takes an optional `result_schema`: a JSON
+object in a small subset of JSON Schema, which OpenAlpaca's own checker
+(`runner/lead_agent/typed_result/shape.rs`) admits once, before anything
+is reserved, or refuses the spawn with `result_schema is not usable:
+<reason>.` It checks `type`, `enum`, `const`, `anyOf`, `properties`,
+`required`, `additionalProperties` (true or false), `items` (one schema),
+`minItems`, `maxItems`, `minimum`, `maximum`, `exclusiveMinimum` and
+`exclusiveMaximum`; lets `format` and the annotations through unchecked;
+and refuses every other keyword by name (`pattern` and every reference
+keyword among them). A schema is at most 16,384 bytes as compact JSON, 64
+levels of nesting and 10 object levels; `3.0` is an integer and `1`
+equals `1.0`. An absent or `null` `result_schema` is no schema, and one
+that asks for nothing (`{}`, or `format` and annotations only) is
+treated as absent, the reply saying so in one clause. A plugin-backed
+template refuses a schema. A child spawned with one runs on a clone of the
+registry that also holds its own `submit_result` tool (its definition
+wraps the schema, sent strict where strict mode accepts it), its
+`<output-format>` block tells it to deliver the result by calling
+`submit_result`, and its `subagent_open` record carries `typed: true`.
+Each call's `result` (at most 65,536 bytes as compact JSON) is checked
+— raw first, then, if it is a string, as the JSON it parses to — on the
+blocking pool; an accepted one ends the loop `ResultSubmitted` and the lead
+reads `result (matches result_schema): <compact JSON>`; a rejected one is
+answered with at most 19 violation lines, and the fourth rejection ends
+the loop `ResultRejected`. A child that ends a round with text and no call
+is nudged once, while it has a round and a tool call left. Any end but
+an accepted call — and but a cancellation, which closes as any cancelled
+run does — is a typed failure: the lane closes `failed` with a text that
+begins `ended without …`, the usage row says `result_rejected`, and the
+last rejected value (when it was within 65,536 bytes) and the final text
+are kept as its output.
 
 Subagents can be plugin-backed: when the spawned template's source is
 `AgentSource::Plugin` (contributed by a plugin manifest), the spawn path
@@ -923,6 +958,9 @@ Beyond the round/cost checks in steps 2–3, the loop enforces:
   error result. When a sandbox policy sets `max_tool_calls`, calls are
   partitioned into executable vs over-budget, with over-budget calls
   returning stub error results instead of executing.
+  A typed child's `submit_result` (SA-4) is an ordinary call at both
+  caps: every executed one counts, and one a cap refuses is not executed,
+  not counted and not a rejection.
 - **Calls run in groups** (N-TOOL-3) — a round's executable calls are cut,
   in the model's order, into groups: consecutive calls whose tool declares
   `read_only_hint` (an MCP tool also `idempotent_hint`), or that are the

@@ -498,6 +498,8 @@ fn finish_reason_str(reason: &LoopFinishReason) -> &'static str {
         LoopFinishReason::Truncated => "truncated",
         LoopFinishReason::Cancelled => "cancelled",
         LoopFinishReason::Error(_) => "error",
+        LoopFinishReason::ResultSubmitted => "result_submitted",
+        LoopFinishReason::ResultRejected => "result_rejected",
     }
 }
 
@@ -562,6 +564,8 @@ async fn run_agentic_loop_core(
     // trading a false answer for no answer.
     let mut guard_corrections: usize = 0;
     let mut guard_bonus_rounds: usize = 0;
+    // SA-4 (Y-10): whether a typed child's one nudge has been spent.
+    let mut typed_nudged = false;
     // P-14: what this run's compactions have taken out of its context so far,
     // in tokens. Cumulative across every compaction the loop performs, which
     // is what makes a later `compaction` record readable on its own.
@@ -1413,8 +1417,23 @@ async fn run_agentic_loop_core(
                         Arc::make_mut(&mut messages).push(message);
                     }
 
+                    // SA-4 (Y-20 (3)): a typed child's `submit_result` call a
+                    // cap refuses is recorded in its slot — not executed, not
+                    // counted, not a rejection — so its failure can say so,
+                    // with the round it fell in.
+                    let round = state.rounds;
+                    let refused_submit =
+                        |tc: &ToolCall, cap: crate::runner::lead_agent::CapRefusal| {
+                            if let Some(slot) = config.typed_result.as_ref()
+                                && tc.name == crate::runner::lead_agent::SUBMIT_RESULT
+                            {
+                                slot.record_cap_refusal(cap, round);
+                            }
+                        };
+
                     // Over-budget tools get error
                     for tc in &over_budget {
+                        refused_submit(tc, crate::runner::lead_agent::CapRefusal::Run);
                         let err = format_tool_error(
                             "max_tool_calls limit reached — no more tool calls allowed",
                         );
@@ -1423,8 +1442,24 @@ async fn run_agentic_loop_core(
 
                     // Overflow tools (exceeding max_tools_per_round) get error
                     for tc in response.tool_calls.iter().skip(calls_this_round) {
+                        refused_submit(tc, crate::runner::lead_agent::CapRefusal::Round);
                         let err = format_tool_error("max tools per round exceeded");
                         Arc::make_mut(&mut messages).push(ChatMessage::tool_error(&tc.id, &err));
+                    }
+
+                    // SA-4 (Y-9): every call of the round has its result; a
+                    // typed child's slot now decides whether the run ends —
+                    // an accepted submission, or the fourth rejection.
+                    if let Some(slot) = config.typed_result.as_ref() {
+                        match slot.verdict() {
+                            crate::runner::lead_agent::SlotVerdict::Accepted => {
+                                return state.result(LoopFinishReason::ResultSubmitted);
+                            }
+                            crate::runner::lead_agent::SlotVerdict::Rejected => {
+                                return state.result(LoopFinishReason::ResultRejected);
+                            }
+                            crate::runner::lead_agent::SlotVerdict::Open => {}
+                        }
                     }
 
                     state.max_tokens_retries = 0;
@@ -1501,6 +1536,34 @@ async fn run_agentic_loop_core(
                         pending_steering.extend(drained);
                         continue;
                     }
+                }
+
+                // ── The typed child's nudge (SA-4, Y-10, Y-20 (2)) ──
+                // A child spawned with a `result_schema` that ends a round
+                // with text and no call is told once to call
+                // `submit_result` — an ordinary round, no bonus — while it
+                // has a round left and a tool call left (or no cap). Else
+                // it returns as any loop does; its spawn reads the slot.
+                if let Some(slot) = config.typed_result.as_ref()
+                    && !typed_nudged
+                    && slot.verdict() == crate::runner::lead_agent::SlotVerdict::Open
+                    && state.rounds < effective_max_rounds
+                    && sandbox_policy
+                        .and_then(|p| p.max_tool_calls)
+                        .is_none_or(|max| state.tool_calls_made < max as usize)
+                {
+                    typed_nudged = true;
+                    persist_span.in_scope(|| {
+                        tracing::info!(
+                            agent_id = agent_id,
+                            round = state.rounds,
+                            "Typed child ended without submit_result; nudging once"
+                        );
+                    });
+                    Arc::make_mut(&mut messages).push(ChatMessage::assistant_answer(&response));
+                    Arc::make_mut(&mut messages)
+                        .push(ChatMessage::user(crate::runner::lead_agent::NUDGE));
+                    continue;
                 }
 
                 // ── Answer guard (H3) ──────────────────────────────
