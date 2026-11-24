@@ -52,7 +52,9 @@ The Rust shell is checked from `src-tauri/` with `cargo check` (its `.cargo/conf
 Two things to know before the first run:
 
 - **`bun run tauri dev` uses your real store.** The shell reads `~/.openalpaca/state/discovery.json` and, when it has to spawn a daemon, starts it with `OPENALPACA_CONFIG_DIR=~/.openalpaca/config` — not the repository's `config/`. Set `OPENALPACA_HOME_STORE` to an absolute path to point the whole thing at a scratch root. If a daemon is already running (from the CLI, or `cargo run -p openalpacad`), the app connects to that one instead of spawning.
-- **`bun run dev` alone has no daemon connection.** A plain browser has no Tauri bridge, so the two connection commands fail and the rail's status line reads `connection error`. It is good for layout work, not for talking to a daemon.
+- **`bun run dev` alone has no daemon connection.** A plain browser has no Tauri bridge: the host there is a fixture with no answer (`src/lib/host/`), so the two connection commands are refused as they are with no bridge and the rail's status line reads `connection error`. It is good for layout work, not for talking to a daemon. Two opt-in modes of a development build go further:
+  - `VITE_OPENALPACA_HOST=fixture bun run dev` gives the page a known connection (`http://127.0.0.1:9999`, token `test-token`), with no daemon behind it.
+  - `VITE_OPENALPACA_HOST=dev-server OPENALPACA_HOME_STORE=<absolute path> bun run dev` connects the page to that store's development daemon: the dev server reads the store's `discovery.json` and `daemon.log` for it, through two POST endpoints that answer only the dev server's own Origin (`http://localhost:1420` or `http://127.0.0.1:1420`) and refuse while `OPENALPACA_HOME_STORE` is unset or relative (`scripts/dev-server-host.ts`). Start the daemon yourself, on that store. A development aid with limits the app does not have: it judges the token's expiry only (no protocol mismatch is refused), spawns no daemon, and cannot wait for a stopped daemon to be gone.
 
 ### The sidecar
 
@@ -127,7 +129,7 @@ Spawning, in detail:
 
 The shell's log (Q14) is `state/logs/gui.log`, never `~/Library/Logs`: at start `run()` rotates it under `daemon.log`'s caps, opens it to append and installs a `tracing-subscriber` writing it without colour (`RUST_LOG`, else `info`), which also takes Tauri's `log` records; a failure to open it goes to stderr and the app runs on. A panic hook writes a panic to it as one line, straight to the file, then runs the hook before it. Start-up marks go to it under the target `openalpaca_gui::startup` — `t0` (the shell's start) and `page_load_started` / `page_load_finished` from `Builder::on_page_load`, each with `elapsed_ms` since T0 and the page's origin, never its path. On macOS `Builder::on_web_content_process_terminate` logs a line and reloads the window, at most three times within 60 s (RELOAD-BOUND, `ReloadBound`, the hook's own, by the webview's label; only a reload performed counts, on a monotonic clock); a fourth end inside that span is not reloaded: it writes one `ERROR` line saying so in place of the reloading one, and a native dialog (`tauri-plugin-dialog`'s message dialog, shown by the shell, so no capability is needed) offers `Reload` or `Quit` (RELOAD-DIALOG): `Reload` reloads once and counts against the bound from the click, `Quit` exits the app, and so does an end of the dialog that is not a click (the plugin reads it as the second button); one dialog per window at a time, an end while it is open a `WARN` line and nothing more, and nothing answers on a timer. No command is added: the webview's own marks reach a log through an instrumented build or the console. `openalpaca gui start`'s dev launch appends `bun run tauri dev`'s output to `gui-dev.log`.
 
-The webview never reads `discovery.json` itself. `src/lib/connection.ts` wraps all four, caches the connection info the first two return, and treats a changed `instanceId` as a daemon restart: every id the client holds is dead, so it re-bootstraps and drops all server-derived state. `Reveal in Finder` (`Show in folder` off macOS) is no shell command since Q06: `src/lib/reveal.ts` sends the artifact's id to the daemon's `POST /v1/files/{id}/reveal`, which checks the file and shows it in its folder itself, answering no path.
+The webview never reads `discovery.json` itself. The four are called by `src/lib/host/tauri.ts` (TauriHost, the app's host; `lib/host/answer.ts` judges every answer and refusal); `src/lib/connection.ts` calls them through the host, caches the connection info the first two return, and treats a changed `instanceId` as a daemon restart: every id the client holds is dead, so it re-bootstraps and drops all server-derived state. In the dev-server mode above the dev server, not the webview, reads `discovery.json`. `Reveal in Finder` (`Show in folder` off macOS) is no shell command since Q06: `src/lib/reveal.ts` sends the artifact's id to the daemon's `POST /v1/files/{id}/reveal`, which checks the file and shows it in its folder itself, answering no path.
 
 ### Frontend (`src/`)
 
@@ -138,6 +140,7 @@ src/
   styles.css             # the @theme token block (DESIGN_SPEC §1.9)
   lib/
     connection.ts        # discovery → base URL + token; bootstrap and refresh
+    host/                # the HostBridge: TauriHost, DevServerHost, FixtureHost, the shared answer check
     http.ts              # fetch wrapper, ApiError, Bearer auth, the error envelopes
     chat-stream.ts       # the SSE state machine (API_MAP §4.1)
     events.ts            # the /v1/events WebSocket client + ServerEvent union
@@ -285,7 +288,7 @@ A **user** row's text is the message's `content`, never `display_text`. For a tu
 - `~/.openalpaca/state/discovery.json` — daemon base URL, bearer token, instance id. Read by the Rust shell only.
 - `~/.openalpaca/config/` — created by the shell and passed to a daemon it spawns as `OPENALPACA_CONFIG_DIR`.
 - `OPENALPACA_HOME_STORE` (absolute path) moves the whole root, for the shell and the daemon alike. Without it the root is `~/.openalpaca`, and a relative `HOME` is no home: the store is refused ("Failed to determine the home directory").
-- Dev server: port 1420, strict (`tauri.conf.json` `devUrl` points at it); `src-tauri/` is excluded from the watcher.
+- Dev server: port 1420, strict (`tauri.conf.json` `devUrl` points at it); `src-tauri/` is excluded from the watcher. `VITE_OPENALPACA_HOST` (`fixture` or `dev-server`, with `OPENALPACA_HOME_STORE` for the latter) picks the browser's host, as above.
 - Per-machine `localStorage` keys:
   - `oa-pane-widths` — the resizable column widths.
   - `oa-project` — the chosen project's root and id, as JSON; the window follows a project re-pointed elsewhere by its id.
@@ -297,6 +300,6 @@ A **user** row's text is the message's `content`, never `display_text`. For a tu
 bun run test
 ```
 
-Vitest with the jsdom environment. `vitest.setup.ts` loads `@testing-library/jest-dom` and sets a 1600 × 1000 window before each test; jsdom's default 1024 px is a _narrow_ window here and would collapse the chat columns. A test about a narrow window sets `window.innerWidth` itself.
+Vitest with the jsdom environment. `vitest.setup.ts` loads `@testing-library/jest-dom`, sets a 1600 × 1000 window and puts FixtureHost back at its start, unanswered, before each test; jsdom's default 1024 px is a _narrow_ window here and would collapse the chat columns. A test about a narrow window sets `window.innerWidth` itself.
 
-The suite covers logic, not pixel styling: the SSE and WebSocket state machines, the event → cache map, the prose parser, the attachment and confirmation rules, the routing and formatting helpers, the Escape ladder and command catalogue. View-level integration tests double only the two transports (`fetch`, `EventSource`) and the Tauri discovery command — so request bodies are asserted on the wire rather than on a spy.
+The suite covers logic, not pixel styling: the SSE and WebSocket state machines, the event → cache map, the prose parser, the attachment and confirmation rules, the routing and formatting helpers, the Escape ladder and command catalogue. View-level integration tests double only the two transports (`fetch`, `EventSource`) and the shell's discovery command, answered through FixtureHost — so request bodies are asserted on the wire rather than on a spy. The dev server's plugin has its tests beside it (`scripts/*.test.ts`).

@@ -1,14 +1,14 @@
 /**
  * The chat view end to end, over the real data layer.
  *
- * Only the two edges are doubled — the Tauri discovery command and the two
+ * Only the two edges are doubled — the shell's discovery command (answered by
+ * FixtureHost, `lib/host/fixture.ts`) and the two
  * transports (`fetch`, `EventSource`) — so the SSE state machine, the query
  * layer and the request bodies under test are the production ones. That is the
  * point: `approval_scope` has to be asserted on the wire, not on a spy.
  */
 
 import { QueryClient } from "@tanstack/react-query";
-import { invoke } from "@tauri-apps/api/core";
 import {
   act,
   cleanup,
@@ -24,6 +24,7 @@ import { useGlobalKeys } from "@/components/shell";
 import { clearConfirmationsOver } from "@/lib/confirmations-over";
 import { resetConnection } from "@/lib/connection";
 import { daemonEvents, type ServerEvent } from "@/lib/events";
+import { fixtureHost } from "@/lib/host/fixture";
 import { qk } from "@/lib/query-keys";
 import { QueryProvider } from "@/lib/query-provider";
 import { revealLabel } from "@/lib/reveal";
@@ -37,13 +38,13 @@ import { FIRST_RUN_ACTION, FIRST_RUN_TITLE } from "./first-run";
 import { useResolutions } from "./resolution-store";
 import type { WorkPaneRenderer } from "./WorkPaneSlot";
 
-vi.mock("@tauri-apps/api/core", () => ({
-  invoke: vi.fn(async () => ({
+beforeEach(() => {
+  fixtureHost!.answerConnection({
     baseUrl: "http://127.0.0.1:9999",
     token: "test-token",
     instanceId: "7f3a1122",
-  })),
-}));
+  });
+});
 
 type Listener = (event: { data?: unknown }) => void;
 
@@ -4943,12 +4944,14 @@ describe("ChatView — the conversation's continuity (design 11 §5, CQ-7)", () 
 
 describe("ChatView — a written file's Reveal in Finder (Round G, G4)", () => {
   afterEach(() => {
-    // `isTauri` is this block's own; `beforeEach` stubs the rest again.
+    // `beforeEach` stubs the transports again.
     vi.unstubAllGlobals();
   });
 
   it("asks the daemon to reveal the file id the artifact_written frame carried", async () => {
-    vi.stubGlobal("isTauri", true);
+    fixtureHost!.setReveal(true);
+    const logTail = vi.spyOn(fixtureHost!, "readDaemonLogTail");
+    const stopWait = vi.spyOn(fixtureHost!, "awaitDaemonStopped");
     const path =
       "/Users/dev/.openalpaca/artifacts/loose/2026-10-02/01-pasta-night.md";
     renderChat();
@@ -4975,7 +4978,12 @@ describe("ChatView — a written file's Reveal in Finder (Round G, G4)", () => {
         ),
       ).toBe(true),
     );
-    expect(invoke).not.toHaveBeenCalledWith("reveal_path", expect.anything());
+    // The shell is asked for the connection only: the host has no reveal
+    // command, and no other command, dialog or window of it was used.
+    expect(logTail).not.toHaveBeenCalled();
+    expect(stopWait).not.toHaveBeenCalled();
+    expect(fixtureHost!.dialog).toBeNull();
+    expect(fixtureHost!.window).toBeNull();
   });
 });
 

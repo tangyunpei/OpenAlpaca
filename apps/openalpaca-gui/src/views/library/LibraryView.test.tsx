@@ -1,14 +1,14 @@
 /**
  * The Library end to end, over the real data layer.
  *
- * Only two edges are doubled — the Tauri discovery command and `fetch` — so the
+ * Only two edges are doubled — the shell's discovery command (answered by
+ * FixtureHost, `lib/host/fixture.ts`) and `fetch` — so the
  * query keys, the request URLs and the `?token=` preview URL under test are the
  * production ones. Nothing here is a fixture standing in for the daemon: every
  * row rendered came out of a response body.
  */
 
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
-import { invoke } from "@tauri-apps/api/core";
 import {
   act,
   fireEvent,
@@ -22,19 +22,20 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import type { Artifact } from "@/lib/api/artifacts";
 import { refreshConnection, resetConnection } from "@/lib/connection";
+import { fixtureHost } from "@/lib/host/fixture";
 import { revealLabel } from "@/lib/reveal";
 import { useUiStore } from "@/stores/ui";
 
 import { RESULTS_EMPTY } from "./LibraryList";
 import LibraryView from "./LibraryView";
 
-vi.mock("@tauri-apps/api/core", () => ({
-  invoke: vi.fn(async () => ({
+beforeEach(() => {
+  fixtureHost!.answerConnection({
     baseUrl: "http://127.0.0.1:9999",
     token: "test-token",
     instanceId: "7f3a1122",
-  })),
-}));
+  });
+});
 
 const findings: Artifact = {
   id: "art-1",
@@ -356,11 +357,11 @@ describe("LibraryDetail", () => {
     renderView();
     await screen.findByAltText("spend.png");
 
-    vi.mocked(invoke).mockResolvedValueOnce({
+    fixtureHost!.answerOnce("getConnectionInfo", () => ({
       baseUrl: "http://127.0.0.1:9999",
       token: "renewed-token",
       instanceId: "7f3a1122",
-    });
+    }));
     await act(async () => {
       await refreshConnection();
     });
@@ -585,7 +586,7 @@ describe("Results — a file marked missing (d7-app-1, R-T26)", () => {
 
   afterEach(() => {
     vi.unstubAllGlobals();
-    vi.mocked(invoke).mockImplementation(async () => connection);
+    fixtureHost!.answerConnection(connection);
   });
 
   it("lists a marked result file with a missing tag, reads it again and drops the tag once it is back", async () => {
@@ -677,7 +678,7 @@ describe("Results — a file marked missing (d7-app-1, R-T26)", () => {
   });
 
   it("toasts Reveal's refusal for a missing project's file as the daemon words it", async () => {
-    vi.stubGlobal("isTauri", true);
+    fixtureHost!.setReveal(true);
     route("/v1/artifacts/art-9/content", () =>
       json(
         { error: { code: "ARTIFACT_PROJECT_MISSING", message: sentence } },
@@ -702,7 +703,7 @@ describe("Results — a file marked missing (d7-app-1, R-T26)", () => {
 });
 
 describe("LibraryDetail — Open and Reveal", () => {
-  /** What the mocked discovery command answers, as the factory above does. */
+  /** What the doubled discovery command answers, as the file's `beforeEach` sets it. */
   const connection = {
     baseUrl: "http://127.0.0.1:9999",
     token: "test-token",
@@ -718,7 +719,8 @@ describe("LibraryDetail — Open and Reveal", () => {
 
   afterEach(() => {
     vi.unstubAllGlobals();
-    vi.mocked(invoke).mockImplementation(async () => connection);
+    fixtureHost!.answerConnection(connection);
+    vi.restoreAllMocks();
   });
 
   it("opens the file through the daemon's open route, as `Reveal` used to", async () => {
@@ -775,7 +777,9 @@ describe("LibraryDetail — Open and Reveal", () => {
   });
 
   it("asks the daemon to reveal the artifact by its id, and toasts its refusal", async () => {
-    vi.stubGlobal("isTauri", true);
+    fixtureHost!.setReveal(true);
+    const logTail = vi.spyOn(fixtureHost!, "readDaemonLogTail");
+    const stopWait = vi.spyOn(fixtureHost!, "awaitDaemonStopped");
     const refusal = `${findings.path} is not there any more, so it cannot be shown in its folder.`;
     route(`/v1/files/${findings.id}/reveal`, () =>
       json({ error: { code: "REVEAL_REFUSED", message: refusal } }, 409),
@@ -797,7 +801,12 @@ describe("LibraryDetail — Open and Reveal", () => {
         body: null,
       },
     ]);
-    expect(invoke).not.toHaveBeenCalledWith("reveal_path", expect.anything());
+    // The shell is asked for the connection only: the host has no reveal
+    // command, and no other command, dialog or window of it was used.
+    expect(logTail).not.toHaveBeenCalled();
+    expect(stopWait).not.toHaveBeenCalled();
+    expect(fixtureHost!.dialog).toBeNull();
+    expect(fixtureHost!.window).toBeNull();
   });
 });
 
@@ -824,7 +833,7 @@ describe("LibraryDetail — toasts name an agent's file escaped (d7-app-3, S6a M
 
   afterEach(() => {
     vi.unstubAllGlobals();
-    vi.mocked(invoke).mockImplementation(async () => connection);
+    fixtureHost!.answerConnection(connection);
   });
 
   it("says the file opened", async () => {
@@ -869,7 +878,7 @@ describe("LibraryDetail — toasts name an agent's file escaped (d7-app-3, S6a M
   });
 
   it("quotes the daemon's Reveal refusal", async () => {
-    vi.stubGlobal("isTauri", true);
+    fixtureHost!.setReveal(true);
     route("/v1/files/art-h/reveal", () =>
       json(
         {
@@ -988,7 +997,7 @@ describe("LibraryDetail — Export", () => {
   });
 
   afterEach(() => {
-    // Only this block's spy: the module's `invoke` double keeps its answer.
+    // Only this block's spy: the fixture host keeps its answer.
     click?.mockRestore();
     // Put back what was there, or nothing when nothing was.
     if (createDescriptor === undefined)

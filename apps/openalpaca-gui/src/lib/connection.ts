@@ -1,8 +1,9 @@
 /**
  * Daemon discovery and auth (API_MAP §1).
  *
- * The webview never reads `discovery.json`. Tauri commands do — the names are
- * read from `src-tauri/src/lib.rs`'s `tauri::generate_handler!`:
+ * The webview never reads `discovery.json`. Tauri commands do, called
+ * through the host (`lib/host/`: TauriHost, `lib/host/tauri.ts`) — the names
+ * are read from `src-tauri/src/lib.rs`'s `tauri::generate_handler!`:
  *
  *   `ensure_daemon_running` — asks the daemon `discovery.json` names
  *                             `GET /v1/health` and judges it (Q04): reuses one
@@ -44,16 +45,23 @@
  * never their values; `null` for a daemon the app did not spawn this run. A
  * refusal of the shell's is typed, `{ kind, message }`
  * (`lib/shell-error.ts`, Q13): it becomes a `ConnectionError` carrying that
- * `kind` and the shell's sentence as it is.
+ * `kind` and the shell's sentence as it is (`lib/host/answer.ts`, the check
+ * every host's answer passes).
+ *
+ * In a plain browser, in a development build, the host is a fixture
+ * (`lib/host/fixture.ts`, unanswered unless `VITE_OPENALPACA_HOST=fixture`)
+ * or, with `VITE_OPENALPACA_HOST=dev-server`, the Vite dev server: then the
+ * dev server, not the webview, reads the `discovery.json` of the store
+ * `OPENALPACA_HOME_STORE` names (`lib/host/dev-server.ts`).
  *
  * `instanceId` is the identity guard: a change means the daemon restarted, so
  * every `task_id`, `stream_id` and `request_id` the client holds is dead and
  * the app must fully re-bootstrap rather than merely reopen its socket.
  */
 
-import { invoke } from "@tauri-apps/api/core";
+import { host } from "./host";
 
-import { shellErrorOf, type ShellErrorKind } from "./shell-error";
+export { ConnectionError, daemonPathOf } from "./host/answer";
 
 export interface ConnectionInfo {
   baseUrl: string;
@@ -103,71 +111,6 @@ export interface DaemonPath {
   passedKeys: string[];
 }
 
-/** `value` as a `DaemonPath`, or `null` when it is not one. */
-export function daemonPathOf(value: unknown): DaemonPath | null {
-  if (typeof value !== "object" || value === null) return null;
-  const v = value as Record<string, unknown>;
-  if (
-    v.source !== "login-shell" &&
-    v.source !== "login-shell-noninteractive" &&
-    v.source !== "fallback-list"
-  ) {
-    return null;
-  }
-  if (typeof v.captureMs !== "number" || !Number.isFinite(v.captureMs)) {
-    return null;
-  }
-  if (v.reason !== null && typeof v.reason !== "string") return null;
-  if (
-    !Array.isArray(v.passedKeys) ||
-    !v.passedKeys.every((key) => typeof key === "string")
-  ) {
-    return null;
-  }
-  return {
-    source: v.source,
-    captureMs: v.captureMs,
-    reason: v.reason,
-    passedKeys: [...(v.passedKeys as string[])],
-  };
-}
-
-/** Thrown when discovery is missing/expired or the Tauri bridge is absent. */
-export class ConnectionError extends Error {
-  /** The underlying Tauri rejection or malformed payload. */
-  readonly detail: unknown;
-  /**
-   * What refused, when the shell did (its typed refusal's `kind`); `null`
-   * for Tauri's own refusal, an absent bridge or a malformed payload.
-   */
-  readonly kind: ShellErrorKind | null;
-  override readonly name = "ConnectionError";
-
-  constructor(
-    message: string,
-    detail: unknown = null,
-    kind: ShellErrorKind | null = null,
-  ) {
-    super(message);
-    this.detail = detail;
-    this.kind = kind;
-  }
-}
-
-/**
- * A command's rejection as a `ConnectionError`: the shell's typed refusal
- * keeps its `kind` and its sentence; Tauri's own refusal is a bare string,
- * kept as it is with no `kind`; anything else is named by the command.
- */
-function refusalOf(command: string, cause: unknown): ConnectionError {
-  const shell = shellErrorOf(cause);
-  if (shell) return new ConnectionError(shell.message, cause, shell.kind);
-  return new ConnectionError(
-    typeof cause === "string" ? cause : `Tauri command \`${command}\` failed`,
-    cause,
-  );
-}
-
 export type ConnectionListener = (info: ConnectionInfo | null) => void;
 export type InstanceChangeListener = (
   next: ConnectionInfo,
@@ -192,50 +135,10 @@ let refreshInFlight: Promise<ConnectionInfo> | null = null;
 const connectionListeners = new Set<ConnectionListener>();
 const instanceListeners = new Set<InstanceChangeListener>();
 
-function isConnectionInfo(value: unknown): value is ConnectionInfo {
-  if (typeof value !== "object" || value === null) return false;
-  const v = value as Record<string, unknown>;
-  return (
-    typeof v.baseUrl === "string" &&
-    typeof v.token === "string" &&
-    typeof v.instanceId === "string"
-  );
-}
-
 function publish(info: ConnectionInfo | null): void {
   current = info;
   readAt = info === null ? null : Date.now();
   for (const listener of connectionListeners) listener(info);
-}
-
-async function invokeConnection(
-  command: "get_connection_info" | "ensure_daemon_running",
-) {
-  let raw: unknown;
-  try {
-    raw = await invoke(command);
-  } catch (cause) {
-    throw refusalOf(command, cause);
-  }
-  if (!isConnectionInfo(raw)) {
-    throw new ConnectionError(
-      `\`${command}\` returned an unexpected payload`,
-      raw,
-    );
-  }
-  const v = raw as unknown as Record<string, unknown>;
-  return {
-    baseUrl: raw.baseUrl,
-    token: raw.token,
-    instanceId: raw.instanceId,
-    daemonPath: daemonPathOf(raw.daemonPath),
-    version: typeof v.version === "string" ? v.version : null,
-    protocol:
-      typeof v.protocol === "number" && Number.isFinite(v.protocol)
-        ? v.protocol
-        : null,
-    note: typeof v.note === "string" ? v.note : null,
-  };
 }
 
 /**
@@ -246,20 +149,8 @@ async function invokeConnection(
  * answers for a daemon that would not start as well as one that is running.
  * Colour escapes are gone and nothing else is changed: render it verbatim.
  */
-export async function readDaemonLogTail(lines: number): Promise<string> {
-  let raw: unknown;
-  try {
-    raw = await invoke("read_daemon_log_tail", { lines });
-  } catch (cause) {
-    throw refusalOf("read_daemon_log_tail", cause);
-  }
-  if (typeof raw !== "string") {
-    throw new ConnectionError(
-      "`read_daemon_log_tail` returned an unexpected payload",
-      raw,
-    );
-  }
-  return raw;
+export function readDaemonLogTail(lines: number): Promise<string> {
+  return host().readDaemonLogTail(lines);
 }
 
 // ── Stop intent ─────────────────────────────────────────────────────────────
@@ -364,42 +255,13 @@ export interface DaemonStopReport {
   waitedMs: number;
 }
 
-const STOP_OUTCOMES: ReadonlySet<string> = new Set([
-  "not_running",
-  "stopped",
-  "lock_still_held",
-  "still_alive",
-]);
-
 /**
  * Wait — up to 15 s, in the shell — until the daemon's process has exited and
  * its single-instance lock is free. The shutdown route's `200` says only that
  * the daemon was asked; this is what says it is gone.
  */
-export async function awaitDaemonStopped(): Promise<DaemonStopReport> {
-  let raw: unknown;
-  try {
-    raw = await invoke("await_daemon_stopped");
-  } catch (cause) {
-    throw refusalOf("await_daemon_stopped", cause);
-  }
-  const report = raw as Partial<DaemonStopReport> | null;
-  if (
-    typeof report !== "object" ||
-    report === null ||
-    typeof report.outcome !== "string" ||
-    !STOP_OUTCOMES.has(report.outcome)
-  ) {
-    throw new ConnectionError(
-      "`await_daemon_stopped` returned an unexpected payload",
-      raw,
-    );
-  }
-  return {
-    outcome: report.outcome,
-    pid: typeof report.pid === "number" ? report.pid : null,
-    waitedMs: typeof report.waitedMs === "number" ? report.waitedMs : 0,
-  };
+export function awaitDaemonStopped(): Promise<DaemonStopReport> {
+  return host().awaitDaemonStopped();
 }
 
 /** The cached connection, or `null` before the first successful bootstrap. */
@@ -433,7 +295,8 @@ export function subscribeInstanceChange(
 export function bootstrapConnection(): Promise<ConnectionInfo> {
   if (bootstrapInFlight) return bootstrapInFlight;
 
-  bootstrapInFlight = invokeConnection("ensure_daemon_running")
+  bootstrapInFlight = host()
+    .ensureDaemonRunning()
     .then((info) => {
       adopt(info);
       return info;
@@ -463,7 +326,7 @@ export function refreshConnection(): Promise<ConnectionInfo> {
 
 async function rereadConnection(): Promise<ConnectionInfo> {
   const previous = current ?? replaced;
-  const info = await invokeConnection("get_connection_info");
+  const info = await host().getConnectionInfo();
 
   if (previous && previous.instanceId !== info.instanceId) {
     // Kept until a read lands: the boot below, or a later one if it fails.

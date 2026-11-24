@@ -1,11 +1,10 @@
 /**
  * The file panel's `Open` and `Reveal in Finder`, wired to the artifact the
  * slot read: the daemon's open and reveal routes for its id (Q06). Only the
- * Tauri `invoke` and `fetch` are doubled.
+ * shell's commands (on FixtureHost) and `fetch` are doubled.
  */
 
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
-import { invoke } from "@tauri-apps/api/core";
 import {
   act,
   fireEvent,
@@ -19,12 +18,11 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import type { Artifact } from "@/lib/api/artifacts";
 import { refreshConnection, resetConnection } from "@/lib/connection";
+import { fixtureHost } from "@/lib/host/fixture";
 import { revealLabel } from "@/lib/reveal";
 import { useUiStore } from "@/stores/ui";
 
 import { FilePanelSlot } from "./FilePanelSlot";
-
-vi.mock("@tauri-apps/api/core", () => ({ invoke: vi.fn() }));
 
 const row: Artifact = {
   id: "art-1",
@@ -91,11 +89,11 @@ beforeEach(() => {
     panelTab: "preview",
     libraryResults: false,
   });
-  vi.mocked(invoke).mockImplementation(async () => ({
+  fixtureHost!.answerConnection({
     baseUrl: "http://127.0.0.1:9999",
     token: "test-token",
     instanceId: "7f3a1122",
-  }));
+  });
   vi.stubGlobal(
     "fetch",
     vi.fn(async (input: unknown, init?: RequestInit) => {
@@ -125,7 +123,8 @@ beforeEach(() => {
 
 afterEach(() => {
   vi.unstubAllGlobals();
-  vi.mocked(invoke).mockReset();
+  fixtureHost!.reset();
+  vi.restoreAllMocks();
 });
 
 function renderSlot() {
@@ -157,7 +156,9 @@ describe("FilePanelSlot — Open and Reveal", () => {
   });
 
   it("reveals the artifact through the daemon's reveal route, by its id", async () => {
-    vi.stubGlobal("isTauri", true);
+    fixtureHost!.setReveal(true);
+    const logTail = vi.spyOn(fixtureHost!, "readDaemonLogTail");
+    const stopWait = vi.spyOn(fixtureHost!, "awaitDaemonStopped");
     const user = userEvent.setup();
     renderSlot();
 
@@ -170,7 +171,12 @@ describe("FilePanelSlot — Open and Reveal", () => {
         "POST http://127.0.0.1:9999/v1/files/art-1/reveal",
       ),
     );
-    expect(invoke).not.toHaveBeenCalledWith("reveal_path", expect.anything());
+    // The shell is asked for the connection only: the host has no reveal
+    // command, and no other command, dialog or window of it was used.
+    expect(logTail).not.toHaveBeenCalled();
+    expect(stopWait).not.toHaveBeenCalled();
+    expect(fixtureHost!.dialog).toBeNull();
+    expect(fixtureHost!.window).toBeNull();
     // Finder coming forward is the answer: once the daemon has replied and
     // every reaction to it has run (a macrotask runs after all of them),
     // nothing was toasted.
@@ -205,7 +211,7 @@ describe("FilePanelSlot — Library ↗ for a file written into the project", ()
 describe("FilePanelSlot — a file written into the project", () => {
   it("draws Reveal and no Open for a kind the daemon does not open", async () => {
     served = projectScript;
-    vi.stubGlobal("isTauri", true);
+    fixtureHost!.setReveal(true);
     renderSlot();
 
     expect(
@@ -363,11 +369,11 @@ describe("FilePanelSlot — an image's token (TOKEN-REREAD)", () => {
       "http://127.0.0.1:9999/v1/artifacts/art-1/content?token=test-token",
     );
 
-    vi.mocked(invoke).mockResolvedValueOnce({
+    fixtureHost!.answerOnce("getConnectionInfo", () => ({
       baseUrl: "http://127.0.0.1:9999",
       token: "renewed-token",
       instanceId: "7f3a1122",
-    });
+    }));
     await act(async () => {
       await refreshConnection();
     });

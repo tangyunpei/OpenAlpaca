@@ -6,22 +6,20 @@
  * own attempt even after the old one failed.
  */
 
-import { invoke } from "@tauri-apps/api/core";
 import { act, renderHook } from "@testing-library/react";
-import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it } from "vitest";
 
 import {
   bootstrapConnection,
   refreshConnection,
   resetConnection,
 } from "@/lib/connection";
+import { fixtureHost } from "@/lib/host/fixture";
 
 import { useArtifactContentUrl } from "./useArtifacts";
 
-vi.mock("@tauri-apps/api/core", () => ({ invoke: vi.fn() }));
-
 function serving(token: string): void {
-  vi.mocked(invoke).mockResolvedValue({
+  fixtureHost!.answerConnection({
     baseUrl: "http://127.0.0.1:51823",
     token,
     instanceId: "i-1",
@@ -34,7 +32,7 @@ beforeEach(() => {
 });
 
 afterEach(() => {
-  vi.mocked(invoke).mockReset();
+  fixtureHost!.reset();
 });
 
 describe("useArtifactContentUrl", () => {

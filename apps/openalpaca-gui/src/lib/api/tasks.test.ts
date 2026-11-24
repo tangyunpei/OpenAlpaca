@@ -11,6 +11,7 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 import { ApiError } from "@/lib/http";
 
 import { resetConnection } from "@/lib/connection";
+import { fixtureHost } from "@/lib/host/fixture";
 
 import {
   launchErrorMessage,
@@ -20,13 +21,13 @@ import {
   steerTask,
 } from "./tasks";
 
-vi.mock("@tauri-apps/api/core", () => ({
-  invoke: vi.fn(async () => ({
+beforeEach(() => {
+  fixtureHost!.answerConnection({
     baseUrl: "http://127.0.0.1:9999",
     token: "tok en/+",
     instanceId: "7f3a1122",
-  })),
-}));
+  });
+});
 
 interface Recorded {
   url: string;

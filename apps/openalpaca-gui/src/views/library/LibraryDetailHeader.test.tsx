@@ -5,9 +5,10 @@
 
 import { render, screen } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
-import { afterEach, describe, expect, it, vi } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 
 import type { Artifact } from "@/lib/api/artifacts";
+import { fixtureHost } from "@/lib/host/fixture";
 import { revealLabel } from "@/lib/reveal";
 
 import { LibraryDetailHeader } from "./LibraryDetailHeader";
@@ -57,10 +58,6 @@ function renderHeader(summary: string | null = null) {
   return handlers;
 }
 
-afterEach(() => {
-  vi.unstubAllGlobals();
-});
-
 describe("LibraryDetailHeader — Open and Reveal", () => {
   it("draws Open, and no Reveal, outside the app's window", async () => {
     const handlers = renderHeader();
@@ -75,7 +72,7 @@ describe("LibraryDetailHeader — Open and Reveal", () => {
   });
 
   it("draws Reveal beside Open inside the app's window", async () => {
-    vi.stubGlobal("isTauri", true);
+    fixtureHost!.setReveal(true);
     const handlers = renderHeader();
 
     await userEvent
@@ -156,7 +153,7 @@ describe("LibraryDetailHeader — a file written into a project", () => {
   });
 
   it("draws Reveal and no Open for a kind the daemon does not open", () => {
-    vi.stubGlobal("isTauri", true);
+    fixtureHost!.setReveal(true);
     renderWritten();
     expect(screen.queryByRole("button", { name: "Open" })).toBeNull();
     expect(

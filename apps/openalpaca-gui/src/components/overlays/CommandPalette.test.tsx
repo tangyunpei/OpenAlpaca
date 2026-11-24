@@ -9,6 +9,7 @@ import userEvent from "@testing-library/user-event";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
 import { resetConnection } from "@/lib/connection";
+import { fixtureHost } from "@/lib/host/fixture";
 import { useConfirmationStore } from "@/stores/confirmation";
 import { useUiStore } from "@/stores/ui";
 
@@ -22,13 +23,13 @@ vi.mock("@/hooks/useTasks", () => ({
   useTasks: () => tasks,
 }));
 
-vi.mock("@tauri-apps/api/core", () => ({
-  invoke: vi.fn(async () => ({
+beforeEach(() => {
+  fixtureHost!.answerConnection({
     baseUrl: "http://127.0.0.1:9999",
     token: "test-token",
     instanceId: "7f3a1122",
-  })),
-}));
+  });
+});
 
 /** The rows `GET /v1/artifacts?q=` answers with; empty unless a test sets it. */
 let hits: { id: string; name: string; in_project?: boolean }[] = [];

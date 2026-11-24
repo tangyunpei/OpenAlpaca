@@ -23,7 +23,7 @@ daemon's real HTTP/SSE/WS surface. The shipped app has a fifth the canvas predat
 | SSE event union                          | `crates/openalpaca_core/src/chat/stream_manager/mod.rs` (`ChatStreamEvent`)                                                                       |
 | SSE lifecycle                            | `crates/openalpaca_core/src/chat/service.rs`, `apps/openalpacad/src/background.rs`                                                                |
 | Storage models                           | `crates/openalpaca_storage/src/models/*.rs`, `src/repository/*`                                                                                   |
-| The React client                         | `apps/openalpaca-gui/src/lib/connection.ts`, `events.ts`, `chat-stream.ts`, `query-client.ts`, `src/lib/api/*.ts`                                 |
+| The React client                         | `apps/openalpaca-gui/src/lib/connection.ts`, `host/`, `events.ts`, `chat-stream.ts`, `query-client.ts`, `src/lib/api/*.ts`                        |
 | Tauri host                               | `apps/openalpaca-gui/src-tauri/src/lib.rs`, `crates/openalpaca_app_support/src/discovery/mod.rs`                                                  |
 
 **The contract checked (API-CONTRACT).** What this map describes by hand is
@@ -169,7 +169,8 @@ from `ensure_daemon_running` or a rung's `get_connection_info`, and waits on
 refused `starting` asking again while the window waits, at most
 `STARTING_RETRY_MS` apart, and retries `still_starting`, `mismatch` and
 every other refusal as any failure (VIEW-STARTING). `lib/shell-error.ts` mirrors
-the type by hand, and `lib/connection.ts` turns a refusal into a
+the type by hand, and `lib/host/answer.ts` (the check every host's answer
+passes, TauriHost's included) turns a refusal into a
 `ConnectionError` carrying its `kind`. Every variant's wire form is a row
 of `src/lib/shell-errors.json`: the shell's tests serialize one of each
 variant against it and fail until every
@@ -284,7 +285,8 @@ Liveness / identity guards the React client must reproduce:
 ### 1.2 What the React client must reproduce
 
 1. A `connection` module wrapping `invoke("ensure_daemon_running")` on boot and
-   `invoke("get_connection_info")` on reconnect. Keep `{baseUrl, token, instanceId}`
+   `invoke("get_connection_info")` on reconnect, through the host's TauriHost
+   (`lib/host/tauri.ts`). Keep `{baseUrl, token, instanceId}`
    in a store/context; **all** fetches read from it.
 2. An `apiFetch(path, init)` helper that injects `Authorization: Bearer` and
    answers a `401` by reading the connection again and sending the request

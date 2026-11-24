@@ -8,13 +8,12 @@ import { act, renderHook, waitFor } from "@testing-library/react";
 import type { ReactNode } from "react";
 import { afterEach, describe, expect, it, vi } from "vitest";
 
-import { invoke } from "@tauri-apps/api/core";
-
 import {
   bootstrapConnection,
   resetConnection,
   setStopIntent,
 } from "@/lib/connection";
+import { fixtureHost } from "@/lib/host/fixture";
 
 import {
   useConnectionStatus,
@@ -40,7 +39,6 @@ vi.mock("@/lib/api/status", () => ({
   getDaemonStatus: reads.status,
   requestDaemonShutdown: vi.fn(),
 }));
-vi.mock("@tauri-apps/api/core", () => ({ invoke: vi.fn() }));
 
 /** One client per test, held outside the wrapper so a rerender keeps it. */
 function makeWrapper() {
@@ -111,11 +109,11 @@ describe("the note on a daemon of another version", () => {
 
   afterEach(() => {
     resetConnection();
-    vi.mocked(invoke).mockReset();
+    fixtureHost!.reset();
   });
 
   it("is the shell's sentence, from the connection", async () => {
-    vi.mocked(invoke).mockResolvedValue({ ...info, note });
+    fixtureHost!.answerConnection({ ...info, note });
     await bootstrapConnection();
     const { result } = renderHook(() => useConnectionStatus(), {
       wrapper: makeWrapper(),
@@ -124,7 +122,7 @@ describe("the note on a daemon of another version", () => {
   });
 
   it("is null for a daemon of this app's version", async () => {
-    vi.mocked(invoke).mockResolvedValue({ ...info, note: null });
+    fixtureHost!.answerConnection({ ...info, note: null });
     await bootstrapConnection();
     const { result } = renderHook(() => useConnectionStatus(), {
       wrapper: makeWrapper(),

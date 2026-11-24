@@ -3,13 +3,11 @@
  * says, and what the daemon is asked (Q06: its `POST /v1/files/{id}/reveal`).
  */
 
-import { invoke } from "@tauri-apps/api/core";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import { resetConnection } from "./connection";
+import { fixtureHost } from "./host/fixture";
 import { canReveal, revealInFolder, revealLabel } from "./reveal";
-
-vi.mock("@tauri-apps/api/core", () => ({ invoke: vi.fn() }));
 
 const MAC_WEBVIEW =
   "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 (KHTML, like Gecko)";
@@ -21,12 +19,12 @@ const LINUX_WEBVIEW =
 afterEach(() => {
   vi.unstubAllGlobals();
   vi.restoreAllMocks();
-  vi.mocked(invoke).mockReset();
+  fixtureHost!.reset();
 });
 
 describe("canReveal", () => {
-  it("is true inside the Tauri window, which marks itself `isTauri`", () => {
-    vi.stubGlobal("isTauri", true);
+  it("is true when the host draws Reveal, as the Tauri window's does", () => {
+    fixtureHost!.setReveal(true);
     expect(canReveal()).toBe(true);
   });
 
@@ -69,7 +67,7 @@ describe("revealInFolder", () => {
   beforeEach(() => {
     requests = [];
     resetConnection();
-    vi.mocked(invoke).mockResolvedValue({
+    fixtureHost!.answerConnection({
       baseUrl: "http://127.0.0.1:9999",
       token: "tok",
       instanceId: "7f3a1122",
@@ -89,6 +87,8 @@ describe("revealInFolder", () => {
 
   it("asks the daemon's `POST /v1/files/{id}/reveal` for the file id, never a path", async () => {
     reply = () => json({ id: "art 1", status: "revealed" });
+    const logTail = vi.spyOn(fixtureHost!, "readDaemonLogTail");
+    const stopWait = vi.spyOn(fixtureHost!, "awaitDaemonStopped");
 
     await revealInFolder("art 1");
 
@@ -99,8 +99,13 @@ describe("revealInFolder", () => {
         body: null,
       },
     ]);
-    // The shell is asked for the connection only — no command of its own.
-    expect(invoke).not.toHaveBeenCalledWith("reveal_path", expect.anything());
+    // The shell is asked for the connection only — no command of its own:
+    // the host has no reveal command, and no other command, dialog or
+    // window of it was used.
+    expect(logTail).not.toHaveBeenCalled();
+    expect(stopWait).not.toHaveBeenCalled();
+    expect(fixtureHost!.dialog).toBeNull();
+    expect(fixtureHost!.window).toBeNull();
   });
 
   it("rejects with the daemon's own sentence for a file it does not show", async () => {

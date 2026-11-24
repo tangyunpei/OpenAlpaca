@@ -14,17 +14,18 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 
 import type { Run } from "@/components/work/run-model";
 import { resetConnection } from "@/lib/connection";
+import { fixtureHost } from "@/lib/host/fixture";
 import { useUiStore } from "@/stores/ui";
 
 import { RunDetail } from "./RunDetail";
 
-vi.mock("@tauri-apps/api/core", () => ({
-  invoke: vi.fn(async () => ({
+beforeEach(() => {
+  fixtureHost!.answerConnection({
     baseUrl: "http://127.0.0.1:9999",
     token: "test-token",
     instanceId: "7f3a1122",
-  })),
-}));
+  });
+});
 
 const task = {
   id: "task-1",

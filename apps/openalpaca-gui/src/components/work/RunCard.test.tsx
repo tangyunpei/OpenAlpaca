@@ -1,7 +1,7 @@
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { render, screen } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
-import { afterEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 afterEach(() => {
   vi.unstubAllGlobals();
@@ -9,18 +9,19 @@ afterEach(() => {
 
 import { resetConnection } from "@/lib/connection";
 import type { TaskTimeline } from "@/lib/api/tasks";
+import { fixtureHost } from "@/lib/host/fixture";
 
 import { RunCard } from "./RunCard";
 import type { Run } from "./run-model";
 import { useRunController } from "./useRunController";
 
-vi.mock("@tauri-apps/api/core", () => ({
-  invoke: vi.fn(async () => ({
+beforeEach(() => {
+  fixtureHost!.answerConnection({
     baseUrl: "http://127.0.0.1:9999",
     token: "tok en/+",
     instanceId: "7f3a1122",
-  })),
-}));
+  });
+});
 
 const TIMELINE: TaskTimeline = {
   task_id: "b41c8e02",

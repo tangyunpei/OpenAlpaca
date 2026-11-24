@@ -1,7 +1,7 @@
-import { invoke } from "@tauri-apps/api/core";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import { getCachedConnection, resetConnection } from "./connection";
+import { fixtureHost } from "./host/fixture";
 import {
   ApiError,
   apiFetch,
@@ -9,8 +9,6 @@ import {
   errorFromResponse,
   parseErrorPayload,
 } from "./http";
-
-vi.mock("@tauri-apps/api/core", () => ({ invoke: vi.fn() }));
 
 describe("parseErrorPayload", () => {
   it("reads the structured envelope used by chat and settings", () => {
@@ -137,13 +135,15 @@ describe("apiRequest across a token rotation", () => {
   }
 
   function answers(commands: Record<string, string>): void {
-    vi.mocked(invoke).mockImplementation((command: string) => {
+    const answer = (command: string) => () => {
       const token = commands[command];
       if (token === undefined) {
         return Promise.reject(new Error(`unexpected ${command}`));
       }
       return Promise.resolve({ ...base, token, daemonPath: null });
-    });
+    };
+    fixtureHost!.answer("ensureDaemonRunning", answer("ensure_daemon_running"));
+    fixtureHost!.answer("getConnectionInfo", answer("get_connection_info"));
   }
 
   beforeEach(() => {
@@ -154,11 +154,13 @@ describe("apiRequest across a token rotation", () => {
   afterEach(() => {
     vi.unstubAllGlobals();
     fetchMock.mockReset();
-    vi.mocked(invoke).mockReset();
+    fixtureHost!.reset();
+    vi.restoreAllMocks();
   });
 
   it("re-reads the connection on a 401 and sends the request again with the new token", async () => {
     answers({ ensure_daemon_running: "old", get_connection_info: "new" });
+    const reads = vi.spyOn(fixtureHost!, "getConnectionInfo");
     fetchMock
       .mockResolvedValueOnce(refused())
       .mockResolvedValueOnce(Response.json({ ok: true }));
@@ -171,7 +173,7 @@ describe("apiRequest across a token rotation", () => {
     expect(bearer(0)).toBe("Bearer old");
     expect(bearer(1)).toBe("Bearer new");
     expect(fetchMock.mock.calls[1]?.[1]?.body).toBe('{"a":1}');
-    expect(invoke).toHaveBeenCalledWith("get_connection_info");
+    expect(reads).toHaveBeenCalledWith();
     expect(getCachedConnection()?.token).toBe("new");
   });
 
@@ -190,15 +192,15 @@ describe("apiRequest across a token rotation", () => {
     // The first boot finds i-1; the daemon then restarts as i-2, which the
     // re-read and the re-bootstrap it leads to both find.
     let boots = 0;
-    vi.mocked(invoke).mockImplementation((command: string) => {
-      const first = command === "ensure_daemon_running" && boots++ === 0;
-      return Promise.resolve({
+    const answer = (first: boolean) =>
+      Promise.resolve({
         ...base,
         token: first ? "old" : "new",
         instanceId: first ? "i-1" : "i-2",
         daemonPath: null,
       });
-    });
+    fixtureHost!.answer("ensureDaemonRunning", () => answer(boots++ === 0));
+    fixtureHost!.answer("getConnectionInfo", () => answer(false));
     fetchMock.mockResolvedValue(refused());
 
     const error = await apiFetch("/v1/status").catch((e: unknown) => e);
@@ -219,6 +221,7 @@ describe("apiRequest across a token rotation", () => {
 
   it("reads the connection once for every request refused together", async () => {
     answers({ ensure_daemon_running: "old", get_connection_info: "new" });
+    const reads = vi.spyOn(fixtureHost!, "getConnectionInfo");
     fetchMock.mockImplementation((_url, init) =>
       Promise.resolve(
         new Headers(init?.headers).get("Authorization") === "Bearer new"
@@ -233,9 +236,6 @@ describe("apiRequest across a token rotation", () => {
       apiFetch("/v1/c"),
     ]);
 
-    const reads = vi
-      .mocked(invoke)
-      .mock.calls.filter(([command]) => command === "get_connection_info");
-    expect(reads).toHaveLength(1);
+    expect(reads).toHaveBeenCalledTimes(1);
   });
 });

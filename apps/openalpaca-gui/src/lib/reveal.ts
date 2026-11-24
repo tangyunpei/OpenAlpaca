@@ -12,17 +12,17 @@
  */
 
 import { revealFile } from "./api/files";
+import { host } from "./host";
 
 /**
  * Whether this window offers Reveal: only inside the Tauri shell. In the Vite
  * preview (or jsdom) nothing draws the button.
  *
- * Reads the marker the shell injects — the same one `@tauri-apps/api/core`'s
- * `isTauri()` reads — directly, so a test that mocks that module with
- * `invoke` alone does not have to stub it too.
+ * The host says so (`lib/host/`): TauriHost does; the dev-server and fixture
+ * hosts do not, unless a test sets the fixture's flag.
  */
 export function canReveal(): boolean {
-  return (globalThis as { isTauri?: unknown }).isTauri === true;
+  return host().reveal;
 }
 
 /** "Reveal in Finder" on macOS, where Finder is the name people know; "Show in folder" elsewhere. */

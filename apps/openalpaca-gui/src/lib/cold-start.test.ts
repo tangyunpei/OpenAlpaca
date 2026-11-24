@@ -13,10 +13,9 @@
  * query with no interval of its own stays in error until something else
  * refetches it. Wired as `QueryProvider` wires it: the real connection,
  * `apiRequest`, the app's query client and the resync bridge; only the
- * shell's `invoke`, `fetch` and the socket are doubles.
+ * shell's commands (on FixtureHost), `fetch` and the socket are doubles.
  */
 
-import { invoke } from "@tauri-apps/api/core";
 import { QueryObserver } from "@tanstack/react-query";
 import { afterEach, describe, expect, it, vi } from "vitest";
 
@@ -32,11 +31,10 @@ import {
   STARTING_RETRY_MS,
   type SocketLike,
 } from "./events";
+import { fixtureHost } from "./host/fixture";
 import { apiRequest } from "./http";
 import { createQueryClient, invalidateAfterResync } from "./query-client";
 import shellErrors from "./shell-errors.json";
-
-vi.mock("@tauri-apps/api/core", () => ({ invoke: vi.fn() }));
 
 const INFO: ConnectionInfo = {
   baseUrl: "http://127.0.0.1:51823",
@@ -77,7 +75,7 @@ afterEach(() => {
   setStopIntent(null);
   vi.useRealTimers();
   vi.unstubAllGlobals();
-  vi.mocked(invoke).mockReset();
+  fixtureHost!.reset();
   resetConnection();
 });
 
@@ -86,15 +84,12 @@ async function coldStart(boot: Boot) {
   resetConnection();
   const started = Date.now();
   let serving = false;
-  vi.mocked(invoke).mockImplementation((command: string) => {
-    if (command === "ensure_daemon_running") {
-      if (serving) return Promise.resolve(INFO);
-      return Promise.reject(boot.ensureWhileBooting(Date.now() - started));
-    }
-    // The file names the booting daemon: the rung reads it and dials.
-    if (command === "get_connection_info") return Promise.resolve(INFO);
-    return Promise.reject(new Error(`unexpected ${command}`));
+  fixtureHost!.answer("ensureDaemonRunning", () => {
+    if (serving) return Promise.resolve(INFO);
+    return Promise.reject(boot.ensureWhileBooting(Date.now() - started));
   });
+  // The file names the booting daemon: the rung reads it and dials.
+  fixtureHost!.answer("getConnectionInfo", () => Promise.resolve(INFO));
   const fetchMock = vi.fn(async () => {
     if (!serving) throw new TypeError("Failed to fetch");
     return new Response("[]", {
@@ -229,13 +224,14 @@ async function refusedFor(
   resetConnection();
   const started = Date.now();
   const asks: number[] = [];
-  vi.mocked(invoke).mockImplementation((command: string) => {
-    if (command === "ensure_daemon_running") {
-      asks.push(Date.now() - started);
-      return Promise.reject(answer(Date.now() - started));
-    }
-    return Promise.reject(refusal("not_running"));
+  fixtureHost!.answer("ensureDaemonRunning", () => {
+    asks.push(Date.now() - started);
+    return Promise.reject(answer(Date.now() - started));
   });
+  const notRunning = () => Promise.reject(refusal("not_running"));
+  fixtureHost!.answer("getConnectionInfo", notRunning);
+  fixtureHost!.answer("readDaemonLogTail", notRunning);
+  fixtureHost!.answer("awaitDaemonStopped", notRunning);
   vi.stubGlobal(
     "fetch",
     vi.fn(async () => {

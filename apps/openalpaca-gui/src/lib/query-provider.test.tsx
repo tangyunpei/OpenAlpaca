@@ -9,7 +9,6 @@
  */
 
 import { QueryClient } from "@tanstack/react-query";
-import { invoke } from "@tauri-apps/api/core";
 import { render } from "@testing-library/react";
 import { afterEach, describe, expect, it, vi } from "vitest";
 
@@ -19,6 +18,7 @@ import {
   resetConnection,
 } from "./connection";
 import { daemonEvents, type ResyncSignal, type ServerEvent } from "./events";
+import { fixtureHost } from "./host/fixture";
 import { QueryProvider } from "./query-provider";
 import { qk } from "./query-keys";
 
@@ -60,12 +60,10 @@ function invalidated(client: QueryClient, key: readonly unknown[]): boolean {
   return client.getQueryState(key)?.isInvalidated === true;
 }
 
-vi.mock("@tauri-apps/api/core", () => ({ invoke: vi.fn() }));
-
 afterEach(() => {
   vi.useRealTimers();
   vi.restoreAllMocks();
-  vi.mocked(invoke).mockReset();
+  fixtureHost!.reset();
   resetConnection();
 });
 
@@ -134,18 +132,15 @@ describe("QueryProvider", () => {
     vi.useFakeTimers({ toFake: ["setInterval", "clearInterval"] });
     let wall = Date.UTC(2026, 10, 16, 12);
     vi.spyOn(Date, "now").mockImplementation(() => wall);
-    vi.mocked(invoke).mockResolvedValue({
+    fixtureHost!.answerConnection({
       baseUrl: "http://127.0.0.1:51823",
       token: "t1",
       instanceId: "i-1",
       daemonPath: null,
     });
     await bootstrapConnection();
-    const rereads = () =>
-      vi
-        .mocked(invoke)
-        .mock.calls.filter(([command]) => command === "get_connection_info")
-        .length;
+    const reads = vi.spyOn(fixtureHost!, "getConnectionInfo");
+    const rereads = () => reads.mock.calls.length;
 
     const { unmount } = render(
       <QueryProvider client={seeded()}>

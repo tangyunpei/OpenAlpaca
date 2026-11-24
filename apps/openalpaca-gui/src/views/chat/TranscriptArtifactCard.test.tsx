@@ -3,25 +3,23 @@
  * that orders it.
  *
  * Its `Open` goes through the real `apiFetch` stack and its `Reveal in Finder`
- * through the real `lib/reveal`; only the Tauri `invoke` and `fetch` are
- * doubled.
+ * through the real `lib/reveal`; only the shell's commands (on FixtureHost)
+ * and `fetch` are doubled.
  */
 
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
-import { invoke } from "@tauri-apps/api/core";
 import { render, screen, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import { resetConnection } from "@/lib/connection";
+import { fixtureHost } from "@/lib/host/fixture";
 import { revealLabel } from "@/lib/reveal";
 import { useUiStore } from "@/stores/ui";
 
 import { Transcript } from "./Transcript";
 import { buildTranscript, type WrittenArtifact } from "./transcript-model";
 import { initialChatStreamState } from "@/lib/chat-stream";
-
-vi.mock("@tauri-apps/api/core", () => ({ invoke: vi.fn() }));
 
 const CONNECTION = {
   baseUrl: "http://127.0.0.1:9999",
@@ -65,7 +63,7 @@ beforeEach(() => {
   posted = [];
   revealReply = () =>
     new Response(JSON.stringify({ id: "art-1", status: "revealed" }));
-  vi.mocked(invoke).mockImplementation(async () => CONNECTION);
+  fixtureHost!.answerConnection(CONNECTION);
   vi.stubGlobal(
     "fetch",
     vi.fn(async (input: unknown, init?: RequestInit) => {
@@ -80,7 +78,8 @@ beforeEach(() => {
 
 afterEach(() => {
   vi.unstubAllGlobals();
-  vi.mocked(invoke).mockReset();
+  fixtureHost!.reset();
+  vi.restoreAllMocks();
 });
 
 function renderTranscript(...artifacts: WrittenArtifact[]) {
@@ -136,7 +135,7 @@ describe("the written-artifact card", () => {
     ).not.toBeInTheDocument();
     unmount();
 
-    vi.stubGlobal("isTauri", true);
+    fixtureHost!.setReveal(true);
     renderTranscript(written);
     expect(screen.getByRole("button", { name: "Open" })).toBeInTheDocument();
     expect(
@@ -161,7 +160,9 @@ describe("the written-artifact card", () => {
   });
 
   it("asks the daemon to reveal the frame's file id, and shows its refusal", async () => {
-    vi.stubGlobal("isTauri", true);
+    fixtureHost!.setReveal(true);
+    const logTail = vi.spyOn(fixtureHost!, "readDaemonLogTail");
+    const stopWait = vi.spyOn(fixtureHost!, "awaitDaemonStopped");
     // The daemon refuses with its envelope, `409 REVEAL_REFUSED` (Q06).
     revealReply = () =>
       new Response(
@@ -187,7 +188,12 @@ describe("the written-artifact card", () => {
     expect(posted).toEqual([
       `POST http://127.0.0.1:9999/v1/files/${written.artifactId}/reveal`,
     ]);
-    expect(invoke).not.toHaveBeenCalledWith("reveal_path", expect.anything());
+    // The shell is asked for the connection only: the host has no reveal
+    // command, and no other command, dialog or window of it was used.
+    expect(logTail).not.toHaveBeenCalled();
+    expect(stopWait).not.toHaveBeenCalled();
+    expect(fixtureHost!.dialog).toBeNull();
+    expect(fixtureHost!.window).toBeNull();
   });
 });
 
@@ -215,7 +221,7 @@ describe("the written-artifact card for a file in the project", () => {
   });
 
   it("offers Reveal and no Open for a kind the daemon does not open", () => {
-    vi.stubGlobal("isTauri", true);
+    fixtureHost!.setReveal(true);
     renderTranscript(projectFile);
 
     expect(

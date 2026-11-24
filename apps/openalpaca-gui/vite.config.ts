@@ -4,12 +4,22 @@ import tailwindcss from "@tailwindcss/vite";
 import react from "@vitejs/plugin-react";
 import { defineConfig } from "vitest/config";
 
+import { devServerHost } from "./scripts/dev-server-host.ts";
+
 // https://vite.dev/config/ — tuned for the Tauri shell:
 //   * relative `base` so the bundle loads from the `tauri://` asset protocol
 //   * fixed dev port (tauri.conf.json `devUrl` points at 1420) and no auto-open
 //   * `static/` as the public dir so `favicon.png` keeps its path
+//   * `VITE_OPENALPACA_HOST=dev-server` adds the dev server's host plugin
+//     (`scripts/dev-server-host.ts`, Q07), never under vitest
 export default defineConfig({
-  plugins: [react(), tailwindcss()],
+  plugins: [
+    react(),
+    tailwindcss(),
+    ...(process.env.VITE_OPENALPACA_HOST === "dev-server" && !process.env.VITEST
+      ? [devServerHost()]
+      : []),
+  ],
   base: "./",
   publicDir: "static",
   // Don't wipe the Rust compiler's output during `tauri dev`.
@@ -38,6 +48,6 @@ export default defineConfig({
     globals: true,
     setupFiles: ["./vitest.setup.ts"],
     css: true,
-    include: ["src/**/*.{test,spec}.{ts,tsx}"],
+    include: ["src/**/*.{test,spec}.{ts,tsx}", "scripts/**/*.test.ts"],
   },
 });

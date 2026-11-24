@@ -6,8 +6,9 @@
 
 import { render, screen, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
-import { afterEach, describe, expect, it, vi } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 
+import { fixtureHost } from "@/lib/host/fixture";
 import { revealLabel } from "@/lib/reveal";
 
 import { FilePanel, type FilePanelProps } from "./FilePanel";
@@ -39,13 +40,9 @@ function renderPanel(overrides: Partial<FilePanelProps> = {}) {
   render(<FilePanel {...props} />);
 }
 
-afterEach(() => {
-  vi.unstubAllGlobals();
-});
-
 describe("FilePanel — Open and Reveal", () => {
   it("draws neither before the slot has an artifact to hand them", () => {
-    vi.stubGlobal("isTauri", true);
+    fixtureHost!.setReveal(true);
     renderPanel({ artifact: null, artifactNote: "Reading the file…" });
 
     expect(screen.queryByRole("button", { name: "Open" })).toBeNull();
@@ -63,7 +60,7 @@ describe("FilePanel — Open and Reveal", () => {
   });
 
   it("draws Reveal inside the app's window", async () => {
-    vi.stubGlobal("isTauri", true);
+    fixtureHost!.setReveal(true);
     const onReveal = vi.fn();
     renderPanel({ onOpen: vi.fn(), onReveal });
 

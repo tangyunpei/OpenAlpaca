@@ -9,6 +9,9 @@
     "erasableSyntaxOnly": true,
     "verbatimModuleSyntax": true,
     "noEmit": true,
+    // `vite.config.ts` names its local import with its `.ts` extension, as
+    // Vite's native config loader needs.
+    "allowImportingTsExtensions": true,
     "skipLibCheck": true,
     "strict": true,
     // Left off for the build tooling only: `scripts/prepare-sidecar.ts`'s

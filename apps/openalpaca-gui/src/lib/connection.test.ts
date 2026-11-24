@@ -5,8 +5,15 @@
  * its sentence with no `kind`; anything else is named by the command.
  */
 
-import { invoke } from "@tauri-apps/api/core";
-import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import {
+  afterEach,
+  beforeEach,
+  describe,
+  expect,
+  it,
+  vi,
+  type MockInstance,
+} from "vitest";
 
 import daemonPaths from "./daemon-path.json";
 import shellErrors from "./shell-errors.json";
@@ -27,8 +34,7 @@ import {
   subscribeInstanceChange,
   type ConnectionInfo,
 } from "./connection";
-
-vi.mock("@tauri-apps/api/core", () => ({ invoke: vi.fn() }));
+import { fixtureHost } from "./host/fixture";
 
 /** The rejection `promise` ends in, as a `ConnectionError`. */
 async function rejection(promise: Promise<unknown>): Promise<ConnectionError> {
@@ -47,35 +53,42 @@ beforeEach(() => {
 });
 
 afterEach(() => {
-  vi.mocked(invoke).mockReset();
+  fixtureHost!.reset();
+  vi.restoreAllMocks();
 });
 
 describe("a typed refusal of the shell's", () => {
   it("is a ConnectionError with its kind and its sentence, at boot", async () => {
     const message =
       "The daemon did not start within 5 seconds. Its log (/s/state/logs/daemon.log) ends with:\n\nError: this database is newer than this build";
-    vi.mocked(invoke).mockRejectedValue({
-      kind: "spawn_failed",
-      message,
-      log_tail: "Error: this database is newer than this build",
-    });
+    fixtureHost!.answer("ensureDaemonRunning", () =>
+      Promise.reject({
+        kind: "spawn_failed",
+        message,
+        log_tail: "Error: this database is newer than this build",
+      }),
+    );
+    const asked = vi.spyOn(fixtureHost!, "ensureDaemonRunning");
 
     const error = await rejection(bootstrapConnection());
 
-    expect(invoke).toHaveBeenCalledWith("ensure_daemon_running");
+    expect(asked).toHaveBeenCalledWith();
     expect(error.kind).toBe("spawn_failed");
     expect(error.message).toBe(message);
   });
 
   it("is a ConnectionError with its kind and its sentence, on reconnect", async () => {
-    vi.mocked(invoke).mockRejectedValue({
-      kind: "not_running",
-      message: "Discovery not found: daemon may not be running",
-    });
+    fixtureHost!.answer("getConnectionInfo", () =>
+      Promise.reject({
+        kind: "not_running",
+        message: "Discovery not found: daemon may not be running",
+      }),
+    );
+    const asked = vi.spyOn(fixtureHost!, "getConnectionInfo");
 
     const error = await rejection(refreshConnection());
 
-    expect(invoke).toHaveBeenCalledWith("get_connection_info");
+    expect(asked).toHaveBeenCalledWith();
     expect(error.kind).toBe("not_running");
     expect(error.message).toBe(
       "Discovery not found: daemon may not be running",
@@ -83,10 +96,12 @@ describe("a typed refusal of the shell's", () => {
   });
 
   it("names an expired token", async () => {
-    vi.mocked(invoke).mockRejectedValue({
-      kind: "expired",
-      message: "Discovery token has expired",
-    });
+    fixtureHost!.answer("getConnectionInfo", () =>
+      Promise.reject({
+        kind: "expired",
+        message: "Discovery token has expired",
+      }),
+    );
 
     const error = await rejection(refreshConnection());
 
@@ -95,15 +110,18 @@ describe("a typed refusal of the shell's", () => {
   });
 
   it("names a log the shell could not read", async () => {
-    vi.mocked(invoke).mockRejectedValue({
-      kind: "log_unreadable",
-      message:
-        "Could not read /s/state/logs/daemon.log: Is a directory (os error 21)",
-    });
+    fixtureHost!.answer("readDaemonLogTail", () =>
+      Promise.reject({
+        kind: "log_unreadable",
+        message:
+          "Could not read /s/state/logs/daemon.log: Is a directory (os error 21)",
+      }),
+    );
+    const asked = vi.spyOn(fixtureHost!, "readDaemonLogTail");
 
     const error = await rejection(readDaemonLogTail(5));
 
-    expect(invoke).toHaveBeenCalledWith("read_daemon_log_tail", { lines: 5 });
+    expect(asked).toHaveBeenCalledWith(5);
     expect(error.kind).toBe("log_unreadable");
     expect(error.message).toBe(
       "Could not read /s/state/logs/daemon.log: Is a directory (os error 21)",
@@ -111,11 +129,13 @@ describe("a typed refusal of the shell's", () => {
   });
 
   it("names a stop the shell could not wait for", async () => {
-    vi.mocked(invoke).mockRejectedValue({
-      kind: "stop_unconfirmed",
-      message:
-        'Could not wait for the daemon to stop: task 7 panicked with message "x"',
-    });
+    fixtureHost!.answer("awaitDaemonStopped", () =>
+      Promise.reject({
+        kind: "stop_unconfirmed",
+        message:
+          'Could not wait for the daemon to stop: task 7 panicked with message "x"',
+      }),
+    );
 
     const error = await rejection(awaitDaemonStopped());
 
@@ -128,8 +148,8 @@ describe("a typed refusal of the shell's", () => {
 
 describe("a refusal that is not the shell's", () => {
   it("keeps Tauri's own sentence, a bare string, with no kind", async () => {
-    vi.mocked(invoke).mockRejectedValue(
-      "command read_daemon_log_tail missing required key lines",
+    fixtureHost!.answer("readDaemonLogTail", () =>
+      Promise.reject("command read_daemon_log_tail missing required key lines"),
     );
 
     const error = await rejection(readDaemonLogTail(5));
@@ -142,7 +162,7 @@ describe("a refusal that is not the shell's", () => {
 
   it("is named by its command when the shell's answer is unknown", async () => {
     const answer = { kind: "unheard_of", message: "x" };
-    vi.mocked(invoke).mockRejectedValue(answer);
+    fixtureHost!.answer("ensureDaemonRunning", () => Promise.reject(answer));
 
     const error = await rejection(bootstrapConnection());
 
@@ -170,7 +190,7 @@ describe("the daemon's PATH on the connection", () => {
   it("carries each row of the shell's table as it is, at boot and on reconnect", async () => {
     for (const row of Object.values(daemonPaths)) {
       resetConnection();
-      vi.mocked(invoke).mockResolvedValue({ ...info, daemonPath: row });
+      fixtureHost!.answerConnection({ ...info, daemonPath: row });
       expect(await bootstrapConnection()).toEqual({
         ...info,
         ...older,
@@ -185,7 +205,7 @@ describe("the daemon's PATH on the connection", () => {
   });
 
   it("is null for a daemon the app did not spawn", async () => {
-    vi.mocked(invoke).mockResolvedValue({ ...info, daemonPath: null });
+    fixtureHost!.answerConnection({ ...info, daemonPath: null });
     expect(await bootstrapConnection()).toEqual({
       ...info,
       ...older,
@@ -248,7 +268,7 @@ describe("the daemon's version, protocol and note on the connection (Q04)", () =
     "This daemon is version 0.1.0 and this app is 0.2.0; they speak the same protocol, so the app uses it. To run this app's own version, use Stop daemon…, then Start daemon.";
 
   it("carries them at boot and on reconnect", async () => {
-    vi.mocked(invoke).mockResolvedValue({
+    fixtureHost!.answerConnection({
       ...info,
       version: "0.1.0",
       protocol: 1,
@@ -260,7 +280,7 @@ describe("the daemon's version, protocol and note on the connection (Q04)", () =
   });
 
   it("reads them as null from an older shell, or when they are not the shell's", async () => {
-    vi.mocked(invoke).mockResolvedValue(info);
+    fixtureHost!.answerConnection(info);
     expect(await bootstrapConnection()).toEqual({
       ...info,
       version: null,
@@ -268,7 +288,7 @@ describe("the daemon's version, protocol and note on the connection (Q04)", () =
       note: null,
     });
     resetConnection();
-    vi.mocked(invoke).mockResolvedValue({
+    fixtureHost!.answerConnection({
       ...info,
       version: 1,
       protocol: "1",
@@ -286,7 +306,7 @@ describe("the daemon's version, protocol and note on the connection (Q04)", () =
 describe("the shell's Q04 refusals at boot", () => {
   it("names a mismatch, its sentence as it is", async () => {
     const row = shellErrors.refusals.find((r) => r.kind === "mismatch");
-    vi.mocked(invoke).mockRejectedValue(row);
+    fixtureHost!.answer("ensureDaemonRunning", () => Promise.reject(row));
     const error = await rejection(bootstrapConnection());
     expect(error.kind).toBe("mismatch");
     expect(error.message).toBe(row?.message);
@@ -295,7 +315,7 @@ describe("the shell's Q04 refusals at boot", () => {
   it("names a daemon still starting, and one past the budget", async () => {
     for (const kind of ["starting", "still_starting"] as const) {
       const row = shellErrors.refusals.find((r) => r.kind === kind);
-      vi.mocked(invoke).mockRejectedValue(row);
+      fixtureHost!.answer("ensureDaemonRunning", () => Promise.reject(row));
       const error = await rejection(bootstrapConnection());
       expect(error.kind).toBe(kind);
       expect(error.message).toBe(row?.message);
@@ -327,7 +347,7 @@ describe("a daemon restart seen on reconnect", () => {
 
   /** The shell answering each command from its own queue, in order. */
   function shell(answers: Record<string, Array<ConnectionInfo | Error>>) {
-    vi.mocked(invoke).mockImplementation((command: string) => {
+    const answer = (command: string) => () => {
       const next = answers[command]?.shift();
       if (next === undefined) {
         return Promise.reject(new Error(`unexpected ${command}`));
@@ -338,7 +358,9 @@ describe("a daemon restart seen on reconnect", () => {
         );
       }
       return Promise.resolve(next);
-    });
+    };
+    fixtureHost!.answer("ensureDaemonRunning", answer("ensure_daemon_running"));
+    fixtureHost!.answer("getConnectionInfo", answer("get_connection_info"));
   }
   const starting = () => new Error("starting");
 
@@ -438,10 +460,12 @@ describe("the connection read again on the wall clock (TOKEN-REREAD)", () => {
   const HOUR = 60 * 60 * 1000;
   let wall = 0;
   let stop: (() => void) | null = null;
+  let boots: MockInstance<() => Promise<ConnectionInfo>>;
+  let reads: MockInstance<() => Promise<ConnectionInfo>>;
 
   /** The shell's answer from now on: `token`, the same daemon. */
   function serving(token: string): void {
-    vi.mocked(invoke).mockResolvedValue({
+    fixtureHost!.answerConnection({
       baseUrl: "http://127.0.0.1:51823",
       token,
       instanceId: "i-1",
@@ -451,10 +475,7 @@ describe("the connection read again on the wall clock (TOKEN-REREAD)", () => {
 
   /** How many times the window read the connection again. */
   function rereads(): number {
-    return vi
-      .mocked(invoke)
-      .mock.calls.filter(([command]) => command === "get_connection_info")
-      .length;
+    return reads.mock.calls.length;
   }
 
   beforeEach(async () => {
@@ -465,6 +486,8 @@ describe("the connection read again on the wall clock (TOKEN-REREAD)", () => {
     vi.spyOn(Date, "now").mockImplementation(() => wall);
     setStopIntent(null);
     serving("t1");
+    boots = vi.spyOn(fixtureHost!, "ensureDaemonRunning");
+    reads = vi.spyOn(fixtureHost!, "getConnectionInfo");
     await bootstrapConnection();
     stop = keepConnectionFresh();
   });
@@ -568,11 +591,7 @@ describe("the connection read again on the wall clock (TOKEN-REREAD)", () => {
     await vi.advanceTimersByTimeAsync(CONNECTION_CHECK_EVERY_MS);
     expect(rereads()).toBe(0);
     // Nothing started one either: the boot's call is the only one.
-    expect(
-      vi
-        .mocked(invoke)
-        .mock.calls.filter(([command]) => command === "ensure_daemon_running"),
-    ).toHaveLength(1);
+    expect(boots.mock.calls).toHaveLength(1);
   });
 
   it("does not read it while a boot is in flight", async () => {
@@ -580,15 +599,14 @@ describe("the connection read again on the wall clock (TOKEN-REREAD)", () => {
     const pending = new Promise((resolve) => {
       finish = resolve;
     });
-    vi.mocked(invoke).mockImplementation((command: string) =>
-      command === "ensure_daemon_running"
-        ? pending
-        : Promise.resolve({
-            baseUrl: "http://127.0.0.1:51823",
-            token: "t2",
-            instanceId: "i-1",
-            daemonPath: null,
-          }),
+    fixtureHost!.answer("ensureDaemonRunning", () => pending);
+    fixtureHost!.answer("getConnectionInfo", () =>
+      Promise.resolve({
+        baseUrl: "http://127.0.0.1:51823",
+        token: "t2",
+        instanceId: "i-1",
+        daemonPath: null,
+      }),
     );
     const boot = bootstrapConnection();
     wall += 13 * HOUR;
@@ -620,10 +638,13 @@ describe("the connection read again on the wall clock (TOKEN-REREAD)", () => {
   });
 
   it("keeps the cache when a read fails and tries again at the next look", async () => {
-    vi.mocked(invoke).mockRejectedValue({
-      kind: "not_running",
-      message: "Discovery not found: daemon may not be running",
-    });
+    const notRunning = () =>
+      Promise.reject({
+        kind: "not_running",
+        message: "Discovery not found: daemon may not be running",
+      });
+    fixtureHost!.answer("ensureDaemonRunning", notRunning);
+    fixtureHost!.answer("getConnectionInfo", notRunning);
     wall += 13 * HOUR;
 
     await vi.advanceTimersByTimeAsync(CONNECTION_CHECK_EVERY_MS);

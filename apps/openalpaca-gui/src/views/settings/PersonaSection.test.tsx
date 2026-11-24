@@ -15,16 +15,17 @@ import userEvent from "@testing-library/user-event";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
 import { resetConnection } from "@/lib/connection";
+import { fixtureHost } from "@/lib/host/fixture";
 
 import { PERSONA_CONFLICT_COPY, PersonaSection } from "./PersonaSection";
 
-vi.mock("@tauri-apps/api/core", () => ({
-  invoke: vi.fn(async () => ({
+beforeEach(() => {
+  fixtureHost!.answerConnection({
     baseUrl: "http://127.0.0.1:9999",
     token: "test-token",
     instanceId: "7f3a1122",
-  })),
-}));
+  });
+});
 
 interface Recorded {
   method: string;

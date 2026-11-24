@@ -19,6 +19,7 @@ import {
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import { resetConnection } from "@/lib/connection";
+import { fixtureHost } from "@/lib/host/fixture";
 import { createQueryClient } from "@/lib/query-client";
 import { qk } from "@/lib/query-keys";
 import { QueryProvider } from "@/lib/query-provider";
@@ -28,13 +29,13 @@ import { useUiStore } from "@/stores/ui";
 
 import { AppFrame } from "./App";
 
-vi.mock("@tauri-apps/api/core", () => ({
-  invoke: vi.fn(async () => ({
+beforeEach(() => {
+  fixtureHost!.answerConnection({
     baseUrl: "http://127.0.0.1:9999",
     token: "test-token",
     instanceId: "7f3a1122",
-  })),
-}));
+  });
+});
 
 function json(payload: unknown): Response {
   return new Response(JSON.stringify(payload), { status: 200 });

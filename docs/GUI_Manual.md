@@ -39,7 +39,16 @@ a dev build for this machine) and then the Vite dev server on port 1420, per
 
 `bun run dev` starts the frontend alone. It is useful for layout work, but the
 Tauri bridge is absent there, so the connection commands fail and the directory
-picker in Settings → Extensions silently falls back to its text field.
+picker in Settings → Extensions silently falls back to its text field. Two
+opt-in modes go further, for development only:
+`VITE_OPENALPACA_HOST=fixture bun run dev` gives the page a known connection
+(to `127.0.0.1:9999`, where no daemon is), and
+`VITE_OPENALPACA_HOST=dev-server OPENALPACA_HOME_STORE=<absolute path> bun run dev`
+connects it to the development daemon of that store, which you start
+yourself: the dev server reads the store's discovery file for the page. That
+mode checks only the token's expiry (a daemon of another protocol is not
+refused), starts no daemon and cannot wait for a stopped one to be gone. In
+every browser mode the picker falls back to its text field.
 
 The four gates for this app, run locally:
 
@@ -1669,7 +1678,7 @@ discovery file, its health not asked), a version mismatch (met when the window
 starts, reconnects or reads its connection again: one line per change, not per
 ask), the daemon missing beside
 the app; a daemon that failed to start writes no verdict line there (its reason is
-on the card; the spawn and the daemon's exit are logged). In `bun run dev` there is no Tauri bridge, so every shell command
+on the card; the spawn and the daemon's exit are logged). In a plain `bun run dev` there is no Tauri bridge, so every shell command
 fails by design.
 
 **The window says the daemon is stopped.** `stopped` means this window stopped
