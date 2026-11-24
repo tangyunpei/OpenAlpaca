@@ -46,16 +46,22 @@ function choose(): HostBridge {
 /**
  * DevServerHost behind a dynamic import: its plain members here, its
  * commands loaded with the module on the first call. A module that fails to
- * load is refused through the same check as any other failure.
+ * load is refused through the same check as any other failure, with a
+ * sentence naming the failed load, and the next call loads it again.
  */
 function lazyDevServerHost(): HostBridge {
   let loading: Promise<HostBridge> | null = null;
   const load = () =>
-    (loading ??= import("./dev-server").then((module) =>
-      module.createDevServerHost(),
-    ));
+    (loading ??= import("./dev-server")
+      .then((module) => module.createDevServerHost())
+      .catch((cause: unknown) => {
+        loading = null;
+        throw cause;
+      }));
   const unloaded = (cause: unknown) => () => {
-    throw cause;
+    throw `The dev server host could not be loaded: ${
+      cause instanceof Error ? cause.message : String(cause)
+    }`;
   };
   return {
     kind: "dev-server",

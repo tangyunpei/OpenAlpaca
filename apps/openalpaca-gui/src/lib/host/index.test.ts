@@ -186,4 +186,51 @@ describe("the host this window talks to", () => {
     expect(index.host()).toBe(first);
     expect(index.host().kind).toBe("fixture");
   });
+
+  it("is NoHost in a production build even when VITE_OPENALPACA_HOST asks for the dev server", async () => {
+    vi.stubEnv("DEV", false);
+    vi.stubEnv("PROD", true);
+    vi.stubEnv("MODE", "production");
+    vi.stubEnv("VITE_OPENALPACA_HOST", "dev-server");
+
+    const { host } = await fresh();
+
+    expect(host.kind).toBe("none");
+    await expectNoAnswer(host);
+  });
+
+  it("names a DevServerHost that failed to load, and loads it again on the next call", async () => {
+    vi.stubEnv("MODE", "development");
+    vi.stubEnv("VITE_OPENALPACA_HOST", "dev-server");
+    let loads = 0;
+    vi.doMock("./dev-server", async (importOriginal) => {
+      loads += 1;
+      if (loads === 1) throw new Error("the module did not load");
+      return importOriginal();
+    });
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async () =>
+        Response.json({
+          baseUrl: "http://127.0.0.1:51823",
+          token: "t",
+          instanceId: "i-1",
+        }),
+      ),
+    );
+
+    try {
+      const { host } = await fresh();
+
+      const failed = await refusal(host.getConnectionInfo());
+      expect(failed.kind).toBeNull();
+      expect(failed.message).toMatch(
+        /^The dev server host could not be loaded: \S/,
+      );
+      expect((await host.getConnectionInfo()).instanceId).toBe("i-1");
+      expect(loads).toBe(2);
+    } finally {
+      vi.doUnmock("./dev-server");
+    }
+  });
 });

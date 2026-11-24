@@ -272,4 +272,79 @@ describe("the dev server's host plugin", () => {
       passed: true,
     });
   });
+
+  it("says why it refuses an Origin or a missing store, in its own sentences", async () => {
+    await discovery();
+    expect(
+      await answered(
+        send("/__openalpaca/connection", { origin: "http://localhost:1421" }),
+      ),
+    ).toEqual({
+      status: 403,
+      body: {
+        message:
+          "The dev server answers its own page only: this request's Origin is not http://localhost:1420 or http://127.0.0.1:1420.",
+      },
+    });
+
+    vi.stubEnv("OPENALPACA_HOME_STORE", "relative/store");
+    expect(await answered(send("/__openalpaca/connection"))).toEqual({
+      status: 500,
+      body: {
+        message:
+          "The dev server has no development store: start it with OPENALPACA_HOME_STORE set to an absolute path.",
+      },
+    });
+  });
+
+  it("names the discovery file it found missing or expired", async () => {
+    const file = join(root, "state", "discovery.json");
+    expect(await answered(send("/__openalpaca/connection"))).toEqual({
+      status: 503,
+      body: {
+        kind: "not_running",
+        message: `No discovery file at ${file}: the development daemon may not be running.`,
+      },
+    });
+
+    await discovery({ expiresAt: "2000-01-01T00:00:00Z" });
+    expect(await answered(send("/__openalpaca/connection"))).toEqual({
+      status: 503,
+      body: {
+        kind: "expired",
+        message: `The token in ${file} has expired.`,
+      },
+    });
+  });
+
+  it("refuses a negative line count as log_unreadable", async () => {
+    await log("one\ntwo\n");
+    const file = join(root, "state", "logs", "daemon.log");
+    expect(
+      await answered(send("/__openalpaca/log-tail", { body: '{"lines":-1}' })),
+    ).toEqual({
+      status: 503,
+      body: {
+        kind: "log_unreadable",
+        message: `Could not read ${file}: the request did not say how many lines.`,
+      },
+    });
+  });
+
+  it("answers a version or protocol of the wrong type as null", async () => {
+    await mkdir(join(root, "state"), { recursive: true });
+    await writeFile(
+      join(root, "state", "discovery.json"),
+      JSON.stringify({
+        listen: { host: "127.0.0.1", port: 51823 },
+        auth: { token: "tok-1", expires_at: "2999-01-01T00:00:00Z" },
+        instance_id: "i-1",
+        pid: 4242,
+        build: { version: 1, protocol: "1" },
+      }),
+    );
+    const { status, body } = await answered(send("/__openalpaca/connection"));
+    expect(status).toBe(200);
+    expect(body).toMatchObject({ version: null, protocol: null });
+  });
 });
