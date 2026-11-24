@@ -58,7 +58,7 @@ export function busyLine(busy: DaemonBusyStatus): string | null {
     busy.connected_clients > 0
       ? counted(busy.connected_clients, "window connected", "windows connected")
       : null,
-  ].filter((part): part is string => part !== null);
+  ].filter((part) => part !== null);
   return parts.length === 0 ? null : `Right now: ${parts.join(" · ")}.`;
 }
 

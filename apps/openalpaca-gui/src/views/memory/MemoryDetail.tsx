@@ -225,7 +225,7 @@ export function MemoryDetail({
     statusTag(status),
     model.conflict ? "conflict" : null,
     model.freshness === "verified" ? null : model.freshness,
-  ].filter((tag): tag is string => tag !== null);
+  ].filter((tag) => tag !== null);
 
   return (
     <DetailShell

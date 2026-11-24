@@ -2719,7 +2719,7 @@ const EVENTS: { readonly [K in ServerEvent["type"]]: Node<Frame<K>> } = {
 // ── The checks ──────────────────────────────────────────────────────────────
 
 function sorted(names: Iterable<string>): string[] {
-  return [...names].sort();
+  return [...names].toSorted();
 }
 
 describe("the API contract's samples", () => {

@@ -134,19 +134,23 @@ export function daemonPathOf(value: unknown): DaemonPath | null {
 
 /** Thrown when discovery is missing/expired or the Tauri bridge is absent. */
 export class ConnectionError extends Error {
+  /** The underlying Tauri rejection or malformed payload. */
+  readonly detail: unknown;
+  /**
+   * What refused, when the shell did (its typed refusal's `kind`); `null`
+   * for Tauri's own refusal, an absent bridge or a malformed payload.
+   */
+  readonly kind: ShellErrorKind | null;
   override readonly name = "ConnectionError";
 
   constructor(
     message: string,
-    /** The underlying Tauri rejection or malformed payload. */
-    readonly detail: unknown = null,
-    /**
-     * What refused, when the shell did (its typed refusal's `kind`); `null`
-     * for Tauri's own refusal, an absent bridge or a malformed payload.
-     */
-    readonly kind: ShellErrorKind | null = null,
+    detail: unknown = null,
+    kind: ShellErrorKind | null = null,
   ) {
     super(message);
+    this.detail = detail;
+    this.kind = kind;
   }
 }
 

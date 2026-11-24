@@ -30,17 +30,23 @@ export interface ApiRequestInit {
 
 /** A non-2xx response, or a transport failure, from the daemon. */
 export class ApiError extends Error {
+  readonly status: number;
+  /** Envelope error code (`NOT_FOUND`, `STREAM_NOT_FOUND`, …) when present. */
+  readonly code: string | null;
+  /** The parsed body, for callers that need `cap`, `details`, etc. */
+  readonly detail: unknown;
   override readonly name = "ApiError";
 
   constructor(
     message: string,
-    readonly status: number,
-    /** Envelope error code (`NOT_FOUND`, `STREAM_NOT_FOUND`, …) when present. */
-    readonly code: string | null = null,
-    /** The parsed body, for callers that need `cap`, `details`, etc. */
-    readonly detail: unknown = null,
+    status: number,
+    code: string | null = null,
+    detail: unknown = null,
   ) {
     super(message);
+    this.status = status;
+    this.code = code;
+    this.detail = detail;
   }
 
   /** `status === 0` means the request never reached the daemon. */

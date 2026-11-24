@@ -62,7 +62,7 @@ describe("shellErrorOf", () => {
 
   it("knows exactly the kinds the shell answers with", () => {
     const rows = new Set(fixture.refusals.map((row) => row.kind));
-    expect([...SHELL_ERROR_KINDS].sort()).toEqual([...rows].sort());
+    expect(SHELL_ERROR_KINDS.toSorted()).toEqual([...rows].toSorted());
   });
 
   it("reads nothing else as the shell's", () => {

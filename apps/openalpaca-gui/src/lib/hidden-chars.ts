@@ -106,7 +106,7 @@ function parseRanges(raw: readonly (readonly string[])[]): Range[] {
 
 /** Sorted, with touching and overlapping ranges joined — for `contains`. */
 function merged(ranges: readonly Range[]): Range[] {
-  const sorted = [...ranges].sort((a, b) => a[0] - b[0]);
+  const sorted = ranges.toSorted((a, b) => a[0] - b[0]);
   const out: [number, number][] = [];
   for (const [first, last] of sorted) {
     const previous = out[out.length - 1];

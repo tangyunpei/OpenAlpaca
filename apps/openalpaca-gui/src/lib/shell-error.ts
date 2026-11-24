@@ -103,7 +103,7 @@ function mismatchOf(v: Record<string, unknown>): ShellMismatch | null {
       : is(value)
         ? value
         : undefined;
-  const isString = (x: unknown): x is string => typeof x === "string";
+  const isString = (x: unknown) => typeof x === "string";
   const isNumber = (x: unknown): x is number =>
     typeof x === "number" && Number.isFinite(x);
   const daemonVersion = nullable(v.daemon_version, isString);

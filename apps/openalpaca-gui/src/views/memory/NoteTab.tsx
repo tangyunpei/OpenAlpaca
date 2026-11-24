@@ -62,7 +62,7 @@ export interface NoteTabProps {
 /** The strings a frontmatter key holds, or none. */
 function strings(value: unknown): string[] {
   return Array.isArray(value)
-    ? value.filter((item): item is string => typeof item === "string")
+    ? value.filter((item) => typeof item === "string")
     : [];
 }
 

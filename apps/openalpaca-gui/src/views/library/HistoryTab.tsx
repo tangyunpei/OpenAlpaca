@@ -33,7 +33,7 @@ export interface HistoryTabProps {
 }
 
 export function HistoryTab({ versions, size = "full" }: HistoryTabProps) {
-  const ordered = [...versions].sort((a, b) => b.version - a.version);
+  const ordered = versions.toSorted((a, b) => b.version - a.version);
   return (
     <div
       className={cn(

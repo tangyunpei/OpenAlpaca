@@ -78,11 +78,13 @@ vi.mock("@tauri-apps/api/core", () => ({
 type Listener = (event: { data?: unknown }) => void;
 
 class FakeEventSource {
+  readonly url: string;
   static instances: FakeEventSource[] = [];
   private readonly listeners = new Map<string, Listener[]>();
   closed = false;
 
-  constructor(readonly url: string) {
+  constructor(url: string) {
+    this.url = url;
     FakeEventSource.instances.push(this);
   }
 

@@ -27,13 +27,16 @@ const INFO: ConnectionInfo = {
 };
 
 class FakeSocket implements SocketLike {
+  readonly url: string;
   onopen: ((event: unknown) => void) | null = null;
   onmessage: ((event: { data: unknown }) => void) | null = null;
   onerror: ((event: unknown) => void) | null = null;
   onclose: ((event: unknown) => void) | null = null;
   closed = false;
 
-  constructor(readonly url: string) {}
+  constructor(url: string) {
+    this.url = url;
+  }
 
   close(): void {
     this.closed = true;

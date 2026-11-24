@@ -123,7 +123,7 @@ const FRAMES: Record<string, { type: string; node: Node<unknown> }> = {
 };
 
 function sorted(names: Iterable<string>): string[] {
-  return [...names].sort();
+  return [...names].toSorted();
 }
 
 describe("the chat stream's frame samples", () => {
