@@ -485,8 +485,7 @@ pub(super) async fn prune_backups(backup_dir: &std::path::Path, max: usize, pref
             .filter(|e| {
                 e.file_name()
                     .to_str()
-                    .map(|n| n.starts_with(&prefix_dot) && n.ends_with(".md"))
-                    .unwrap_or(false)
+                    .is_some_and(|n| n.starts_with(&prefix_dot) && n.ends_with(".md"))
             })
             .map(|e| e.path())
             .collect(),

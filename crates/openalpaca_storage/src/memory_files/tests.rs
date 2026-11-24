@@ -678,15 +678,9 @@ fn snapshot_unknown_fields_and_schemas_are_invalid() {
         SNAPSHOT_EXAMPLE.replace("\"schema\": 1", "\"schema\": 7"),
     )
     .unwrap();
-    assert!(matches!(
-        ControlSnapshot::load(&path),
-        Err(SnapshotError::Invalid(_))
-    ));
+    std::assert_matches!(ControlSnapshot::load(&path), Err(SnapshotError::Invalid(_)));
     std::fs::write(&path, "{ truncated").unwrap();
-    assert!(matches!(
-        ControlSnapshot::load(&path),
-        Err(SnapshotError::Invalid(_))
-    ));
+    std::assert_matches!(ControlSnapshot::load(&path), Err(SnapshotError::Invalid(_)));
     std::fs::remove_file(&path).unwrap();
     assert!(ControlSnapshot::load(&path).unwrap().is_none());
 }
@@ -1202,8 +1196,7 @@ fn a_link_or_file_at_any_component_refuses_the_project_partition() {
         .dir;
     std::fs::write(folder.join("memory"), "not a directory\n").unwrap();
     let err = sb.open_project(ALICE).expect_err("a file refuses");
-    assert!(
-        matches!(&err, MemoryFilesError::PathRefused { reason, .. } if reason == "not a directory")
+    std::assert_matches!(&err, MemoryFilesError::PathRefused { reason, .. } if reason == "not a directory"
     );
     assert_eq!(read_file(&folder.join("memory")), b"not a directory\n");
     assert_eq!(err.class(), "fixture:path_refused");
@@ -1266,7 +1259,7 @@ fn a_link_below_the_home_root_refuses_the_home_partition_too() {
     let sb = Sandbox::new();
     symlink(sb.outside.path(), &sb.home.join("memory"));
     let err = Partition::open(&StoreScope::Home, ALICE).expect_err("refused");
-    assert!(matches!(err, MemoryFilesError::PathRefused { .. }));
+    std::assert_matches!(err, MemoryFilesError::PathRefused { .. });
     assert!(sb.outside_is_empty());
 }
 
@@ -1280,26 +1273,23 @@ fn an_unregistered_project_root_has_no_partition_and_nothing_is_created() {
     let scope = StoreScope::Project(stray.clone());
 
     let err = Partition::open(&scope, ALICE).expect_err("refused");
-    assert!(
-        matches!(&err, MemoryFilesError::NotRegistered { root } if root == &stray),
+    std::assert_matches!(&err, MemoryFilesError::NotRegistered { root } if root == &stray,
         "{err:?}"
     );
     assert_eq!(err.class(), "fixture:not_registered");
     assert!(err.to_string().contains("is not registered"), "{err}");
-    assert!(matches!(
+    std::assert_matches!(
         Partition::open_readonly(&scope, &owner_key(ALICE)),
         Err(MemoryFilesError::NotRegistered { .. })
-    ));
-    assert!(matches!(
+    );
+    std::assert_matches!(
         partition_key_for(&scope, &owner_key(ALICE)),
         Err(MemoryFilesError::NotRegistered { .. })
-    ));
+    );
     let listed = list_owner_keys(&scope).unwrap_err();
-    assert!(
-        matches!(
-            listed.downcast_ref::<MemoryFilesError>(),
-            Some(MemoryFilesError::NotRegistered { .. })
-        ),
+    std::assert_matches!(
+        listed.downcast_ref::<MemoryFilesError>(),
+        Some(MemoryFilesError::NotRegistered { .. }),
         "{listed:#}"
     );
     assert!(sb.outside_is_empty(), "nothing in the folder");
@@ -1350,10 +1340,7 @@ fn a_symlinked_note_file_is_not_read_written_or_listed() {
     let scanned = p.scan().unwrap();
     assert_eq!(scanned.len(), 1, "the link is not listed");
     assert_eq!(scanned[0].id, Some(c.id));
-    assert!(matches!(
-        p.read(&planted.id),
-        Err(MemoryFilesError::NotFound(_))
-    ));
+    std::assert_matches!(p.read(&planted.id), Err(MemoryFilesError::NotFound(_)));
     // A hard link alias of a real note is refused as malformed, not served.
     let real = p.notes_dir().join(&note_files(&p)[0]);
     let alias = p.notes_dir().join(format!("{}--alias.md", c.id));
@@ -1549,8 +1536,8 @@ fn revision_checks_no_op_patches_and_retitles() {
     let err = p
         .update(&c.id, &c.revision, UpdateAction::Archive, Actor::ModelTool)
         .unwrap_err();
-    assert!(matches!(err, MemoryFilesError::RevisionConflict { .. }));
-    assert!(matches!(
+    std::assert_matches!(err, MemoryFilesError::RevisionConflict { .. });
+    std::assert_matches!(
         p.update(
             &NoteId::new(),
             &c.revision,
@@ -1558,7 +1545,7 @@ fn revision_checks_no_op_patches_and_retitles() {
             Actor::UserSurface
         ),
         Err(MemoryFilesError::NotFound(_))
-    ));
+    );
 }
 
 #[test]
@@ -1578,7 +1565,7 @@ fn oversized_and_invalid_inputs_are_refused_before_any_write() {
     assert_eq!(err.class(), "invalid_input");
     assert!(err.to_string().contains("32"));
     assert_eq!(p.health(), PartitionHealth::Absent, "nothing was laid out");
-    assert!(matches!(
+    std::assert_matches!(
         p.create(
             NewNote {
                 title: "x".into(),
@@ -1589,8 +1576,8 @@ fn oversized_and_invalid_inputs_are_refused_before_any_write() {
             Actor::ModelTool
         ),
         Err(MemoryFilesError::InvalidInput(_))
-    ));
-    assert!(matches!(
+    );
+    std::assert_matches!(
         p.create(
             NewNote {
                 fact_key: Some("Bad Key".into()),
@@ -1599,7 +1586,7 @@ fn oversized_and_invalid_inputs_are_refused_before_any_write() {
             Actor::ModelTool
         ),
         Err(MemoryFilesError::InvalidInput(_))
-    ));
+    );
     // Exactly at the limit is accepted and read back untruncated.
     let probe = new_note("At the limit", "", NoteKind::Reference);
     let header = {
@@ -1683,10 +1670,7 @@ fn exact_dedup_is_within_one_partition_only() {
     assert_eq!(elsewhere.dedup, Dedup::Created);
     assert_ne!(elsewhere.id, first.id);
     let bob = sb.open_home(BOB);
-    assert!(matches!(
-        bob.read(&first.id),
-        Err(MemoryFilesError::NotFound(_))
-    ));
+    std::assert_matches!(bob.read(&first.id), Err(MemoryFilesError::NotFound(_)));
 }
 
 #[test]
@@ -1788,7 +1772,7 @@ fn authority_rules_of_g2_are_enforced_by_the_file_layer() {
     assert_eq!(view.derived.origin, Origin::User);
     assert_eq!(view.derived.effective_status, EffectiveStatus::Active);
     // Confirming an active note is an input error, not a silent success.
-    assert!(matches!(
+    std::assert_matches!(
         p.update(
             &candidate.id,
             &confirmed.revision,
@@ -1798,7 +1782,7 @@ fn authority_rules_of_g2_are_enforced_by_the_file_layer() {
             Actor::UserSurface
         ),
         Err(MemoryFilesError::InvalidInput(_))
-    ));
+    );
 
     // A user-surface edit of a model note re-records it as user.
     let model_note = p
@@ -1853,7 +1837,7 @@ fn authority_rules_of_g2_are_enforced_by_the_file_layer() {
         )
         .unwrap_err();
     assert_eq!(err.class(), "revision_conflict");
-    assert!(matches!(
+    std::assert_matches!(
         p.create(
             NewNote {
                 supersedes: Some((NoteId::new(), "f".repeat(64))),
@@ -1862,7 +1846,7 @@ fn authority_rules_of_g2_are_enforced_by_the_file_layer() {
             Actor::UserSurface
         ),
         Err(MemoryFilesError::NotFound(_))
-    ));
+    );
 }
 
 #[test]
@@ -2011,7 +1995,7 @@ fn create_crash_after_each_step_recovers_per_the_table() {
                 Actor::UserSurface,
             )
             .unwrap_err();
-        assert!(matches!(err, MemoryFilesError::Crashed(pt) if pt == point));
+        std::assert_matches!(err, MemoryFilesError::Crashed(pt) if pt == point);
         let on_disk = ControlSnapshot::load(p.snapshot_path()).unwrap().unwrap();
         let (id, to_rev) = match point {
             CrashPoint::WriteAfter3 => {
@@ -2148,7 +2132,7 @@ fn update_archive_confirm_crash_after_each_step_recovers_per_the_table() {
         let err = p
             .update(&target.id, &from_rev, action, Actor::UserSurface)
             .unwrap_err();
-        assert!(matches!(err, MemoryFilesError::Crashed(pt) if pt == point));
+        std::assert_matches!(err, MemoryFilesError::Crashed(pt) if pt == point);
         let on_disk = ControlSnapshot::load(p.snapshot_path()).unwrap().unwrap();
         let to_rev = match point {
             CrashPoint::WriteAfter3 => {
@@ -2287,7 +2271,7 @@ fn forget_crash_after_each_step_recovers_and_tombstones_survive_restarts() {
         let err = p
             .forget(&[(target.id, target.revision.clone())])
             .unwrap_err();
-        assert!(matches!(err, MemoryFilesError::Crashed(pt) if pt == point));
+        std::assert_matches!(err, MemoryFilesError::Crashed(pt) if pt == point);
         let on_disk = ControlSnapshot::load(p.snapshot_path()).unwrap().unwrap();
         assert_eq!(on_disk.tombstones.len(), 1, "tombstone first");
         let t = &on_disk.tombstones[0];
@@ -2320,10 +2304,7 @@ fn forget_crash_after_each_step_recovers_and_tombstones_survive_restarts() {
             let snapshot = p.snapshot().unwrap();
             assert_eq!(snapshot.tombstones.len(), 1, "tombstones survive restarts");
             assert!(!snapshot.notes.contains_key(&target.id));
-            assert!(matches!(
-                p.read(&target.id),
-                Err(MemoryFilesError::NotFound(_))
-            ));
+            std::assert_matches!(p.read(&target.id), Err(MemoryFilesError::NotFound(_)));
             // A forget of a gone id is not_found whatever revision is sent.
             let outcomes = p.forget(&[(target.id, "f".repeat(64))]).unwrap();
             assert_eq!(outcomes[0].status, ForgetStatus::NotFound);
@@ -2388,11 +2369,8 @@ fn a_lost_or_invalid_snapshot_quarantines_the_partition_until_repair() {
             .unwrap_err();
         assert_eq!(err.class(), "quarantined");
         assert!(err.to_string().contains("doctor --repair"));
-        assert!(matches!(
-            p.reconcile(),
-            Err(MemoryFilesError::Quarantined { .. })
-        ));
-        assert!(matches!(
+        std::assert_matches!(p.reconcile(), Err(MemoryFilesError::Quarantined { .. }));
+        std::assert_matches!(
             p.update(
                 &a.id,
                 &a.revision,
@@ -2400,7 +2378,7 @@ fn a_lost_or_invalid_snapshot_quarantines_the_partition_until_repair() {
                 Actor::UserSurface
             ),
             Err(MemoryFilesError::Quarantined { .. })
-        ));
+        );
         let view = p.read(&a.id).unwrap();
         assert!(view.unverified);
         assert_eq!(view.derived.origin, Origin::External);
@@ -2449,8 +2427,7 @@ fn a_lost_or_invalid_snapshot_quarantines_the_partition_until_repair() {
     let mut s = ControlSnapshot::load(&snapshot_path).unwrap().unwrap();
     s.root = "/elsewhere".into();
     std::fs::write(&snapshot_path, s.to_json()).unwrap();
-    assert!(
-        matches!(sb.open_home(ALICE).health(), PartitionHealth::Quarantined(r) if r.contains("binding"))
+    std::assert_matches!(sb.open_home(ALICE).health(), PartitionHealth::Quarantined(r) if r.contains("binding")
     );
 }
 
@@ -2469,7 +2446,7 @@ fn repair_refuses_a_duplicate_id_naming_both_files_and_touches_nothing() {
     let loaded = p.load().unwrap();
     assert!(loaded.views.is_empty(), "neither is served");
     assert_eq!(loaded.duplicates, [(id, vec![p1.clone(), p2.clone()])]);
-    assert!(matches!(p.read(&id), Err(MemoryFilesError::NotFound(_))));
+    std::assert_matches!(p.read(&id), Err(MemoryFilesError::NotFound(_)));
     assert!(
         p.reconcile().unwrap().is_empty(),
         "a duplicate id is never recorded"
@@ -2478,7 +2455,7 @@ fn repair_refuses_a_duplicate_id_naming_both_files_and_touches_nothing() {
     std::fs::remove_file(p.snapshot_path()).unwrap();
     drop(p);
     let p = sb.open_home(ALICE);
-    assert!(matches!(p.health(), PartitionHealth::Quarantined(_)));
+    std::assert_matches!(p.health(), PartitionHealth::Quarantined(_));
     let err = p.repair(&owner_key(ALICE)).unwrap_err();
     assert_eq!(err.class(), "fixture:duplicate_id");
     let msg = err.to_string();
@@ -2490,7 +2467,7 @@ fn repair_refuses_a_duplicate_id_naming_both_files_and_touches_nothing() {
     );
     assert_eq!(read_file(&p1), one.as_bytes());
     assert_eq!(read_file(&p2), two.as_bytes());
-    assert!(matches!(p.health(), PartitionHealth::Quarantined(_)));
+    std::assert_matches!(p.health(), PartitionHealth::Quarantined(_));
 }
 
 #[test]
@@ -2585,10 +2562,7 @@ fn reconcile_reports_edits_deletions_and_new_files_once() {
     );
     // Delete behind its back.
     std::fs::remove_file(file_for(&p, &parking.id).unwrap()).unwrap();
-    assert!(matches!(
-        p.read(&parking.id),
-        Err(MemoryFilesError::NotFound(_))
-    ));
+    std::assert_matches!(p.read(&parking.id), Err(MemoryFilesError::NotFound(_)));
     // A hand-written new file.
     let gym = Note {
         id: NoteId::new(),
@@ -3481,14 +3455,14 @@ fn adopt_renames_the_home_and_every_project_snapshot_together() {
     assert!(project.read(&pn.id).unwrap().derived.recorded);
     assert_eq!(home.snapshot().unwrap().notes[&h.id].origin, Origin::User);
     // Nothing of the old key remains, and adopting it again is an error.
-    assert!(matches!(
+    std::assert_matches!(
         adopt(&old_key, reborn, ts(2026, 9, 24, 0, 0, 0)),
         Err(MemoryFilesError::InvalidInput(_))
-    ));
-    assert!(matches!(
+    );
+    std::assert_matches!(
         adopt(&new_key, reborn, ts(2026, 9, 24, 0, 0, 0)),
         Err(MemoryFilesError::InvalidInput(_))
-    ));
+    );
 }
 
 #[test]
@@ -3569,10 +3543,7 @@ fn adopt_refuses_a_key_that_is_not_an_owner_key() {
         "0123456789abcdef0123456789abcdeg",
     ] {
         let err = adopt(bad, BOB, ts(2026, 9, 24, 0, 0, 0)).unwrap_err();
-        assert!(
-            matches!(err, MemoryFilesError::InvalidInput(_)),
-            "{bad:?}: {err}"
-        );
+        std::assert_matches!(err, MemoryFilesError::InvalidInput(_), "{bad:?}: {err}");
         assert!(err.to_string().contains("owner key"), "{bad:?}: {err}");
         assert!(
             state.is_dir() && snapshot_path.is_file(),
@@ -3618,7 +3589,7 @@ fn repair_and_adopt_create_state_privately_when_nothing_else_has() {
     // A partition copied in from elsewhere: notes, no control, no `state/`.
     std::fs::remove_dir_all(&state).unwrap();
     let p = sb.open_home(ALICE);
-    assert!(matches!(p.health(), PartitionHealth::Quarantined(_)));
+    std::assert_matches!(p.health(), PartitionHealth::Quarantined(_));
     assert!(!state.exists(), "opening creates nothing");
     let report = p.repair(&owner_key(ALICE)).unwrap();
     assert!(report.rebuilt);
@@ -3685,10 +3656,7 @@ fn snapshot_path_for_refuses_a_key_that_is_not_a_partition_key() {
     ] {
         assert!(!is_partition_key(&bad), "{bad:?}");
         let err = snapshot_path_for(&bad).unwrap_err();
-        assert!(
-            matches!(err, MemoryFilesError::InvalidInput(_)),
-            "{bad:?}: {err}"
-        );
+        std::assert_matches!(err, MemoryFilesError::InvalidInput(_), "{bad:?}: {err}");
         assert!(err.to_string().contains("partition key"), "{bad:?}: {err}");
     }
     assert!(!control.exists(), "a path query creates nothing");
@@ -3816,11 +3784,9 @@ fn a_repointed_project_partition_keeps_its_key_snapshot_and_notes() {
         before,
         "a re-point touches no snapshot"
     );
-    assert!(
-        matches!(
-            Partition::open(&sb.project_scope(), ALICE),
-            Err(MemoryFilesError::NotRegistered { .. })
-        ),
+    std::assert_matches!(
+        Partition::open(&sb.project_scope(), ALICE),
+        Err(MemoryFilesError::NotRegistered { .. }),
         "the old path is no project any more"
     );
 }
@@ -4182,8 +4148,9 @@ fn doctor_lists_partitions_orphans_and_conflicts_without_writing() {
     assert_eq!(bob_home.health, PartitionHealth::Ready);
     let carol_home = by_key(&carol_key);
     assert!(carol_home.orphan);
-    assert!(
-        matches!(carol_home.health, PartitionHealth::Quarantined(_)),
+    std::assert_matches!(
+        carol_home.health,
+        PartitionHealth::Quarantined(_),
         "{:?}",
         carol_home.health
     );
@@ -5016,7 +4983,7 @@ fn seeded_partition(sb: &Sandbox, n: usize) -> (Partition, Vec<Note>) {
     }
     std::fs::remove_file(p.snapshot_path()).unwrap();
     let p = sb.open_home(ALICE);
-    assert!(matches!(p.health(), PartitionHealth::Quarantined(_)));
+    std::assert_matches!(p.health(), PartitionHealth::Quarantined(_));
     let report = p.repair(&owner_key(ALICE)).unwrap();
     assert_eq!(report.notes_recorded, n);
     (p, notes)
@@ -5228,7 +5195,7 @@ fn a_forgotten_notes_file_that_comes_back_is_never_listed_indexed_or_navigated()
     assert!(!navigation.contains(&gone.id.to_string()));
     assert!(navigation.contains("Kept"));
     assert!(!file.exists() && !history.exists());
-    assert!(matches!(p.read(&gone.id), Err(MemoryFilesError::NotFound(_))));
+    std::assert_matches!(p.read(&gone.id), Err(MemoryFilesError::NotFound(_)));
     assert!(p.read(&kept.id).is_ok());
 }
 
@@ -5324,17 +5291,14 @@ fn a_failed_forget_rearms_the_sweep() {
     assert_eq!(scans_on_this_thread() - before, 0, "and not again");
     p.set_crash_point(Some(CrashPoint::ForgetAfter1));
     let err = p.forget(&[(id, revision)]).unwrap_err();
-    assert!(matches!(err, MemoryFilesError::Crashed(_)));
+    std::assert_matches!(err, MemoryFilesError::Crashed(_));
     let history = p.history_dir().join(id.to_string());
     assert!(history.is_dir(), "the crash left the history");
     drop(p);
     let reopened = sb.open_home_cached(ALICE, &cache);
     assert!(!history.exists(), "the re-armed sweep deleted it");
     assert!(file_on_disk(&reopened, &id).is_none());
-    assert!(matches!(
-        reopened.read(&id),
-        Err(MemoryFilesError::NotFound(_))
-    ));
+    std::assert_matches!(reopened.read(&id), Err(MemoryFilesError::NotFound(_)));
 }
 
 /// Every `notes/` file on disk, whatever a scan would leave out.
@@ -5940,8 +5904,9 @@ fn a_forget_whose_save_fails_caches_no_snapshot() {
         (notes[0].id, notes[0].revision.clone()),
         (notes[1].id, notes[1].revision.clone()),
     ]);
-    assert!(
-        matches!(failed, Err(MemoryFilesError::Io(_))),
+    std::assert_matches!(
+        failed,
+        Err(MemoryFilesError::Io(_)),
         "the second target's save failed: {failed:?}"
     );
     let on_disk = ControlSnapshot::load(p.snapshot_path()).unwrap().unwrap();
@@ -6335,4 +6300,161 @@ fn a_write_through_a_partition_whose_project_folder_went_re_creates_nothing() {
         "{} was re-created with no project.json ({err})",
         folder.display()
     );
+}
+
+/// Step 9's golden (M21): each variant's text byte for byte, under `{}` and
+/// `{:#}`, with no `source()` — written against the hand-written `Display`
+/// and kept on the derive. `Io` prints its chain whole. The `match` has no
+/// `_` arm, so a new variant does not compile without its row.
+#[test]
+fn every_snapshot_error_prints_its_text_whole_and_has_no_source() {
+    let rows = [
+        SnapshotError::Invalid("bad \u{202e}schema\u{200b}".to_string()),
+        SnapshotError::Io(anyhow::anyhow!("disk full").context("Failed to read x")),
+    ];
+    for error in rows {
+        let want = match &error {
+            SnapshotError::Invalid(_) => "invalid control snapshot: bad \u{202e}schema\u{200b}",
+            SnapshotError::Io(_) => "Failed to read x: disk full",
+        };
+        assert_eq!(error.to_string(), want);
+        assert_eq!(format!("{error:#}"), want);
+        assert!(std::error::Error::source(&error).is_none(), "{want}");
+    }
+}
+
+/// Step 9's golden (M22): each variant's text byte for byte, under `{}` and
+/// `{:#}`, with no `source()` — written against the hand-written `Display`
+/// and kept on the derive. `Io` prints its chain whole. The `match` has no
+/// `_` arm, so a new variant does not compile without its row.
+#[test]
+fn every_memory_files_error_prints_its_text_whole_and_has_no_source() {
+    let id = NoteId::parse("55e811b6-3220-4758-a47b-034bd1023f38").unwrap();
+    let rows = [
+        MemoryFilesError::InvalidInput("limit \u{200b}".to_string()),
+        MemoryFilesError::NotFound(id),
+        MemoryFilesError::RevisionConflict {
+            id,
+            current_revision: "sha256:ab".to_string(),
+        },
+        MemoryFilesError::AuthorityConflict {
+            id,
+            message: "a \u{202e}user note".to_string(),
+        },
+        MemoryFilesError::ConfirmRefused {
+            id,
+            message: "not a person's surface".to_string(),
+        },
+        MemoryFilesError::Quarantined {
+            partition_key: "home-k".to_string(),
+            reason: "no snapshot".to_string(),
+        },
+        MemoryFilesError::PathRefused {
+            component: PathBuf::from("/s/owners"),
+            reason: "a symlink".to_string(),
+        },
+        MemoryFilesError::DuplicateId {
+            id,
+            files: vec![PathBuf::from("/p/a.md"), PathBuf::from("/p/b.md")],
+        },
+        MemoryFilesError::AdoptCollision("home-k exists".to_string()),
+        MemoryFilesError::NotRegistered {
+            root: PathBuf::from("/w"),
+        },
+        MemoryFilesError::Crashed(CrashPoint::WriteAfter1),
+        MemoryFilesError::Io(anyhow::anyhow!("disk full").context("Failed to write y")),
+    ];
+    for error in rows {
+        let want = match &error {
+            MemoryFilesError::InvalidInput(_) => "invalid input: limit \u{200b}",
+            MemoryFilesError::NotFound(_) => "note 55e811b6-3220-4758-a47b-034bd1023f38 not found",
+            MemoryFilesError::RevisionConflict { .. } => {
+                "note 55e811b6-3220-4758-a47b-034bd1023f38 changed since it was read: current revision is sha256:ab"
+            }
+            MemoryFilesError::AuthorityConflict { .. } => "a \u{202e}user note",
+            MemoryFilesError::ConfirmRefused { .. } => "not a person's surface",
+            MemoryFilesError::Quarantined { .. } => {
+                "memory partition home-k is quarantined (no snapshot); run `openalpaca memory doctor --repair`"
+            }
+            MemoryFilesError::PathRefused { .. } => {
+                "memory partition refused: /s/owners is a symlink"
+            }
+            MemoryFilesError::DuplicateId { .. } => {
+                "two note files share the id 55e811b6-3220-4758-a47b-034bd1023f38: /p/a.md and /p/b.md; the service cannot choose, remove one by hand"
+            }
+            MemoryFilesError::AdoptCollision(_) => "adopt refused: home-k exists",
+            MemoryFilesError::NotRegistered { .. } => {
+                "the project /w is not registered; its notes read as empty"
+            }
+            MemoryFilesError::Crashed(_) => "crashed after WriteAfter1",
+            MemoryFilesError::Io(_) => "Failed to write y: disk full",
+        };
+        assert_eq!(error.to_string(), want);
+        assert_eq!(format!("{error:#}"), want);
+        assert!(std::error::Error::source(&error).is_none(), "{want}");
+    }
+}
+
+/// M22's golden for `DuplicateId`'s list with one file and with none.
+#[test]
+fn a_duplicate_id_lists_one_file_or_none_as_it_did() {
+    let id = NoteId::parse("55e811b6-3220-4758-a47b-034bd1023f38").unwrap();
+    let one = MemoryFilesError::DuplicateId {
+        id,
+        files: vec![PathBuf::from("/p/a.md")],
+    };
+    assert_eq!(
+        one.to_string(),
+        "two note files share the id 55e811b6-3220-4758-a47b-034bd1023f38: /p/a.md; the service cannot choose, remove one by hand"
+    );
+    let none = MemoryFilesError::DuplicateId { id, files: vec![] };
+    assert_eq!(
+        none.to_string(),
+        "two note files share the id 55e811b6-3220-4758-a47b-034bd1023f38: ; the service cannot choose, remove one by hand"
+    );
+}
+
+/// M22's golden over paths that are not UTF-8: each byte that is not prints
+/// as U+FFFD, as `Path::display` showed it.
+#[cfg(unix)]
+#[test]
+fn a_memory_files_error_shows_a_non_utf8_path_as_path_display_does() {
+    use std::os::unix::ffi::OsStrExt;
+    let path = PathBuf::from(std::ffi::OsStr::from_bytes(b"/s/\xff"));
+    let id = NoteId::parse("55e811b6-3220-4758-a47b-034bd1023f38").unwrap();
+    let refused = MemoryFilesError::PathRefused {
+        component: path.clone(),
+        reason: "a symlink".to_string(),
+    };
+    assert_eq!(
+        refused.to_string(),
+        "memory partition refused: /s/\u{fffd} is a symlink"
+    );
+    let duplicate = MemoryFilesError::DuplicateId {
+        id,
+        files: vec![path.clone(), PathBuf::from("/p/b.md")],
+    };
+    assert_eq!(
+        duplicate.to_string(),
+        "two note files share the id 55e811b6-3220-4758-a47b-034bd1023f38: /s/\u{fffd} and /p/b.md; the service cannot choose, remove one by hand"
+    );
+    let unregistered = MemoryFilesError::NotRegistered { root: path };
+    assert_eq!(
+        unregistered.to_string(),
+        "the project /s/\u{fffd} is not registered; its notes read as empty"
+    );
+}
+
+/// Step 9's golden (M24): the reason as it is, under `{}` and `{:#}`, with no
+/// `source()` — written against the hand-written `Display` and kept on the
+/// derive.
+#[test]
+fn a_note_parse_error_prints_its_reason_whole_and_has_no_source() {
+    let error = NoteParseError {
+        reason: "no frontmatter \u{202e}x\u{200b}".to_string(),
+    };
+    let want = "no frontmatter \u{202e}x\u{200b}";
+    assert_eq!(error.to_string(), want);
+    assert_eq!(format!("{error:#}"), want);
+    assert!(std::error::Error::source(&error).is_none());
 }

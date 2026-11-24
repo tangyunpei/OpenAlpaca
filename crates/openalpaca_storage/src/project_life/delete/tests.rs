@@ -1214,3 +1214,18 @@ fn deleting_a_projects_data_removes_opens_copies_of_the_uploads_it_takes() {
         "another project's copy stays"
     );
 }
+
+/// Step 9's golden (M25): the sentence byte for byte, under `{}` and `{:#}`,
+/// with no `source()` — written against the hand-written `Display` and kept
+/// on the derive. The re-point's 500 carries it too when its marker stays.
+#[test]
+fn runs_in_flight_prints_its_sentence_whole_and_has_no_source() {
+    let busy = RunsInFlight {
+        root: "/w/\u{202e}app\u{200b}".to_string(),
+        runs: 2,
+    };
+    let want = "2 run(s) of /w/\u{202e}app\u{200b} are queued, running or paused; nothing was deleted — delete its data once they finish";
+    assert_eq!(busy.to_string(), want);
+    assert_eq!(format!("{busy:#}"), want);
+    assert!(std::error::Error::source(&busy).is_none());
+}

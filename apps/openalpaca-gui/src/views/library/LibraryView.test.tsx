@@ -1,15 +1,16 @@
 /**
  * The Library end to end, over the real data layer.
  *
- * Only two edges are doubled — the Tauri discovery command and `fetch` — so the
+ * Only two edges are doubled — the shell's discovery command (answered by
+ * FixtureHost, `lib/host/fixture.ts`) and `fetch` — so the
  * query keys, the request URLs and the `?token=` preview URL under test are the
  * production ones. Nothing here is a fixture standing in for the daemon: every
  * row rendered came out of a response body.
  */
 
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
-import { invoke } from "@tauri-apps/api/core";
 import {
+  act,
   fireEvent,
   render,
   screen,
@@ -20,20 +21,21 @@ import userEvent from "@testing-library/user-event";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import type { Artifact } from "@/lib/api/artifacts";
-import { resetConnection } from "@/lib/connection";
+import { refreshConnection, resetConnection } from "@/lib/connection";
+import { fixtureHost } from "@/lib/host/fixture";
 import { revealLabel } from "@/lib/reveal";
 import { useUiStore } from "@/stores/ui";
 
 import { RESULTS_EMPTY } from "./LibraryList";
 import LibraryView from "./LibraryView";
 
-vi.mock("@tauri-apps/api/core", () => ({
-  invoke: vi.fn(async () => ({
+beforeEach(() => {
+  fixtureHost!.answerConnection({
     baseUrl: "http://127.0.0.1:9999",
     token: "test-token",
     instanceId: "7f3a1122",
-  })),
-}));
+  });
+});
 
 const findings: Artifact = {
   id: "art-1",
@@ -348,6 +350,28 @@ describe("LibraryDetail", () => {
     );
   });
 
+  // TOKEN-REREAD: the token rides in the image's URL, so a connection read
+  // again draws the image again with the token the daemon honours now.
+  it("draws the image again with the token the connection was read again for", async () => {
+    useUiStore.setState({ openArtifactId: "art-2" });
+    renderView();
+    await screen.findByAltText("spend.png");
+
+    fixtureHost!.answerOnce("getConnectionInfo", () => ({
+      baseUrl: "http://127.0.0.1:9999",
+      token: "renewed-token",
+      instanceId: "7f3a1122",
+    }));
+    await act(async () => {
+      await refreshConnection();
+    });
+
+    expect(screen.getByAltText("spend.png")).toHaveAttribute(
+      "src",
+      "http://127.0.0.1:9999/v1/artifacts/art-2/content?token=renewed-token",
+    );
+  });
+
   it("says the file is gone rather than rendering a blank pane", async () => {
     const gone: Artifact = { ...findings, missing: true };
     route("/v1/artifacts/art-1", () => json(gone));
@@ -562,7 +586,7 @@ describe("Results — a file marked missing (d7-app-1, R-T26)", () => {
 
   afterEach(() => {
     vi.unstubAllGlobals();
-    vi.mocked(invoke).mockImplementation(async () => connection);
+    fixtureHost!.answerConnection(connection);
   });
 
   it("lists a marked result file with a missing tag, reads it again and drops the tag once it is back", async () => {
@@ -653,16 +677,19 @@ describe("Results — a file marked missing (d7-app-1, R-T26)", () => {
     expect(screen.queryByText(/no longer at/)).not.toBeInTheDocument();
   });
 
-  it("toasts Reveal's refusal for a missing project's file as the shell words it", async () => {
-    vi.stubGlobal("isTauri", true);
+  it("toasts Reveal's refusal for a missing project's file as the daemon words it", async () => {
+    fixtureHost!.setReveal(true);
     route("/v1/artifacts/art-9/content", () =>
       json(
         { error: { code: "ARTIFACT_PROJECT_MISSING", message: sentence } },
         410,
       ),
     );
-    vi.mocked(invoke).mockImplementation(async (command: string) =>
-      command === "reveal_path" ? Promise.reject(sentence) : connection,
+    route("/v1/files/art-9/reveal", () =>
+      json(
+        { error: { code: "ARTIFACT_PROJECT_MISSING", message: sentence } },
+        410,
+      ),
     );
     const user = userEvent.setup();
     renderView();
@@ -676,7 +703,7 @@ describe("Results — a file marked missing (d7-app-1, R-T26)", () => {
 });
 
 describe("LibraryDetail — Open and Reveal", () => {
-  /** What the mocked discovery command answers, as the factory above does. */
+  /** What the doubled discovery command answers, as the file's `beforeEach` sets it. */
   const connection = {
     baseUrl: "http://127.0.0.1:9999",
     token: "test-token",
@@ -692,7 +719,8 @@ describe("LibraryDetail — Open and Reveal", () => {
 
   afterEach(() => {
     vi.unstubAllGlobals();
-    vi.mocked(invoke).mockImplementation(async () => connection);
+    fixtureHost!.answerConnection(connection);
+    vi.restoreAllMocks();
   });
 
   it("opens the file through the daemon's open route, as `Reveal` used to", async () => {
@@ -748,11 +776,13 @@ describe("LibraryDetail — Open and Reveal", () => {
     ).not.toBeInTheDocument();
   });
 
-  it("asks the shell to reveal the artifact's path, and toasts its refusal", async () => {
-    vi.stubGlobal("isTauri", true);
+  it("asks the daemon to reveal the artifact by its id, and toasts its refusal", async () => {
+    fixtureHost!.setReveal(true);
+    const logTail = vi.spyOn(fixtureHost!, "readDaemonLogTail");
+    const stopWait = vi.spyOn(fixtureHost!, "awaitDaemonStopped");
     const refusal = `${findings.path} is not there any more, so it cannot be shown in its folder.`;
-    vi.mocked(invoke).mockImplementation(async (command: string) =>
-      command === "reveal_path" ? Promise.reject(refusal) : connection,
+    route(`/v1/files/${findings.id}/reveal`, () =>
+      json({ error: { code: "REVEAL_REFUSED", message: refusal } }, 409),
     );
     const user = userEvent.setup();
     renderView();
@@ -761,12 +791,22 @@ describe("LibraryDetail — Open and Reveal", () => {
       await screen.findByRole("button", { name: revealLabel() }),
     );
 
-    expect(invoke).toHaveBeenCalledWith("reveal_path", {
-      path: findings.path,
-    });
     await waitFor(() => expect(useUiStore.getState().toast).toBe(refusal));
-    // Revealing is the shell's; nothing went to the daemon's open route.
-    expect(requests.some((r) => r.url.includes("/open"))).toBe(false);
+    expect(
+      requests.filter((r) => r.url.includes(`/v1/files/${findings.id}/`)),
+    ).toEqual([
+      {
+        url: `http://127.0.0.1:9999/v1/files/${findings.id}/reveal`,
+        method: "POST",
+        body: null,
+      },
+    ]);
+    // The shell is asked for the connection only: the host has no reveal
+    // command, and no other command, dialog or window of it was used.
+    expect(logTail).not.toHaveBeenCalled();
+    expect(stopWait).not.toHaveBeenCalled();
+    expect(fixtureHost!.dialog).toBeNull();
+    expect(fixtureHost!.window).toBeNull();
   });
 });
 
@@ -793,7 +833,7 @@ describe("LibraryDetail — toasts name an agent's file escaped (d7-app-3, S6a M
 
   afterEach(() => {
     vi.unstubAllGlobals();
-    vi.mocked(invoke).mockImplementation(async () => connection);
+    fixtureHost!.answerConnection(connection);
   });
 
   it("says the file opened", async () => {
@@ -837,14 +877,19 @@ describe("LibraryDetail — toasts name an agent's file escaped (d7-app-3, S6a M
     );
   });
 
-  it("quotes the shell's Reveal refusal", async () => {
-    vi.stubGlobal("isTauri", true);
-    vi.mocked(invoke).mockImplementation(async (command: string) =>
-      command === "reveal_path"
-        ? Promise.reject(
-            "/w/docs/\u{202E}notes\u{200B}.md is not there any more, so it cannot be shown in its folder.",
-          )
-        : connection,
+  it("quotes the daemon's Reveal refusal", async () => {
+    fixtureHost!.setReveal(true);
+    route("/v1/files/art-h/reveal", () =>
+      json(
+        {
+          error: {
+            code: "REVEAL_REFUSED",
+            message:
+              "/w/docs/\u{202E}notes\u{200B}.md is not there any more, so it cannot be shown in its folder.",
+          },
+        },
+        409,
+      ),
     );
     const user = userEvent.setup();
     renderView();
@@ -952,7 +997,7 @@ describe("LibraryDetail — Export", () => {
   });
 
   afterEach(() => {
-    // Only this block's spy: the module's `invoke` double keeps its answer.
+    // Only this block's spy: the fixture host keeps its answer.
     click?.mockRestore();
     // Put back what was there, or nothing when nothing was.
     if (createDescriptor === undefined)

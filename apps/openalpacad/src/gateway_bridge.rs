@@ -1,4 +1,3 @@
-use async_trait::async_trait;
 use openalpaca_core::{
     gateway::{
         HandleRequest, HandleResult, MemoryUsed, MessageHandler, ResolvedAttachment,
@@ -72,7 +71,6 @@ impl OrchestratorHandler {
     }
 }
 
-#[async_trait]
 impl MessageHandler for OrchestratorHandler {
     async fn handle(&self, request: HandleRequest) -> Result<HandleResult, String> {
         let request_id = request.request_id;
@@ -155,7 +153,6 @@ mod tests {
     /// A provider that answers anything in one line.
     struct StubLlm;
 
-    #[async_trait]
     impl openalpaca_llm::LlmProvider for StubLlm {
         fn name(&self) -> &str {
             "stub"
@@ -174,6 +171,7 @@ mod tests {
                 usage: openalpaca_llm::Usage::default(),
                 finish_reason: openalpaca_llm::FinishReason::Stop,
                 thinking: None,
+                echo: None,
                 parts: None,
             })
         }

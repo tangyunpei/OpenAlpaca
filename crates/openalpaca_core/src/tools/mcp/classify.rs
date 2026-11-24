@@ -154,6 +154,9 @@ mod tests {
             McpError::RedirectRefused {
                 origin: "https://other.example".into(),
             },
+            // A server that kept asking for input answered every round: the
+            // call goes back to the model, and the row stays as it is (M15).
+            McpError::InputRoundsExceeded(10),
         ] {
             assert_eq!(classify_call_failure(&error), None, "{error:?}");
         }

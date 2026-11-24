@@ -130,11 +130,14 @@ pub fn close_span(
 /// reader, and the UI has separate copy for each.
 pub fn span_state_for(finish: &LoopFinishReason) -> SpanState {
     match finish {
-        LoopFinishReason::Complete | LoopFinishReason::MaxRounds | LoopFinishReason::Truncated => {
-            SpanState::Done
-        }
+        LoopFinishReason::Complete
+        | LoopFinishReason::MaxRounds
+        | LoopFinishReason::Truncated
+        | LoopFinishReason::ResultSubmitted => SpanState::Done,
         LoopFinishReason::Cancelled => SpanState::Cancelled,
-        LoopFinishReason::CostExceeded | LoopFinishReason::Error(_) => SpanState::Failed,
+        LoopFinishReason::CostExceeded
+        | LoopFinishReason::Error(_)
+        | LoopFinishReason::ResultRejected => SpanState::Failed,
     }
 }
 
@@ -165,6 +168,8 @@ pub fn span_detail_for(finish: &LoopFinishReason) -> Option<String> {
         LoopFinishReason::Cancelled => Some("cancelled".to_string()),
         LoopFinishReason::CostExceeded => Some("cost cap reached".to_string()),
         LoopFinishReason::Error(e) => Some(e.clone()),
+        LoopFinishReason::ResultSubmitted => None,
+        LoopFinishReason::ResultRejected => Some("result did not match result_schema".to_string()),
     }
 }
 

@@ -1,0 +1,67 @@
+{
+  "added_capabilities": [
+    ""
+  ],
+  "consent_reset": false,
+  "extension": {
+    "actionable": false,
+    "added_capabilities": [],
+    "agents": [],
+    "connect_ms": null,
+    "connector": null,
+    "consent": "",
+    "declared": {
+      "capabilities": [
+        ""
+      ],
+      "types": {
+        "agent": false,
+        "connector": false,
+        "provider": false,
+        "skill": false,
+        "tool": false
+      },
+      "virtual_capabilities": [],
+      "warnings": []
+    },
+    "detail": null,
+    "enabled": false,
+    "hint": null,
+    "id": "",
+    "kind": "",
+    "list_ms": null,
+    "missing_config_keys": [],
+    "protocol_version": null,
+    "provider": null,
+    "reason": "",
+    "since": "",
+    "skills": [],
+    "skipped_tools": [],
+    "state": "",
+    "tools": [],
+    "tools_changed_at": null,
+    "transport": null,
+    "version": "",
+    "withdrawn_by_server": []
+  },
+  "manifest": {
+    "capabilities": [
+      ""
+    ],
+    "description": "",
+    "entry": "",
+    "name": "",
+    "required_config_keys": [],
+    "sensitive_config_keys": [],
+    "types": {
+      "agent": false,
+      "connector": false,
+      "provider": false,
+      "skill": false,
+      "tool": false
+    },
+    "version": "",
+    "virtual_capabilities": [],
+    "warnings": []
+  }
+}

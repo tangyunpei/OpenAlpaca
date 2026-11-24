@@ -43,7 +43,8 @@ pub struct StoreArgs {
     pub command: StoreCommands,
 }
 
-#[derive(Subcommand)]
+#[derive(Subcommand, Debug)]
+#[command(defer = true)]
 pub enum StoreCommands {
     /// List the projects OpenAlpaca keeps a folder for, and mark a missing one
     List,
@@ -73,7 +74,7 @@ pub enum StoreCommands {
 
 /// One project, as the daemon answers it.
 #[derive(Debug, Deserialize)]
-struct ProjectView {
+pub(crate) struct ProjectView {
     id: String,
     root: String,
     name: String,
@@ -83,7 +84,7 @@ struct ProjectView {
 
 /// The rows the five path columns hold under one root.
 #[derive(Debug, Default, Deserialize)]
-struct RowCounts {
+pub(crate) struct RowCounts {
     #[serde(default)]
     artifacts: usize,
     #[serde(default)]
@@ -117,7 +118,7 @@ impl RowCounts {
 
 /// One path, as `GET /v1/workspaces?path=` describes it.
 #[derive(Debug, Deserialize)]
-struct WorkspaceView {
+pub(crate) struct WorkspaceView {
     path: String,
     #[serde(default)]
     root: Option<String>,
@@ -138,7 +139,7 @@ struct WorkspaceView {
 }
 
 #[derive(Debug, Deserialize)]
-struct RepointResult {
+pub(crate) struct RepointResult {
     old_path: String,
     new_path: String,
     moved: RowCounts,
@@ -146,21 +147,21 @@ struct RepointResult {
 }
 
 #[derive(Debug, Serialize)]
-struct RebaseRequest<'a> {
-    old_path: &'a str,
-    new_path: &'a str,
+pub(crate) struct RebaseRequest<'a> {
+    pub(crate) old_path: &'a str,
+    pub(crate) new_path: &'a str,
 }
 
 #[derive(Debug, Serialize)]
-struct PurgeRequest<'a> {
-    path: &'a str,
-    dry_run: bool,
+pub(crate) struct PurgeRequest<'a> {
+    pub(crate) path: &'a str,
+    pub(crate) dry_run: bool,
 }
 
 /// One line of the daemon's plan: an entry, what it holds for this project,
 /// the retention class the README gives it, and `delete` or `keep`.
 #[derive(Debug, Deserialize)]
-struct PlanEntry {
+pub(crate) struct PlanEntry {
     entry: String,
     holds: String,
     retention: String,
@@ -168,7 +169,7 @@ struct PlanEntry {
 }
 
 #[derive(Debug, Default, Deserialize)]
-struct PurgeCounts {
+pub(crate) struct PurgeCounts {
     #[serde(default)]
     sessions: usize,
     #[serde(default)]
@@ -212,7 +213,7 @@ impl PurgeCounts {
 }
 
 #[derive(Debug, Default, Deserialize)]
-struct Kept {
+pub(crate) struct Kept {
     #[serde(default)]
     uploads: usize,
     #[serde(default)]
@@ -220,7 +221,7 @@ struct Kept {
 }
 
 #[derive(Debug, Default, Deserialize)]
-struct Removed {
+pub(crate) struct Removed {
     #[serde(default)]
     session_dirs: usize,
     #[serde(default)]
@@ -230,7 +231,7 @@ struct Removed {
 }
 
 #[derive(Debug, Deserialize)]
-struct DeleteResult {
+pub(crate) struct DeleteResult {
     #[serde(default)]
     applied: bool,
     project: ProjectView,
@@ -246,7 +247,7 @@ struct DeleteResult {
 }
 
 pub async fn run(args: StoreArgs) -> Result<()> {
-    let client = DaemonClient::connect()?;
+    let client = DaemonClient::connect().await?;
     let text = match args.command {
         StoreCommands::List => list(&client).await?,
         StoreCommands::Rebase { old, new, dry_run } => {
@@ -280,7 +281,7 @@ fn absolute(path: &str) -> Result<String> {
     Ok(absolute.to_string_lossy().into_owned())
 }
 
-fn workspace_query(path: &str) -> String {
+pub(crate) fn workspace_query(path: &str) -> String {
     format!("/v1/workspaces?path={}", urlencoding::encode(path))
 }
 
@@ -672,33 +673,33 @@ mod tests {
 
     #[test]
     fn list_takes_no_arguments() {
-        assert!(matches!(parse(&["list"]), StoreCommands::List));
+        std::assert_matches!(parse(&["list"]), StoreCommands::List);
         assert!(try_parse(&["list", "/x"]).is_err());
     }
 
     #[test]
     fn rebase_takes_two_paths_and_an_optional_dry_run() {
-        assert!(matches!(
+        std::assert_matches!(
             parse(&["rebase", "/old/p", "/new/p"]),
             StoreCommands::Rebase { old, new, dry_run: false }
                 if old == "/old/p" && new == "/new/p"
-        ));
-        assert!(matches!(
+        );
+        std::assert_matches!(
             parse(&["rebase", "/old/p", "/new/p", "--dry-run"]),
             StoreCommands::Rebase { dry_run: true, .. }
-        ));
+        );
     }
 
     #[test]
     fn purge_takes_exactly_one_project() {
-        assert!(matches!(
+        std::assert_matches!(
             parse(&["purge", "/some/proj"]),
             StoreCommands::Purge { project, .. } if project == "/some/proj"
-        ));
-        assert!(matches!(
+        );
+        std::assert_matches!(
             parse(&["purge", "projects/-some-proj"]),
             StoreCommands::Purge { project, .. } if project == "projects/-some-proj"
-        ));
+        );
         assert!(
             try_parse(&["purge"]).is_err(),
             "a destructive verb never guesses the project"

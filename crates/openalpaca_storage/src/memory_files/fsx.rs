@@ -2,8 +2,8 @@
 //! no-follow opens, a temp-fsync-rename-fsync atomic write, and the one
 //! component check that confinement of the partition path is built from.
 //!
-//! `store::write_atomic` and `store::create_private_dir` are private to the
-//! store module and lack the no-follow open, the 0600 mode and the directory
+//! `openalpaca_app_support::paths`' private `write_atomic` and its
+//! `create_private_dir` lack the no-follow open, the 0600 mode and the directory
 //! fsync, so this module carries its own copies rather than widening theirs.
 //! These are `pub(crate)`: `store::projects` builds a project's folder and
 //! writes its `project.json` with them (storage design, Stage 1).

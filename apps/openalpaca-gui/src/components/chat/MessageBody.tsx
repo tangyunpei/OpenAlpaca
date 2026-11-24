@@ -129,7 +129,7 @@ export function MessageBody({
     return trailing === undefined ? null : (
       <p
         className={cn(
-          "m-0 text-xl leading-[1.6] [text-wrap:pretty] text-ink",
+          "m-0 text-xl leading-[1.6] text-pretty text-ink",
           className,
         )}
       >
@@ -158,7 +158,7 @@ export function MessageBody({
                 ? { start: block.start }
                 : {})}
               className={cn(
-                "m-0 pl-[22px] text-xl leading-[1.6] [text-wrap:pretty] text-ink",
+                "m-0 pl-[22px] text-xl leading-[1.6] text-pretty text-ink",
                 block.ordered ? "list-decimal" : "list-disc",
                 tail,
                 className,
@@ -180,7 +180,7 @@ export function MessageBody({
             <Heading
               key={block.key}
               className={cn(
-                "m-0 font-semibold [text-wrap:pretty] text-ink",
+                "m-0 font-semibold text-pretty text-ink",
                 HEADING_CLASS[block.level],
                 tail ?? "mb-[8px]",
                 className,
@@ -221,7 +221,7 @@ export function MessageBody({
             <blockquote
               key={block.key}
               className={cn(
-                "m-0 border-l-2 border-gold py-px pl-[11px] text-xl leading-[1.6] [text-wrap:pretty] whitespace-pre-line text-tertiary",
+                "m-0 border-l-2 border-gold py-px pl-[11px] text-xl leading-[1.6] text-pretty whitespace-pre-line text-tertiary",
                 tail,
                 className,
               )}
@@ -316,7 +316,7 @@ export function MessageBody({
           <p
             key={block.key}
             className={cn(
-              "m-0 text-xl leading-[1.6] [text-wrap:pretty] whitespace-pre-line text-ink",
+              "m-0 text-xl leading-[1.6] text-pretty whitespace-pre-line text-ink",
               tail,
               className,
             )}

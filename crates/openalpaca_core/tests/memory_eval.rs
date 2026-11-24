@@ -100,7 +100,7 @@ const MEMORY_WRITE_TOOLS: [&str; 3] = ["memory_store", "memory_update", "memory_
 // ─── Data files ─────────────────────────────────────────────────────────────
 //
 // The data files' types, the corpus's included (design 09 §7.1), are shared
-// with `tests/memory_eval_corpus.rs`, which runs in default CI.
+// with `tests/memory_eval_corpus.rs`, which a plain `cargo test` runs.
 
 #[path = "common/eval.rs"]
 mod eval;
@@ -108,7 +108,7 @@ mod eval;
 use eval::{
     Category, ChangePair, ContinuityKind, ContinuitySet, Corpus, CorpusSession, CorpusTurn,
     GoldNote, Language, Question, TurnMode, change_pairs, eval_dir, is_uuid, load_json,
-    parse_instant, read_bytes, relied_on, repo_root,
+    parse_instant, read_bytes, real_store_refusal, relied_on, repo_root,
 };
 
 // ─── Seeding through the service ────────────────────────────────────────────
@@ -1210,21 +1210,12 @@ impl Settings {
         let home_store = env_absolute("OPENALPACA_HOME_STORE");
         match &home_store {
             Some(home_store) => {
-                if let Some(real) =
-                    std::env::var_os("HOME").map(|h| PathBuf::from(h).join(".openalpaca"))
+                if let Some(why) =
+                    real_store_refusal(home_store, openalpaca_app_support::paths::user_home())
                 {
-                    let same = *home_store == real
-                        || matches!(
-                            (home_store.canonicalize(), real.canonicalize()),
-                            (Ok(a), Ok(b)) if a == b
-                        );
-                    assert!(
-                        !same,
-                        "memory_eval: OPENALPACA_HOME_STORE points at the real store {}; use a scratch directory",
-                        real.display()
-                    );
+                    panic!("memory_eval: {why}");
                 }
-                openalpaca_storage::store::home_root().unwrap_or_else(|e| {
+                openalpaca_app_support::paths::home_root().unwrap_or_else(|e| {
                     panic!("memory_eval: OPENALPACA_HOME_STORE is not usable: {e}")
                 });
             }
@@ -2173,7 +2164,6 @@ async fn judge_call(
         thinking: Some(ThinkingConfig::Disabled),
         context_management: None,
         fallback_models: Vec::new(),
-        ephemeral_system_notice: None,
     };
     let response = router.complete(request).await.map_err(|e| e.to_string())?;
     gate.check(&response.model)?;
@@ -2435,7 +2425,6 @@ async fn blocking<T: Send + 'static>(f: impl FnOnce() -> T + Send + 'static) -> 
 /// ten lines of it: the turn, then the per-request maps the bridge drains.
 struct EvalHandler(Arc<openalpaca_core::orchestrator::Orchestrator>);
 
-#[async_trait::async_trait]
 impl openalpaca_core::gateway::MessageHandler for EvalHandler {
     async fn handle(
         &self,
@@ -2578,12 +2567,11 @@ impl ReadLog {
 /// A built-in tool that answers exactly as `inner` does and records, for
 /// the request its context names, what an answered call returned.
 struct ReadRecorder {
-    inner: Arc<dyn openalpaca_core::tools::registry::BuiltInTool>,
+    inner: Arc<openalpaca_core::tools::registry::DynBuiltInTool<'static>>,
     tool: String,
     log: Arc<ReadLog>,
 }
 
-#[async_trait::async_trait]
 impl openalpaca_core::tools::registry::BuiltInTool for ReadRecorder {
     async fn execute(&self, arguments: &serde_json::Value) -> Result<String, String> {
         self.inner.execute(arguments).await
@@ -2626,11 +2614,11 @@ fn record_reads(
 ) -> openalpaca_core::tools::registry::RegisteredTool {
     use openalpaca_core::tools::registry::ToolBackend;
     if let ToolBackend::BuiltIn(inner) = &tool.backend {
-        tool.backend = ToolBackend::BuiltIn(Arc::new(ReadRecorder {
+        tool.backend = ToolBackend::built_in(ReadRecorder {
             inner: inner.clone(),
             tool: tool.definition.name.clone(),
             log: log.clone(),
-        }));
+        });
     }
     tool
 }
@@ -4395,7 +4383,10 @@ async fn knowledge_of(
 /// ([`superseded_old_hit`]), one more coverage-judge call on the old gold
 /// with the same frozen prompt, shown its hits without the new note — at
 /// most one call a pair (8 in all), none for a pair with no link.
-#[allow(clippy::too_many_arguments)]
+#[expect(
+    clippy::too_many_arguments,
+    reason = "the link check's inputs from the run's state"
+)]
 async fn check_links(
     router: &openalpaca_llm::LlmRouter,
     mut gate: Option<&mut JudgeGate>,
@@ -5414,7 +5405,10 @@ fn tally_restatements(results: &mut LearningResults) {
 /// Everything §7.3 measures on a store the corpus taught (L, L0, a replay):
 /// the dump, coverage, noise, the changed facts, the restatements, aliases
 /// and keys. The forced re-run and the invariants come after.
-#[allow(clippy::too_many_arguments)]
+#[expect(
+    clippy::too_many_arguments,
+    reason = "what the measurement reads from the run's state"
+)]
 async fn measure_learning(
     router: &openalpaca_llm::LlmRouter,
     mut gate: Option<&mut JudgeGate>,
@@ -5496,7 +5490,10 @@ async fn measure_learning(
 /// The forced re-run (design 09 §7.2): forget the first learned note that is
 /// still active and cites a message, move its session's cursor back to 0,
 /// flush the session again, and look for a note citing a forgotten row.
-#[allow(clippy::too_many_arguments)]
+#[expect(
+    clippy::too_many_arguments,
+    reason = "the stores and records the forced re-run reads and writes"
+)]
 async fn forced_rerun(
     queue: &openalpaca_core::memory::learning::LearningQueue,
     bus: &openalpaca_core::bus::EventBus,
@@ -5673,7 +5670,10 @@ fn archived_reader(report: &serde_json::Value) -> Option<String> {
 /// judge; the report records `rejudged_from`, and the agreement between the
 /// two judges (raw and Cohen's κ) over the rows both judged. `progress` is
 /// handed the report after every row.
-#[allow(clippy::too_many_arguments)]
+#[expect(
+    clippy::too_many_arguments,
+    reason = "the judge, the report and their hashes, each recorded"
+)]
 async fn rejudge_report(
     router: &openalpaca_llm::LlmRouter,
     gate: &mut JudgeGate,
@@ -6021,7 +6021,10 @@ fn corpus_sessions(corpus: &Corpus, system: System, limit: Option<usize>) -> Vec
         .collect()
 }
 
-#[allow(clippy::too_many_arguments)]
+#[expect(
+    clippy::too_many_arguments,
+    reason = "the settings, corpus and coverage files the conditions name"
+)]
 fn learning_conditions(
     cfg: &openalpaca_core::daemon_config::DaemonConfig,
     corpus_path: &Path,
@@ -6990,7 +6993,10 @@ struct AskedQuestions {
 
 /// A replay's conditions: no seeding, the replay's own owner and scratch,
 /// and the questions only when `asked` (the L8 fix slice's H9).
-#[allow(clippy::too_many_arguments)]
+#[expect(
+    clippy::too_many_arguments,
+    reason = "the settings, files and judge a replay's conditions name"
+)]
 fn replay_conditions(
     settings: &Settings,
     replay: &ReplayScratch,
@@ -7353,7 +7359,10 @@ fn print_learning(l: &LearningResults) {
 
 /// The question phase: every question on a fresh lane, as D asks it —
 /// `Orchestrator::handle_message`, which persists nothing — and judged.
-#[allow(clippy::too_many_arguments)]
+#[expect(
+    clippy::too_many_arguments,
+    reason = "the question phase's inputs from the run's state"
+)]
 async fn ask_questions(
     orch: &openalpaca_core::orchestrator::Orchestrator,
     reads: &ReadLog,
@@ -8054,7 +8063,6 @@ fn prompt_of(request: &openalpaca_llm::ChatRequest) -> String {
         .join("\n")
 }
 
-#[async_trait::async_trait]
 impl openalpaca_llm::LlmProvider for StubModel {
     fn name(&self) -> &str {
         "stub"
@@ -8093,6 +8101,7 @@ impl openalpaca_llm::LlmProvider for StubModel {
             },
             thinking: None,
             parts: None,
+            echo: None,
         })
     }
 }
@@ -8154,7 +8163,7 @@ fn router_over(models: &[&str], stub: Arc<StubModel>) -> Arc<openalpaca_llm::Llm
     };
     let key = ApiKey::new("default".to_string(), ProviderType::Ollama, String::new());
     let entry = ProviderEntry {
-        provider: stub,
+        provider: openalpaca_llm::DynLlmProvider::from_arc(stub),
         key_pool: Arc::new(arc_swap::ArcSwap::from_pointee(KeyPool::new(
             vec![key],
             SelectionStrategy::RoundRobin,
@@ -8188,6 +8197,9 @@ fn router_over(models: &[&str], stub: Arc<StubModel>) -> Arc<openalpaca_llm::Llm
                 supports_reasoning: false,
                 supports_tools: true,
                 declared: false,
+                long_prompt: None,
+                cache_rates: None,
+                request_contract: openalpaca_llm::RequestContract::NONE,
             },
         );
     }
@@ -8201,14 +8213,14 @@ fn an_unroutable_judge_is_refused() {
     let (router, stub) = stub_router(&[TEST_MODEL], |_| String::new());
     let err = judge_guard(
         &router,
-        Some("claude-opus-4-1-nonexistent"),
+        Some("claude-opus-5-5-nonexistent"),
         Some(TEST_MODEL),
         None,
     )
     .unwrap_err();
     assert!(err.contains("not routable"), "{err}");
     // A model the registry knows whose provider is not loaded.
-    let err = judge_guard(&router, Some("gpt-4o"), Some(TEST_MODEL), None).unwrap_err();
+    let err = judge_guard(&router, Some("gpt-6-luna"), Some(TEST_MODEL), None).unwrap_err();
     assert!(err.contains("not routable"), "{err}");
     let err = judge_guard(&router, None, None, None).unwrap_err();
     assert!(err.contains("no reader model is routable"), "{err}");
@@ -8264,7 +8276,7 @@ fn a_judge_of_the_readers_family_is_accepted_and_recorded() {
     assert!(!other.judge_is_reader && !other.judge_same_family);
     assert!(other.judge_is_extractor, "the extractor named it");
     assert_eq!(model_family("qwen3.8:27b-mlx"), "qwen3.8");
-    assert_eq!(model_family("claude-sonnet-4-5"), "claude-sonnet-4-5");
+    assert_eq!(model_family("claude-sonnet-5-5"), "claude-sonnet-5-5");
 }
 
 #[test]
@@ -9832,7 +9844,7 @@ impl EnvGuard {
 
     fn home_store(path: &Path) -> Self {
         Self::vars(&[(
-            openalpaca_storage::store::HOME_STORE_ENV,
+            openalpaca_app_support::paths::HOME_STORE_ENV,
             Some(path.as_os_str()),
         )])
     }
@@ -10206,7 +10218,7 @@ async fn the_gateway_feed_maps_every_turn_and_the_forced_rerun_checks() {
         .map(|t| t.row.unwrap_or_else(|| panic!("no row for {t:?}")))
         .collect();
     assert!(
-        rows.windows(2).all(|w| w[0] < w[1]),
+        rows.is_sorted_by(|a, b| a < b),
         "one row per turn, in order"
     );
     for t in &fed.turns {
@@ -11844,7 +11856,7 @@ async fn a_replay_with_questions_writes_summaries_and_asks_them() {
             ("OPENALPACA_MEMORY_EVAL_LEARN_FROM", kept.path().as_os_str()),
             ("OPENALPACA_CONFIG_DIR", config.path().as_os_str()),
             (
-                openalpaca_storage::store::HOME_STORE_ENV,
+                openalpaca_app_support::paths::HOME_STORE_ENV,
                 home_path.as_os_str(),
             ),
         ];
@@ -12071,7 +12083,7 @@ const HARNESS_ENV: [&str; 13] = [
     "OPENALPACA_MEMORY_EVAL_KEEP",
     "OPENALPACA_MEMORY_EVAL_SESSIONS",
     "OPENALPACA_CONFIG_DIR",
-    openalpaca_storage::store::HOME_STORE_ENV,
+    openalpaca_app_support::paths::HOME_STORE_ENV,
 ];
 
 /// The harness's environment: `set` as given, every other variable of
@@ -12588,7 +12600,7 @@ async fn the_read_recorder_changes_nothing_the_reader_sees() {
     use openalpaca_core::security::policy::Principal;
     use openalpaca_core::tools::ToolContext;
     use openalpaca_core::tools::builtins::memory_read_tools;
-    use openalpaca_core::tools::registry::{RegisteredTool, ToolBackend};
+    use openalpaca_core::tools::registry::{BuiltInTool, RegisteredTool, ToolBackend};
     use openalpaca_storage::{Database, IdentityRepository};
 
     let home = tempfile::tempdir().unwrap();
@@ -12625,6 +12637,7 @@ async fn the_read_recorder_changes_nothing_the_reader_sees() {
             format!("{:?}", w.annotations)
         );
         assert_eq!((&p.version, &p.author), (&w.version, &w.author));
+        // Not assert_matches!: `ToolBackend` has no Debug (a dyn tool, headers).
         assert!(matches!(w.backend, ToolBackend::BuiltIn(_)));
     }
 
@@ -12810,7 +12823,7 @@ async fn the_recall_mode_the_run_names_is_the_one_its_report_records() {
             ("OPENALPACA_MEMORY_EVAL_JUDGE_MODEL", OsStr::new("none")),
             ("OPENALPACA_CONFIG_DIR", config.path().as_os_str()),
             (
-                openalpaca_storage::store::HOME_STORE_ENV,
+                openalpaca_app_support::paths::HOME_STORE_ENV,
                 home_path.as_os_str(),
             ),
         ];

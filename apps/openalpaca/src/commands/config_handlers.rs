@@ -394,7 +394,10 @@ fn print_category_keys(
     }
 }
 
-#[allow(clippy::too_many_arguments)]
+#[expect(
+    clippy::too_many_arguments,
+    reason = "a key row's cells, the two column widths and the verbose flag"
+)]
 fn print_key_row(
     key: &str,
     value: &str,

@@ -158,8 +158,7 @@ impl ConnectorManager {
             } else {
                 let has_token = config_repo
                     .get(&format!("{}.token", name))
-                    .map(|v| v.is_some())
-                    .unwrap_or(false);
+                    .is_ok_and(|v| v.is_some());
 
                 if !has_token && !token_optional {
                     "unconfigured".to_string()
@@ -345,7 +344,6 @@ async fn stop_each_within<F>(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use async_trait::async_trait;
     use openalpaca_core::context::SharedContext;
     use openalpaca_core::gateway::{HandleRequest, HandleResult, MessageHandler};
     use openalpaca_core::lane::LaneManager;
@@ -416,7 +414,6 @@ mod tests {
     /// Answers every turn; nothing here sends one.
     struct AckHandler;
 
-    #[async_trait]
     impl MessageHandler for AckHandler {
         async fn handle(&self, _request: HandleRequest) -> Result<HandleResult, String> {
             Ok(HandleResult::text("ack".to_string()))

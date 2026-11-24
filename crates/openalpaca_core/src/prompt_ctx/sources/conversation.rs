@@ -1,6 +1,5 @@
 use crate::prompt_ctx::section::ContextSection;
 use crate::prompt_ctx::sources::{ContextRequest, ContextSource};
-use async_trait::async_trait;
 
 pub struct ConversationSource;
 
@@ -16,7 +15,6 @@ impl Default for ConversationSource {
     }
 }
 
-#[async_trait]
 impl ContextSource for ConversationSource {
     fn name(&self) -> &'static str {
         "conversation"

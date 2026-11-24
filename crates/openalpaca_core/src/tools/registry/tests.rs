@@ -4,7 +4,6 @@ struct MockBuiltIn {
     response: String,
 }
 
-#[async_trait]
 impl BuiltInTool for MockBuiltIn {
     async fn execute(&self, _arguments: &serde_json::Value) -> Result<String, String> {
         Ok(self.response.clone())
@@ -20,9 +19,9 @@ fn make_tool_with_caps(name: &str, caps: Vec<&str>) -> RegisteredTool {
             strict: None,
             input_examples: None,
         },
-        backend: ToolBackend::BuiltIn(Arc::new(MockBuiltIn {
+        backend: ToolBackend::built_in(MockBuiltIn {
             response: "ok".to_string(),
-        })),
+        }),
         provides_capabilities: caps.into_iter().map(String::from).collect(),
         exempt_from_timeout: false,
         annotations: None,
@@ -41,9 +40,9 @@ fn make_tool(name: &str, response: &str) -> RegisteredTool {
             strict: None,
             input_examples: None,
         },
-        backend: ToolBackend::BuiltIn(Arc::new(MockBuiltIn {
+        backend: ToolBackend::built_in(MockBuiltIn {
             response: response.to_string(),
-        })),
+        }),
         provides_capabilities: vec![],
         exempt_from_timeout: false,
         annotations: None,
@@ -325,9 +324,9 @@ async fn test_schema_missing_required_field() {
             strict: None,
             input_examples: None,
         },
-        backend: ToolBackend::BuiltIn(Arc::new(MockBuiltIn {
+        backend: ToolBackend::built_in(MockBuiltIn {
             response: "ok".to_string(),
-        })),
+        }),
         provides_capabilities: vec![],
         exempt_from_timeout: false,
         annotations: None,
@@ -364,9 +363,9 @@ async fn test_schema_wrong_type() {
             strict: None,
             input_examples: None,
         },
-        backend: ToolBackend::BuiltIn(Arc::new(MockBuiltIn {
+        backend: ToolBackend::built_in(MockBuiltIn {
             response: "ok".to_string(),
-        })),
+        }),
         provides_capabilities: vec![],
         exempt_from_timeout: false,
         annotations: None,
@@ -409,9 +408,9 @@ async fn test_schema_valid_args_pass() {
             strict: None,
             input_examples: None,
         },
-        backend: ToolBackend::BuiltIn(Arc::new(MockBuiltIn {
+        backend: ToolBackend::built_in(MockBuiltIn {
             response: "ok".to_string(),
-        })),
+        }),
         provides_capabilities: vec![],
         exempt_from_timeout: false,
         annotations: None,
@@ -438,9 +437,9 @@ async fn test_schema_non_object_args_rejected() {
             strict: None,
             input_examples: None,
         },
-        backend: ToolBackend::BuiltIn(Arc::new(MockBuiltIn {
+        backend: ToolBackend::built_in(MockBuiltIn {
             response: "ok".to_string(),
-        })),
+        }),
         provides_capabilities: vec![],
         exempt_from_timeout: false,
         annotations: None,
@@ -641,9 +640,9 @@ async fn test_registry_execute_with_context_routes_to_builtin() {
             strict: None,
             input_examples: None,
         },
-        backend: ToolBackend::BuiltIn(Arc::new(MockBuiltIn {
+        backend: ToolBackend::built_in(MockBuiltIn {
             response: "mock".to_string(),
-        })),
+        }),
         provides_capabilities: vec![],
         exempt_from_timeout: false,
         annotations: None,
@@ -696,7 +695,6 @@ async fn test_memory_search_reads_context_not_args() {
 
     struct ContextCaptureTool;
 
-    #[async_trait]
     impl super::BuiltInTool for ContextCaptureTool {
         async fn execute(&self, _arguments: &serde_json::Value) -> Result<String, String> {
             Err("should not be called directly".to_string())
@@ -741,7 +739,6 @@ async fn test_missing_owner_id_returns_error() {
     // requires ctx.owner_id and returns an error when it is None.
     struct OwnerRequiringTool;
 
-    #[async_trait]
     impl super::BuiltInTool for OwnerRequiringTool {
         async fn execute(&self, _arguments: &serde_json::Value) -> Result<String, String> {
             Err("direct execute not supported".to_string())
@@ -902,9 +899,9 @@ async fn test_concurrent_register_and_execute() {
                     strict: None,
                     input_examples: None,
                 },
-                backend: ToolBackend::BuiltIn(Arc::new(MockBuiltIn {
+                backend: ToolBackend::built_in(MockBuiltIn {
                     response: format!("ok_{i}"),
-                })),
+                }),
                 provides_capabilities: vec![],
                 exempt_from_timeout: false,
                 annotations: None,
@@ -1020,9 +1017,9 @@ fn make_tool_with_name(name: &str) -> RegisteredTool {
             strict: None,
             input_examples: None,
         },
-        backend: ToolBackend::BuiltIn(Arc::new(MockBuiltIn {
+        backend: ToolBackend::built_in(MockBuiltIn {
             response: "ok".to_string(),
-        })),
+        }),
         provides_capabilities: vec![],
         exempt_from_timeout: false,
         annotations: None,
@@ -1035,7 +1032,6 @@ fn make_tool_with_name(name: &str) -> RegisteredTool {
 #[tokio::test]
 async fn test_plugin_backend_execution() {
     struct MockPluginExecutor;
-    #[async_trait]
     impl openalpaca_api::plugin_traits::PluginToolExecutor for MockPluginExecutor {
         async fn execute(
             &self,
@@ -1059,7 +1055,9 @@ async fn test_plugin_backend_execution() {
                 strict: None,
                 input_examples: None,
             },
-            backend: ToolBackend::Plugin(Arc::new(MockPluginExecutor)),
+            backend: ToolBackend::Plugin(
+                openalpaca_api::plugin_traits::DynPluginToolExecutor::new_arc(MockPluginExecutor),
+            ),
             provides_capabilities: vec![],
             exempt_from_timeout: false,
             annotations: None,
@@ -1073,6 +1071,79 @@ async fn test_plugin_backend_execution() {
         .execute("test::echo", &serde_json::json!({}))
         .await;
     assert_eq!(result.unwrap(), "plugin: test::echo");
+}
+
+/// PLUGIN-WAIT: the `Plugin` arm hands the executor the sandbox's cut where
+/// the context carries one (`execute_within`) and calls `execute` where it
+/// carries none, or there is no context.
+#[tokio::test]
+async fn a_plugin_backend_is_handed_the_sandboxs_cut_from_the_context() {
+    struct Says;
+    impl openalpaca_api::plugin_traits::PluginToolExecutor for Says {
+        async fn execute(
+            &self,
+            _tool_name: &str,
+            _args: &serde_json::Value,
+        ) -> Result<String, String> {
+            Ok("no cut".to_string())
+        }
+        async fn execute_within(
+            &self,
+            _tool_name: &str,
+            _args: &serde_json::Value,
+            sandbox_cut: std::time::Duration,
+        ) -> Result<String, String> {
+            Ok(format!("cut at {}s", sandbox_cut.as_secs()))
+        }
+        fn plugin_id(&self) -> &str {
+            "test"
+        }
+    }
+
+    let registry = ToolRegistry::default();
+    registry
+        .register(RegisteredTool {
+            definition: ToolDefinition {
+                name: "test::echo".into(),
+                description: "".into(),
+                parameters: serde_json::json!({"type": "object", "properties": {}}),
+                strict: None,
+                input_examples: None,
+            },
+            backend: ToolBackend::Plugin(
+                openalpaca_api::plugin_traits::DynPluginToolExecutor::new_arc(Says),
+            ),
+            provides_capabilities: vec![],
+            exempt_from_timeout: false,
+            annotations: None,
+            version: "test-0.0.0".into(),
+            author: "test".into(),
+            created_at: chrono::Utc::now(),
+        })
+        .unwrap();
+    let args = serde_json::json!({});
+    let cut = ToolContext {
+        sandbox_cut_secs: Some(42),
+        ..Default::default()
+    };
+    assert_eq!(
+        registry
+            .execute_with_context("test::echo", &args, &cut)
+            .await
+            .as_deref(),
+        Ok("cut at 42s")
+    );
+    assert_eq!(
+        registry
+            .execute_with_context("test::echo", &args, &ToolContext::default())
+            .await
+            .as_deref(),
+        Ok("no cut")
+    );
+    assert_eq!(
+        registry.execute("test::echo", &args).await.as_deref(),
+        Ok("no cut")
+    );
 }
 
 #[test]
@@ -1129,9 +1200,9 @@ async fn test_unknown_type_rejected_via_validation() {
                 strict: None,
                 input_examples: None,
             },
-            backend: ToolBackend::BuiltIn(Arc::new(MockBuiltIn {
+            backend: ToolBackend::built_in(MockBuiltIn {
                 response: "ok".to_string(),
-            })),
+            }),
             provides_capabilities: vec![],
             exempt_from_timeout: false,
             annotations: None,
@@ -1173,9 +1244,9 @@ async fn test_enum_validation_valid_value() {
                 strict: None,
                 input_examples: None,
             },
-            backend: ToolBackend::BuiltIn(Arc::new(MockBuiltIn {
+            backend: ToolBackend::built_in(MockBuiltIn {
                 response: "ok".to_string(),
-            })),
+            }),
             provides_capabilities: vec![],
             exempt_from_timeout: false,
             annotations: None,
@@ -1210,9 +1281,9 @@ async fn test_enum_validation_invalid_value() {
                 strict: None,
                 input_examples: None,
             },
-            backend: ToolBackend::BuiltIn(Arc::new(MockBuiltIn {
+            backend: ToolBackend::built_in(MockBuiltIn {
                 response: "ok".to_string(),
-            })),
+            }),
             provides_capabilities: vec![],
             exempt_from_timeout: false,
             annotations: None,
@@ -1535,7 +1606,6 @@ fn register_with_no_annotations_skips_virtual_caps() {
 // ===========================================================================
 
 // Mock provider for lifecycle tests.
-#[allow(dead_code)]
 struct P3dMockProvider {
     capability_name: &'static str,
     target_tool_prefix: &'static str,
@@ -1891,7 +1961,6 @@ fn lookup_during_rebuild_eventually_sees_full_result() {
 
 struct ExtMockPluginExec;
 
-#[async_trait]
 impl openalpaca_api::plugin_traits::PluginToolExecutor for ExtMockPluginExec {
     async fn execute(
         &self,
@@ -1918,6 +1987,7 @@ fn mcp_backend() -> ToolBackend {
         remote_name: "echo".to_string(),
         server_name: "srv".to_string(),
         generation: 0,
+        output_schema: None,
     }
 }
 
@@ -1931,7 +2001,9 @@ fn test_extension_tool_defs_filters_by_origin() {
     registry
         .register(make_tool_with_backend(
             "plug::do",
-            ToolBackend::Plugin(Arc::new(ExtMockPluginExec)),
+            ToolBackend::Plugin(
+                openalpaca_api::plugin_traits::DynPluginToolExecutor::new_arc(ExtMockPluginExec),
+            ),
         ))
         .unwrap();
     registry
@@ -1972,7 +2044,6 @@ struct GenPluginExec {
     ext: ExtensionId,
 }
 
-#[async_trait]
 impl openalpaca_api::plugin_traits::PluginToolExecutor for GenPluginExec {
     async fn execute(
         &self,
@@ -2005,6 +2076,7 @@ fn mcp_tool(name: &str, server: &str, generation: u64) -> RegisteredTool {
         remote_name: "echo".to_string(),
         server_name: server.to_string(),
         generation,
+        output_schema: None,
     };
     tool.author = format!("mcp:{server}");
     tool
@@ -2012,7 +2084,9 @@ fn mcp_tool(name: &str, server: &str, generation: u64) -> RegisteredTool {
 
 fn plugin_tool(name: &str, plugin: &str, executor: Arc<GenPluginExec>) -> RegisteredTool {
     let mut tool = make_tool(name, "ok");
-    tool.backend = ToolBackend::Plugin(executor);
+    tool.backend = ToolBackend::Plugin(
+        openalpaca_api::plugin_traits::DynPluginToolExecutor::from_arc(executor),
+    );
     tool.author = format!("plugin:{plugin}");
     tool
 }
@@ -2681,6 +2755,7 @@ async fn auto_approve_cannot_undo_the_extension_gate_on_either_arm() {
         require_confirmation_for: vec!["github__create_issue".to_string()],
         max_tool_calls: None,
         max_tool_runtime_secs: 30,
+        max_tool_runtime_ceiling_secs: 600,
         stream_id: None,
         lane_key: None,
         confirmation_timeout_secs: None,
@@ -2893,7 +2968,6 @@ fn created_by_resolves_the_principal_before_the_owner_id() {
 /// A builtin that says its arguments reach a program, as a skill script does.
 struct ProgramBuiltIn;
 
-#[async_trait]
 impl BuiltInTool for ProgramBuiltIn {
     async fn execute(&self, _arguments: &serde_json::Value) -> Result<String, String> {
         Ok("ran".to_string())
@@ -2911,7 +2985,7 @@ fn only_a_first_party_builtin_is_spared_the_traversal_rule() {
     registry
         .register(make_tool_with_backend(
             "script_like",
-            ToolBackend::BuiltIn(Arc::new(ProgramBuiltIn)),
+            ToolBackend::built_in(ProgramBuiltIn),
         ))
         .unwrap();
     registry
@@ -2941,7 +3015,9 @@ fn only_a_first_party_builtin_is_spared_the_traversal_rule() {
     registry
         .register(make_tool_with_backend(
             "plug::do",
-            ToolBackend::Plugin(Arc::new(ExtMockPluginExec)),
+            ToolBackend::Plugin(
+                openalpaca_api::plugin_traits::DynPluginToolExecutor::new_arc(ExtMockPluginExec),
+            ),
         ))
         .unwrap();
 
@@ -3008,9 +3084,271 @@ async fn a_command_tool_that_times_out_takes_the_processes_it_started_with_it() 
         .unwrap_err();
     let pid = pid_from_file(&pidfile, Duration::from_secs(1)).await;
     let _kill = KillOnFail(pid);
+    // Outside the sandbox the tool's own clock kills it, and nothing is said
+    // of asking for more: nothing would lift its figure.
     assert_eq!(err, "Command timed out after 1s");
     assert!(
         wait_until_gone(pid, GONE_WITHIN).await,
         "the command's background sleep {pid} outlived its timeout"
     );
+}
+
+/// TIMEOUT-ONE-CLOCK, without a race: wherever the sandbox cuts a call, a
+/// `Command`-backend tool's own clock stands back, so with no sandbox around
+/// the call (the cut set by hand) a 2-second command outlives its author's
+/// 1 s, whether the cut is at that figure or above it (CMD-TIMEOUT-2 kept
+/// the tool's own clock for a cut above it).
+#[cfg(unix)]
+#[tokio::test]
+async fn a_command_tools_own_clock_stands_back_wherever_the_sandbox_cuts() {
+    let registry = ToolRegistry::default();
+    registry
+        .register(make_tool_with_backend(
+            "slow_tool",
+            ToolBackend::Command {
+                command: "sh".to_string(),
+                args_template: Some("-c {script}".to_string()),
+                timeout_secs: 1,
+            },
+        ))
+        .unwrap();
+    let args = serde_json::json!({"script": "sleep 2"});
+    let gp = crate::test_util::GuardedProject::new();
+
+    let at_its_figure = ToolContext {
+        sandbox_cut_secs: Some(1),
+        ..gp.ctx()
+    };
+    let ran = registry
+        .execute_with_context("slow_tool", &args, &at_its_figure)
+        .await;
+    assert!(
+        ran.is_ok(),
+        "the tool's own clock did not stand back: {ran:?}"
+    );
+
+    let above_its_figure = ToolContext {
+        sandbox_cut_secs: Some(2),
+        ..gp.ctx()
+    };
+    let ran = registry
+        .execute_with_context("slow_tool", &args, &above_its_figure)
+        .await;
+    assert!(
+        ran.is_ok(),
+        "the tool's own clock did not stand back: {ran:?}"
+    );
+}
+
+/// N-TOOL-3 (Z1-01): which calls may run beside the other calls of their
+/// round — a tool that declares read-only (an MCP tool also idempotent) and
+/// the lead's three coordination builtins, whatever they declare; every
+/// other call runs alone.
+#[test]
+fn runs_concurrently_admits_read_only_tools_and_the_leads_coordination_tools() {
+    let registry = ToolRegistry::default();
+    let register = |tool: RegisteredTool| registry.register(tool).unwrap();
+    register(make_tool_with_annotations(
+        "reads",
+        vec![],
+        Some(readonly_annotations()),
+    ));
+    register(make_tool_with_annotations(
+        "edits",
+        vec![],
+        Some(destructive_annotations()),
+    ));
+    register(make_tool_with_annotations(
+        "writes_quietly",
+        vec![],
+        Some(
+            openalpaca_mcp::ToolAnnotations::new()
+                .read_only(false)
+                .destructive(false),
+        ),
+    ));
+    register(make_tool_with_annotations("declares_nothing", vec![], None));
+    // As the lead registers them: no annotations.
+    for name in [
+        "spawn_subagents_batch",
+        "check_subagent_status",
+        "wait_for_subagents",
+        "spawn_subagent",
+    ] {
+        register(make_tool(name, "ok"));
+    }
+    let mcp = |name: &str, annotations: Option<openalpaca_mcp::ToolAnnotations>| {
+        let mut tool = mcp_tool(name, "srv", 0);
+        tool.annotations = annotations;
+        tool
+    };
+    register(mcp("srv__reads", Some(readonly_annotations())));
+    register(mcp(
+        "srv__reads_not_idempotent",
+        Some(
+            openalpaca_mcp::ToolAnnotations::new()
+                .read_only(true)
+                .idempotent(false),
+        ),
+    ));
+    register(mcp(
+        "srv__reads_idempotence_unsaid",
+        Some(openalpaca_mcp::ToolAnnotations::new().read_only(true)),
+    ));
+    register(make_tool_with_backend(
+        "plug::reads",
+        ToolBackend::Plugin(
+            openalpaca_api::plugin_traits::DynPluginToolExecutor::new_arc(ExtMockPluginExec),
+        ),
+    ));
+
+    for together in [
+        "reads",
+        "spawn_subagents_batch",
+        "check_subagent_status",
+        "wait_for_subagents",
+        "srv__reads",
+    ] {
+        assert!(
+            registry.runs_concurrently(together),
+            "{together} runs alone"
+        );
+    }
+    for alone in [
+        "edits",
+        "writes_quietly",
+        "declares_nothing",
+        "spawn_subagent",
+        "srv__reads_not_idempotent",
+        "srv__reads_idempotence_unsaid",
+        "plug::reads",
+        "never_registered",
+    ] {
+        assert!(!registry.runs_concurrently(alone), "{alone} runs together");
+    }
+
+    // A coordination tool's name is the lead's builtin only: an extension's
+    // tool registered under it declares nothing, and runs alone.
+    let other = ToolRegistry::default();
+    other
+        .register(mcp_tool("wait_for_subagents", "srv", 0))
+        .unwrap();
+    assert!(!other.runs_concurrently("wait_for_subagents"));
+}
+
+/// TIMEOUT-ONE-CLOCK: the sandbox reads a tool's own figure — a
+/// `Command`-backend tool's as its calls' default, an `Http`-backend tool's
+/// and an MCP server's as a limit; every other tool has none. Was
+/// `only_a_command_backend_tool_has_its_own_default_figure`.
+#[test]
+fn a_command_an_http_and_an_mcp_tool_have_their_own_figures() {
+    let registry = ToolRegistry::default();
+    registry
+        .register(make_tool_with_backend(
+            "lint_project",
+            ToolBackend::Command {
+                command: "true".to_string(),
+                args_template: None,
+                timeout_secs: 300,
+            },
+        ))
+        .unwrap();
+    registry
+        .register(make_tool_with_backend(
+            "fetch_status",
+            ToolBackend::Http {
+                method: "GET".to_string(),
+                url: "https://example.com/status".to_string(),
+                headers: HashMap::new(),
+                timeout_secs: 10,
+            },
+        ))
+        .unwrap();
+    registry.register(mcp_tool("srv__echo", "srv", 0)).unwrap();
+    registry
+        .register(make_tool_with_backend(
+            "plug::tool",
+            ToolBackend::Plugin(
+                openalpaca_api::plugin_traits::DynPluginToolExecutor::new_arc(ExtMockPluginExec),
+            ),
+        ))
+        .unwrap();
+    registry
+        .register(make_tool_with_caps("file_read", vec!["file_read"]))
+        .unwrap();
+    assert_eq!(
+        registry.own_figure("lint_project"),
+        Some(OwnFigure::Default(300))
+    );
+    assert_eq!(
+        registry.own_figure("fetch_status"),
+        Some(OwnFigure::Limit(10))
+    );
+    // The test client's default `request_timeout`, 30 s.
+    assert_eq!(registry.own_figure("srv__echo"), Some(OwnFigure::Limit(30)));
+    assert_eq!(registry.own_figure("plug::tool"), None);
+    assert_eq!(registry.own_figure("file_read"), None);
+    assert_eq!(registry.own_figure("no_such_tool"), None);
+}
+
+/// TIMEOUT-ONE-CLOCK (item 19): a tool's parameters take a `timeout_secs`
+/// only where its schema names one a number fills.
+#[test]
+fn a_schema_takes_timeout_secs_only_where_it_names_one() {
+    let registry = ToolRegistry::default();
+    for (name, parameters) in [
+        (
+            "names_it",
+            serde_json::json!({"type": "object", "properties": {"timeout_secs": {"type": "integer"}}}),
+        ),
+        (
+            "names_it_untyped",
+            serde_json::json!({"type": "object", "properties": {"timeout_secs": {}}}),
+        ),
+        (
+            "names_it_as_text",
+            serde_json::json!({"type": "object", "properties": {"timeout_secs": {"type": "string"}}}),
+        ),
+        (
+            "names_others",
+            serde_json::json!({"type": "object", "properties": {"path": {"type": "string"}}}),
+        ),
+        ("names_nothing", serde_json::json!({"type": "object"})),
+    ] {
+        let mut tool = make_tool_with_caps(name, vec![]);
+        tool.definition.parameters = parameters;
+        registry.register(tool).unwrap();
+    }
+    assert!(registry.declares_timeout_secs("names_it"));
+    assert!(registry.declares_timeout_secs("names_it_untyped"));
+    assert!(!registry.declares_timeout_secs("names_it_as_text"));
+    assert!(!registry.declares_timeout_secs("names_others"));
+    assert!(!registry.declares_timeout_secs("names_nothing"));
+    assert!(!registry.declares_timeout_secs("no_such_tool"));
+}
+
+/// A type-erased built-in is held in `ToolBackend::BuiltIn` and the
+/// per-request tool sets, and every call through it runs in spawned work.
+///
+/// The supertraits alone make the held form `Send + Sync`, so the test
+/// also holds each async method's declared `+ Send`: the generic body
+/// sees only the trait's declaration, and naming it at the Dyn compiles
+/// it.
+#[test]
+fn a_held_built_in_tool_is_send_and_sync() {
+    fn send_and_sync<T: Send + Sync + ?Sized>() {}
+    send_and_sync::<Arc<DynBuiltInTool<'static>>>();
+
+    fn is_send<T: Send>(_: &T) {}
+    fn futures_are_send<T: BuiltInTool + ?Sized>(
+        tool: &T,
+        arguments: &serde_json::Value,
+        ctx: &ToolContext,
+    ) {
+        is_send(&tool.execute(arguments));
+        is_send(&tool.execute_with_context(arguments, ctx));
+        is_send(&tool.confirmation_preview(arguments, ctx));
+        is_send(&tool.on_confirmation_denied(arguments, ctx));
+    }
+    let _ = futures_are_send::<DynBuiltInTool<'static>>;
 }

@@ -27,7 +27,7 @@ use crate::events::SystemEvent;
 use crate::tools::registry::ToolContext;
 
 /// Suppression window for the withheld announcement (design §7.4).
-const WARN_DEDUP_WINDOW: Duration = Duration::from_secs(600);
+const WARN_DEDUP_WINDOW: Duration = Duration::from_mins(10);
 /// LRU cap on the dedup set, swept lazily on insert.
 const WARN_DEDUP_CAP: usize = 512;
 
@@ -202,7 +202,9 @@ pub struct ExtensionRecord {
     /// Plugins only — the contributed connector platform. A `disabled` row with
     /// a non-null `connector` is a T2 bug (design §3.2, §8).
     pub connector: Option<String>,
-    /// Plugins only — the contributed LLM provider. Same rule as `connector`.
+    /// Always `None`: the plugin provider type is removed (M86, D-I
+    /// (revised)). Kept in the row's wire shape beside `connector` until the
+    /// plugin connector bridge's deletion presents both.
     pub provider: Option<String>,
     /// Required config keys that are not set — the `Failed{NeedsConfig}` list.
     pub missing_config_keys: Vec<String>,
@@ -1291,7 +1293,10 @@ impl ExtensionLedger {
         self.observe(ext, subject, state_word, false, moment, ctx, scope_override);
     }
 
-    #[allow(clippy::too_many_arguments)]
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "the extension, subject, state, moment and scope it observes"
+    )]
     fn observe(
         &self,
         ext: &ExtensionId,

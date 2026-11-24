@@ -32,7 +32,7 @@ export const button = tv({
   base: cn(
     "inline-flex cursor-pointer items-center justify-center gap-[6px]",
     "font-sans",
-    "transition-[background-color,border-color,color] duration-[120ms]",
+    "transition-[background-color,border-color,color] duration-120",
     "focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-blue",
     "disabled:pointer-events-none disabled:opacity-55",
   ),

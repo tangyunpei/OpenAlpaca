@@ -10,6 +10,7 @@ use crate::security::capabilities::Allowlist;
 use crate::security::sandbox::{SandboxManager, SandboxPolicy};
 use crate::test_util::HomeStoreGuard;
 use crate::tools::ToolRegistry;
+use crate::tools::registry::DynBuiltInTool;
 use openalpaca_llm::ToolCall;
 use openalpaca_storage::Database;
 use openalpaca_storage::IdentityRepository;
@@ -103,7 +104,7 @@ impl Harness {
 
     async fn call(
         &self,
-        tool: &dyn BuiltInTool,
+        tool: &(impl BuiltInTool + ?Sized),
         owner: &str,
         args: serde_json::Value,
     ) -> Result<serde_json::Value, String> {
@@ -113,7 +114,7 @@ impl Harness {
         Ok(serde_json::from_str(&text).expect("tools answer JSON"))
     }
 
-    fn read_tool(&self, name: &str) -> Arc<dyn BuiltInTool> {
+    fn read_tool(&self, name: &str) -> Arc<DynBuiltInTool<'static>> {
         memory_read_tools(self.service.clone())
             .into_iter()
             .find(|t| t.definition.name == name)
@@ -156,7 +157,7 @@ async fn hidden_identity_fields_are_refused_by_the_tools_own_validator() {
     let forget = MemoryForgetTool::new(h.service.clone());
     let update = MemoryUpdateTool::new(h.service.clone());
 
-    let cases: Vec<(&dyn BuiltInTool, serde_json::Value, &str)> = vec![
+    let cases: Vec<(&DynBuiltInTool<'_>, serde_json::Value, &str)> = vec![
         (
             &*search,
             serde_json::json!({"query": "deploy notes", "owner_id": BOB}),
@@ -168,32 +169,32 @@ async fn hidden_identity_fields_are_refused_by_the_tools_own_validator() {
             "workspace_id",
         ),
         (
-            &store,
+            DynBuiltInTool::from_ref(&store),
             serde_json::json!({"title": "Planted", "body": "planted\n", "kind": "fact", "path": "/bob/notes/planted.md"}),
             "path",
         ),
         (
-            &store,
+            DynBuiltInTool::from_ref(&store),
             serde_json::json!({"title": "Trusted?", "body": "trusted\n", "kind": "fact", "origin": "user"}),
             "origin",
         ),
         (
-            &store,
+            DynBuiltInTool::from_ref(&store),
             serde_json::json!({"title": "Pin me", "body": "pin\n", "kind": "fact", "pinned": true}),
             "pinned",
         ),
         (
-            &forget,
+            DynBuiltInTool::from_ref(&forget),
             serde_json::json!({"targets": [{"id": bob_note.to_string(), "expected_revision": bob_rev}], "owner_id": BOB}),
             "owner_id",
         ),
         (
-            &update,
+            DynBuiltInTool::from_ref(&update),
             serde_json::json!({"id": bob_note.to_string(), "expected_revision": bob_rev, "action": "archive", "trust": "high"}),
             "trust",
         ),
         (
-            &forget,
+            DynBuiltInTool::from_ref(&forget),
             serde_json::json!({"query": "deploy notes"}),
             "query",
         ),
@@ -242,7 +243,7 @@ async fn hidden_identity_fields_are_refused_by_the_tools_own_validator() {
     // The control: the same store without the hidden key succeeds.
     let out = h
         .call(
-            &store,
+            DynBuiltInTool::from_ref(&store),
             ALICE,
             serde_json::json!({"title": "Trusted?", "body": "trusted\n", "kind": "fact"}),
         )
@@ -436,7 +437,7 @@ async fn store_search_read_update_forget_round_trip() {
 
     let stored = h
         .call(
-            &store,
+            DynBuiltInTool::from_ref(&store),
             ALICE,
             serde_json::json!({
                 "title": "Preferred editor",
@@ -453,7 +454,7 @@ async fn store_search_read_update_forget_round_trip() {
     assert_eq!(rev.len(), 64);
     let again = h
         .call(
-            &store,
+            DynBuiltInTool::from_ref(&store),
             ALICE,
             serde_json::json!({
                 "title": "Preferred editor",
@@ -622,6 +623,7 @@ fn sandbox_policy(unattended: bool) -> SandboxPolicy {
         require_confirmation_for: vec![],
         max_tool_calls: None,
         max_tool_runtime_secs: 60,
+        max_tool_runtime_ceiling_secs: 600,
         stream_id: None,
         lane_key: None,
         confirmation_timeout_secs: Some(300),
@@ -644,15 +646,15 @@ async fn an_unattended_turn_is_refused_forget_and_update_before_anything_runs() 
     for (definition, backend) in [
         (
             memory_store_tool_definition(),
-            Arc::new(MemoryStoreTool::new(h.service.clone())) as Arc<dyn BuiltInTool>,
+            DynBuiltInTool::new_arc(MemoryStoreTool::new(h.service.clone())),
         ),
         (
             memory_update_tool_definition(),
-            Arc::new(MemoryUpdateTool::new(h.service.clone())),
+            DynBuiltInTool::new_arc(MemoryUpdateTool::new(h.service.clone())),
         ),
         (
             memory_forget_tool_definition(),
-            Arc::new(MemoryForgetTool::new(h.service.clone())),
+            DynBuiltInTool::new_arc(MemoryForgetTool::new(h.service.clone())),
         ),
     ] {
         registry
@@ -722,11 +724,11 @@ fn writer_registry(h: &Harness) -> Arc<ToolRegistry> {
     for (definition, backend) in [
         (
             memory_update_tool_definition(),
-            Arc::new(MemoryUpdateTool::new(h.service.clone())) as Arc<dyn BuiltInTool>,
+            DynBuiltInTool::new_arc(MemoryUpdateTool::new(h.service.clone())),
         ),
         (
             memory_forget_tool_definition(),
-            Arc::new(MemoryForgetTool::new(h.service.clone())),
+            DynBuiltInTool::new_arc(MemoryForgetTool::new(h.service.clone())),
         ),
     ] {
         registry
@@ -975,7 +977,7 @@ fn confirm_registry(h: &Harness) -> Arc<ToolRegistry> {
         .register(RegisteredTool {
             annotations: annotations_for_builtin("memory_confirm"),
             definition: memory_confirm_tool_definition(),
-            backend: ToolBackend::BuiltIn(Arc::new(MemoryConfirmTool::new(h.service.clone()))),
+            backend: ToolBackend::built_in(MemoryConfirmTool::new(h.service.clone())),
             provides_capabilities: vec![],
             exempt_from_timeout: false,
             version: "test".into(),

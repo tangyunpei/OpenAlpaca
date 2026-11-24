@@ -1,5 +1,5 @@
-use async_trait::async_trait;
 use dashmap::DashMap;
+use openalpaca_api::plugin_traits::{DynPluginToolExecutor, PluginToolExecutor};
 use openalpaca_llm::ToolDefinition;
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -7,6 +7,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 
 use crate::orchestrator::skill::constraints::EffectiveToolSet;
 use crate::tools::extensions::{ExtensionId, ExtensionLedger};
+use crate::security::sandbox::OwnFigure;
 use crate::security::sanitizer::TraversalRule;
 use crate::tools::platform::{RunFailure, run_bounded, shell_command};
 use crate::tools::working_folder::{WorkingFolderRefusal, working_folder};
@@ -191,7 +192,30 @@ pub struct ToolContext {
     /// same discipline, only on the context the sandbox hands a tool's
     /// [`BuiltInTool::on_confirmation_denied`] hook. `None` everywhere else.
     pub human_denial: Option<HumanDenial>,
+    /// The seconds the sandbox cuts this call at: what the call asked for,
+    /// the tool's own figure (`SandboxPolicy::default_runtime_secs`) or the
+    /// per-tool bound (`SandboxPolicy::runtime_secs_for`). Set by
+    /// [`SandboxManager::execute_tool`](crate::security::sandbox::SandboxManager::execute_tool)
+    /// alone, under the discipline of the approval fact: `None` on a context
+    /// a caller built with it set and on an exempt call. Where it is set the
+    /// sandbox is the call's one clock (TIMEOUT-ONE-CLOCK), and every backend
+    /// with a clock of its own stands back past it: a `Command`-backend
+    /// tool's to the ceiling's highest setting, as `shell_execute`'s does; a
+    /// plugin's wait, an `Http`-backend tool's request and an MCP call past
+    /// this figure ([`PAST_THE_SANDBOX`]), so the sandbox's cut, never the
+    /// backend's, is what ends a slow call.
+    pub sandbox_cut_secs: Option<u64>,
 }
+
+/// How far past the sandbox's cut an `Http`-backend tool's request and an
+/// MCP call wait (TIMEOUT-ONE-CLOCK), as a plugin tool's wait does
+/// (`openalpaca_plugins`' own `PAST_THE_SANDBOX`, PLUGIN-WAIT). The sandbox
+/// arms its clock first, and a backend deadline at the same figure would
+/// race it, so this one ends later; it never ends a call itself, since the
+/// cut drops the call first. It covers the request or the call once sent:
+/// an MCP call's pre-send reconnect keeps the server's `request_timeout_secs`
+/// (`McpClient::call_tool_within`), which can tie with a cut at that figure.
+pub(crate) const PAST_THE_SANDBOX: std::time::Duration = std::time::Duration::from_secs(5);
 
 /// The fact that a person approved one call on its confirmation card
 /// (design 09 §4.2). Only the core crate constructs one — the sandbox, on
@@ -261,6 +285,16 @@ impl ToolContext {
     }
 }
 
+/// The lead's coordination builtins that run beside the other calls of their
+/// round whatever they declare (N-TOOL-3, Z1-01; [`ToolRegistry::runs_concurrently`]).
+/// They are registered with no annotations. `spawn_subagent` is not among
+/// them: it runs alone, and returns as soon as its run is queued.
+const CONCURRENT_COORDINATION_TOOLS: [&str; 3] = [
+    "spawn_subagents_batch",
+    "check_subagent_status",
+    "wait_for_subagents",
+];
+
 /// Coarse permission tier derived from MCP tool annotations.
 /// Used for introspection and policy decisions; not stored on RegisteredTool.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -286,7 +320,7 @@ pub fn permission_tier(annotations: Option<&openalpaca_mcp::ToolAnnotations>) ->
 /// Backend that executes a tool's logic.
 #[derive(Clone)]
 pub enum ToolBackend {
-    BuiltIn(Arc<dyn BuiltInTool>),
+    BuiltIn(Arc<DynBuiltInTool<'static>>),
     Http {
         method: String,
         url: String,
@@ -298,7 +332,7 @@ pub enum ToolBackend {
         args_template: Option<String>,
         timeout_secs: u64,
     },
-    Plugin(Arc<dyn openalpaca_api::plugin_traits::PluginToolExecutor>),
+    Plugin(Arc<DynPluginToolExecutor<'static>>),
     Mcp {
         client: Arc<openalpaca_mcp::McpClient>,
         remote_name: String,
@@ -310,22 +344,46 @@ pub enum ToolBackend {
         /// so a snapshot holding a sealed client from a previous load is
         /// refused as `Stale` rather than talking to a dead transport.
         generation: u64,
+        /// The tool's declared `outputSchema` (MCP `Tool.output_schema`), as
+        /// the server listed it; `None` when it declared none. Served by
+        /// `GET /v1/tools` and never placed in the provider's tool
+        /// definition (M14). Read at the tool-list load only: the refresh
+        /// compares names, so a server changing it under a live name keeps
+        /// the old one until a reload or reconnect.
+        output_schema: Option<Arc<serde_json::Map<String, serde_json::Value>>>,
     },
 }
 
+impl ToolBackend {
+    /// A built-in backend running `tool`, type-erased here so a
+    /// registration site names the tool alone.
+    pub fn built_in(tool: impl BuiltInTool + 'static) -> Self {
+        Self::BuiltIn(DynBuiltInTool::new_arc(tool))
+    }
+
+    /// A built-in backend sharing `tool` with a caller that keeps a handle
+    /// to the concrete value.
+    pub fn built_in_arc(tool: Arc<impl BuiltInTool + 'static>) -> Self {
+        Self::BuiltIn(DynBuiltInTool::from_arc(tool))
+    }
+}
+
 /// Trait for built-in tool implementations.
-#[async_trait]
+#[dynosaur::dynosaur(pub DynBuiltInTool = dyn(box) BuiltInTool)]
 pub trait BuiltInTool: Send + Sync {
-    async fn execute(&self, arguments: &serde_json::Value) -> Result<String, String>;
+    fn execute(
+        &self,
+        arguments: &serde_json::Value,
+    ) -> impl Future<Output = Result<String, String>> + Send;
 
     /// Execute with per-invocation context. Default delegates to execute().
     /// Override for tools that need identity (owner_id, task_id, etc.).
-    async fn execute_with_context(
+    fn execute_with_context(
         &self,
         arguments: &serde_json::Value,
         _ctx: &ToolContext,
-    ) -> Result<String, String> {
-        self.execute(arguments).await
+    ) -> impl Future<Output = Result<String, String>> + Send {
+        async move { self.execute(arguments).await }
     }
 
     /// What the confirmation card says about this call, written by the
@@ -334,12 +392,12 @@ pub trait BuiltInTool: Send + Sync {
     /// default — raises the ordinary card with the literal arguments, and
     /// `Err(reason)` refuses the call with **no card**, so a person is never
     /// asked about something that would be refused after the click.
-    async fn confirmation_preview(
+    fn confirmation_preview(
         &self,
         _arguments: &serde_json::Value,
         _ctx: &ToolContext,
-    ) -> Result<Option<String>, String> {
-        Ok(None)
+    ) -> impl Future<Output = Result<Option<String>, String>> + Send {
+        async move { Ok(None) }
     }
 
     /// Whether this tool's arguments reach a shell line or another program,
@@ -354,12 +412,12 @@ pub trait BuiltInTool: Send + Sync {
     /// Called when a person denied this call on its card (design 09 §4.3),
     /// with `ctx.human_denial` set. What it returns is added to the refusal
     /// the model reads. The default does nothing.
-    async fn on_confirmation_denied(
+    fn on_confirmation_denied(
         &self,
         _arguments: &serde_json::Value,
         _ctx: &ToolContext,
-    ) -> Option<String> {
-        None
+    ) -> impl Future<Output = Option<String>> + Send {
+        async move { None }
     }
 }
 
@@ -454,6 +512,11 @@ pub struct ToolRegistry {
     capability_providers: DashMap<ProviderHandle, Arc<dyn capabilities::CapabilityProvider>>,
     next_provider_handle: AtomicU64,
     provider_mutex: std::sync::Mutex<()>,
+    /// Where an MCP tool's images, audio and embedded blobs are kept (M85):
+    /// set once by the daemon at boot ([`Self::set_by_product_sink`]) and
+    /// carried into every clone, so a per-request registry keeps them too.
+    /// `None` — every test registry — keeps nothing and says so.
+    by_product_sink: Option<Arc<crate::tools::builtins::ByProductSink>>,
 }
 
 impl Clone for ToolRegistry {
@@ -484,6 +547,7 @@ impl Clone for ToolRegistry {
                 self.next_provider_handle.load(Ordering::Relaxed),
             ),
             provider_mutex: std::sync::Mutex::new(()),
+            by_product_sink: self.by_product_sink.clone(),
         }
     }
 }
@@ -540,6 +604,7 @@ impl ToolRegistry {
             capability_providers: DashMap::new(),
             next_provider_handle: AtomicU64::new(0),
             provider_mutex: std::sync::Mutex::new(()),
+            by_product_sink: None,
         };
 
         // Install the default AnnotationCapabilityProvider.
@@ -547,6 +612,22 @@ impl ToolRegistry {
         let _ = registry.register_capability_provider(Arc::new(AnnotationCapabilityProvider));
 
         Ok(registry)
+    }
+
+    /// Keep an MCP tool's images, audio and embedded blobs through `sink`
+    /// (M85, DU-R6 (b)): the daemon's one production registry sets it at
+    /// boot, before the registry is shared; every clone carries it.
+    pub fn set_by_product_sink(&mut self, sink: crate::tools::builtins::ByProductSink) {
+        self.by_product_sink = Some(Arc::new(sink));
+    }
+
+    /// This registry with `client` as its `Http`-backend tools' client — a
+    /// test's, which reaches a loopback stand-in under a name the SSRF check
+    /// lets through.
+    #[cfg(test)]
+    pub(crate) fn with_http_client(mut self, client: reqwest::Client) -> Self {
+        self.http_client = client;
+        self
     }
 
     /// Register a tool. Safe to call at any time, including after wrapping in Arc.
@@ -695,7 +776,9 @@ impl ToolRegistry {
     /// Execute a tool by name with per-invocation context.
     /// Routes to BuiltInTool::execute_with_context() for BuiltIn backends; a
     /// command tool runs in the call's working folder (storage design §10,
-    /// R26); Http, Plugin and MCP backends do not read the context.
+    /// R26); a plugin tool waits past the sandbox's cut (PLUGIN-WAIT); an
+    /// MCP tool's images, audio and embedded blobs are kept as by-products of
+    /// the context's turn (M85); an Http backend does not read the context.
     pub async fn execute_with_context(
         &self,
         tool_name: &str,
@@ -707,7 +790,7 @@ impl ToolRegistry {
 
     /// The builtin behind `tool_name`, for the confirmation hooks below.
     /// Only a builtin has them; every other backend answers the defaults.
-    fn builtin(&self, tool_name: &str) -> Option<Arc<dyn BuiltInTool>> {
+    fn builtin(&self, tool_name: &str) -> Option<Arc<DynBuiltInTool<'static>>> {
         self.tools
             .get(tool_name)
             .and_then(|entry| match &entry.backend {
@@ -788,15 +871,9 @@ impl ToolRegistry {
             guard: _guard,
         } = self.admit(tool_name, arguments, ctx)?;
 
-        // A command tool reads the context for its working folder (R26);
-        // these two do not.
-        if ctx.is_some() && matches!(backend, ToolBackend::Http { .. } | ToolBackend::Plugin(_)) {
-            tracing::trace!(
-                tool_name,
-                agent_id = ?ctx.and_then(|c| c.agent_id.as_ref()),
-                "Tool context discarded (non-BuiltIn backend)"
-            );
-        }
+        // Where the sandbox cuts this call (TIMEOUT-ONE-CLOCK): every backend
+        // with a clock of its own stands back past it.
+        let sandbox_cut = ctx.and_then(|c| c.sandbox_cut_secs);
 
         match &backend {
             ToolBackend::BuiltIn(handler) => match ctx {
@@ -809,23 +886,62 @@ impl ToolRegistry {
                 headers,
                 timeout_secs,
             } => {
-                execute_http(&self.http_client, method, url, headers, *timeout_secs, arguments)
-                    .await
+                // TIMEOUT-ONE-CLOCK: under the sandbox's cut the request waits
+                // past it; outside the sandbox its own figure ends it.
+                let timeout = match sandbox_cut {
+                    Some(cut) => std::time::Duration::from_secs(cut) + PAST_THE_SANDBOX,
+                    None => std::time::Duration::from_secs(*timeout_secs),
+                };
+                execute_http(&self.http_client, method, url, headers, timeout, arguments).await
             }
             ToolBackend::Command {
                 command,
                 args_template,
                 timeout_secs,
             } => {
-                execute_command(command, args_template.as_deref(), *timeout_secs, arguments, ctx)
-                    .await
+                // CMD-TIMEOUT: the author's `timeout_secs` is the call's
+                // default, and a call's own lifts it. Since TIMEOUT-ONE-CLOCK
+                // the sandbox cuts every call it runs at that figure or the
+                // asked one — the one clock, which kills the command's process
+                // group when it drops the call (R45) — so the backend's own
+                // clock stands back to the ceiling's highest setting, as
+                // `shell_execute`'s does: two clocks at one figure would race,
+                // and the backend's words could win where the sandbox's
+                // failed run with its reason belongs. With the ceiling at
+                // 3600 s and a call asking that much the two coincide, and the
+                // sandbox's, armed first, all but always wins. Only a call no
+                // sandbox cuts keeps the backend's clock.
+                let timeout_secs = if sandbox_cut.is_some() {
+                    crate::daemon_config::MAX_TOOL_RUNTIME_CEILING_LIMIT_SECS
+                } else {
+                    *timeout_secs
+                };
+                execute_command(
+                    command,
+                    args_template.as_deref(),
+                    timeout_secs,
+                    arguments,
+                    ctx,
+                )
+                .await
             }
-            ToolBackend::Plugin(executor) => executor.execute(tool_name, arguments).await,
+            // PLUGIN-WAIT: where the sandbox cuts this call, the plugin's
+            // answer is waited for past that figure, so the sandbox's clock is
+            // the one that ends it; a call no sandbox cuts waits as before.
+            ToolBackend::Plugin(executor) => match ctx.and_then(|c| c.sandbox_cut_secs) {
+                Some(secs) => {
+                    executor
+                        .execute_within(tool_name, arguments, std::time::Duration::from_secs(secs))
+                        .await
+                }
+                None => executor.execute(tool_name, arguments).await,
+            },
             ToolBackend::Mcp {
                 client,
                 remote_name,
                 server_name,
                 generation,
+                output_schema: _,
             } => {
                 match ctx {
                     Some(ctx) => tracing::debug!(
@@ -841,8 +957,28 @@ impl ToolRegistry {
                         "MCP tool call (no context)"
                     ),
                 }
-                match client.call_tool(remote_name, arguments.clone(), None).await {
-                    Ok(result) => crate::tools::mcp::bridge::serialize_call_result(result),
+                // TIMEOUT-ONE-CLOCK: under the sandbox's cut the call waits
+                // past it (the reconnect keeps the server's own deadline);
+                // outside the sandbox the server's `request_timeout_secs`
+                // ends it.
+                let called = match sandbox_cut {
+                    Some(cut) => {
+                        let deadline = std::time::Duration::from_secs(cut) + PAST_THE_SANDBOX;
+                        client
+                            .call_tool_within(remote_name, arguments.clone(), None, deadline)
+                            .await
+                    }
+                    None => client.call_tool(remote_name, arguments.clone(), None).await,
+                };
+                match called {
+                    Ok(result) => crate::tools::mcp::bridge::serialize_call_result(
+                        result,
+                        &crate::tools::mcp::bridge::SerializeOptions::for_call(
+                            tool_name,
+                            self.by_product_sink.as_deref(),
+                            ctx,
+                        ),
+                    ),
                     Err(e) => {
                         tracing::warn!(
                             server = %server_name,
@@ -864,11 +1000,20 @@ impl ToolRegistry {
                         {
                             // The `detail` is rendered from the client's own
                             // terminal state, not inferred from the last error
-                            // string (design §3.2 T4b, X-5 c).
+                            // string (design §3.2 T4b, X-5 c), and ends with
+                            // the stderr tail of the last process the client
+                            // spawned — the last reconnect's, when one ran —
+                            // which never enters `e`'s text, the result below
+                            // (N-MCP-5).
                             let detail = match client.connection_state().await {
                                 openalpaca_mcp::ConnectionSnapshot::Failed { reason } => reason,
                                 _ => e.to_string(),
                             };
+                            let detail = crate::tools::extensions::stderr::detail_with_stderr(
+                                detail,
+                                client.stderr_tail(),
+                            )
+                            .await;
                             self.extensions.mark_failed(
                                 &ExtensionId::mcp(server_name),
                                 *generation,
@@ -1097,8 +1242,7 @@ impl ToolRegistry {
     pub fn is_exempt_from_timeout(&self, tool_name: &str) -> bool {
         self.tools
             .get(tool_name)
-            .map(|t| t.value().exempt_from_timeout)
-            .unwrap_or(false)
+            .is_some_and(|t| t.value().exempt_from_timeout)
     }
 
     /// Returns tool definitions for all tools whose `provides_capabilities`
@@ -1323,6 +1467,29 @@ impl ToolRegistry {
         }
     }
 
+    /// Whether a call of `tool_name` may run beside the other calls of its
+    /// round (N-TOOL-3, Z1-01): a tool that declares `read_only_hint` — an
+    /// MCP tool also `idempotent_hint`, since its server's word is all there
+    /// is to go on — or one of the lead's coordination builtins
+    /// ([`CONCURRENT_COORDINATION_TOOLS`]), whatever they declare. Every
+    /// other call runs alone: a tool that is not read-only, one that declares
+    /// nothing (a plugin's tool, which carries no annotations), and a name
+    /// nothing is registered under.
+    pub(crate) fn runs_concurrently(&self, tool_name: &str) -> bool {
+        self.tools.get(tool_name).is_some_and(|entry| {
+            if matches!(entry.backend, ToolBackend::BuiltIn(_))
+                && CONCURRENT_COORDINATION_TOOLS.contains(&tool_name)
+            {
+                return true;
+            }
+            entry.annotations.as_ref().is_some_and(|declared| {
+                declared.read_only_hint == Some(true)
+                    && (!matches!(entry.backend, ToolBackend::Mcp { .. })
+                        || declared.idempotent_hint == Some(true))
+            })
+        })
+    }
+
     /// Whether `tool_name` runs a command: the sanitizer's shell set — the
     /// builtin `shell_execute` ([`InputSanitizer::SHELL_TOOLS`]) and every
     /// `Command`-backend tool, the two it checks for injection. What a
@@ -1336,6 +1503,54 @@ impl ToolRegistry {
                 .tools
                 .get(tool_name)
                 .is_some_and(|entry| matches!(entry.backend, ToolBackend::Command { .. }))
+    }
+
+    /// Whether `tool_name` is a plugin's tool (`ToolBackend::Plugin`): a call
+    /// to one may ask for its own figure, as a command tool's may
+    /// (PLUGIN-WAIT, `SandboxPolicy::asked_runtime_secs`).
+    pub(crate) fn is_plugin_tool(&self, tool_name: &str) -> bool {
+        self.tools
+            .get(tool_name)
+            .is_some_and(|entry| matches!(entry.backend, ToolBackend::Plugin(_)))
+    }
+
+    /// A tool's own figure, which the sandbox cuts a call that asked for
+    /// nothing at (TIMEOUT-ONE-CLOCK, `SandboxPolicy::default_runtime_secs`):
+    /// a `Command`-backend tool's `timeout_secs` (its TOML's) is its calls'
+    /// default; an `Http`-backend tool's `timeout_secs` and an MCP server's
+    /// `request_timeout_secs` are limits of their own. `None` for every other
+    /// tool, `shell_execute` and a plugin's among them: theirs is the bound.
+    pub(crate) fn own_figure(&self, tool_name: &str) -> Option<OwnFigure> {
+        self.tools
+            .get(tool_name)
+            .and_then(|entry| match &entry.backend {
+                ToolBackend::Command { timeout_secs, .. } => {
+                    Some(OwnFigure::Default(*timeout_secs))
+                }
+                ToolBackend::Http { timeout_secs, .. } => Some(OwnFigure::Limit(*timeout_secs)),
+                ToolBackend::Mcp { client, .. } => {
+                    Some(OwnFigure::Limit(client.request_timeout().as_secs()))
+                }
+                ToolBackend::BuiltIn(_) | ToolBackend::Plugin(_) => None,
+            })
+    }
+
+    /// Whether `tool_name`'s parameters declare a `timeout_secs` a number
+    /// fills (TIMEOUT-ONE-CLOCK, item 19): only then is a call it cut told
+    /// to ask for more with one, since a schema that does not name the
+    /// parameter may refuse it (strict mode refuses every parameter it does
+    /// not name).
+    pub(crate) fn declares_timeout_secs(&self, tool_name: &str) -> bool {
+        self.tools.get(tool_name).is_some_and(|entry| {
+            entry.definition.parameters["properties"]
+                .get("timeout_secs")
+                .is_some_and(|prop| {
+                    matches!(
+                        prop.get("type").and_then(serde_json::Value::as_str),
+                        None | Some("integer" | "number")
+                    )
+                })
+        })
     }
 
     /// Return the names of tools that use command backends (i.e., execute via shell).
@@ -1408,7 +1623,7 @@ async fn execute_http(
     method: &str,
     url_template: &str,
     headers: &HashMap<String, String>,
-    timeout_secs: u64,
+    timeout: std::time::Duration,
     arguments: &serde_json::Value,
 ) -> Result<String, String> {
     // Replace {param_name} placeholders in URL with URL-encoded argument values
@@ -1441,8 +1656,6 @@ async fn execute_http(
     // The URL template may contain user-controlled placeholders that could
     // redirect requests to internal/private endpoints.
     crate::tools::url_validation::validate_url(&url)?;
-
-    let timeout = std::time::Duration::from_secs(timeout_secs);
 
     let mut request = match method.to_uppercase().as_str() {
         "POST" => client.post(&url),
@@ -1479,7 +1692,7 @@ async fn execute_http(
                 break;
             }
         }
-        String::from_utf8_lossy(&body_bytes).into_owned()
+        String::from_utf8_lossy_owned(body_bytes)
     };
 
     if status.is_success() {
@@ -1498,6 +1711,8 @@ async fn execute_http(
 /// (storage design §10, R26): the template's placeholders are substituted
 /// and checked first — a missing argument is named as such whatever the
 /// context — then the folder is resolved, and a call with none is refused.
+/// It is killed after `timeout_secs`: its author's, or — under the sandbox's
+/// cut (TIMEOUT-ONE-CLOCK) — the ceiling's highest setting.
 async fn execute_command(
     command: &str,
     args_template: Option<&str>,
@@ -1539,8 +1754,10 @@ async fn execute_command(
     // its time runs out or its call is dropped.
     let output = match run_bounded(cmd, timeout).await {
         Ok(output) => output,
+        // Only a call no sandbox cuts gets here (TIMEOUT-ONE-CLOCK): nothing
+        // would lift its figure, so the message is the limit alone.
         Err(RunFailure::TimedOut) => {
-            return Err(format!("Command timed out after {}s", timeout_secs));
+            return Err(format!("Command timed out after {timeout_secs}s"));
         }
         Err(RunFailure::Spawn(e) | RunFailure::Io(e)) => {
             return Err(format!("Failed to execute command: {}", e));
@@ -1588,13 +1805,15 @@ fn command_folder(ctx: Option<&ToolContext>) -> Result<PathBuf, String> {
 /// * Then [`validate_tool_arguments`] names every problem it finds.
 ///
 /// Nothing is decoded here. A JSON string whose text is an object is read as
-/// that object where a provider's answer is parsed (`openalpaca_llm`'s
-/// reader), before the sandbox sees the call; one that reaches the registry by
-/// another path — a plugin's proxied call — stays the string it is, refused by
-/// a schema that asks for an object, as it always was. The sanitizer saw only
-/// its outer text, where a backtick, a newline, `../` or a NUL inside it are
-/// still JSON escapes, so reading it here would hand the tool what the
-/// sanitizer never checked (found by review; pinned by
+/// that object where a streamed or OpenAI-compatible answer is parsed
+/// (`openalpaca_llm`'s reader), and one that reaches the sandbox still a
+/// string — a plugin's call, an Anthropic-compatible server's non-streamed
+/// `tool_use` — at the sandbox's entry, before the sanitizer (N-TOOL-8,
+/// `SandboxManager::execute_tool`); one that still reaches the registry as a
+/// string stays the string it is, refused by a schema that asks for an object,
+/// as it always was. Read here, after the sanitizer, it would hand the tool
+/// what the sanitizer never checked: a backtick, a newline, `../` or a NUL
+/// inside it are JSON escapes in its outer text (found by review; pinned by
 /// `a_json_string_cannot_carry_past_the_sanitizer_what_it_refuses_in_an_object`).
 fn check_arguments(
     definition: &ToolDefinition,

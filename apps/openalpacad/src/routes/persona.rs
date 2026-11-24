@@ -182,4 +182,4 @@ fn with_etag(mut response: Response, sha256: &str) -> Response {
 }
 
 #[cfg(test)]
-mod tests;
+pub(crate) mod tests;

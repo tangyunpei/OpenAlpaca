@@ -1,11 +1,10 @@
-# cargo-deny's policy (P34; DU-21 (a), B-22 (b)). CI reads it in
-# .github/workflows/audit.yml — on every pull request, every push to main and
-# weekly — and locally:
+# cargo-deny's policy (P34; DU-21 (a), B-22 (b)). There is no remote CI (the
+# owner, 2026-11-06): it is read locally, by hand, from the root:
 #   cargo deny --locked --all-features --workspace check advisories licenses sources
-# A red run is the owner's to answer (DU-21 (a)): on an unchanged lock (the
-# weekly run) it is a new advisory, answered by a lock refresh, a bump or a
-# reasoned ignore below; on a pull request it belongs to the change that moved
-# the lock. No check here is a bans check.
+# A red run is the owner's to answer (DU-21 (a)): on an unchanged lock it is a
+# new advisory, answered by a lock refresh, a bump or a reasoned ignore below;
+# on a change that moved the lock it belongs to that change. No check here is
+# a bans check.
 
 [advisories]
 # A yanked version in Cargo.lock fails the check.
@@ -17,10 +16,21 @@ yanked = "deny"
 unmaintained = "workspace"
 unsound = "workspace"
 # Every ignore names why it is safe to carry and what lifts it. The same ids
-# are cargo-audit's (.cargo/audit.toml) and the DU-23 (c) waiver record's.
-# None today: P34's three, on calamine 0.36.1's own zip 8.6.0, were lifted
-# when calamine 0.37 moved to zip ^9.
-ignore = []
+# are cargo-audit's (.cargo/audit.toml).
+# P34's three, on calamine 0.36.1's own zip 8.6.0, were lifted when calamine
+# 0.37 moved to zip ^9.
+#
+# RUSTSEC-2026-0543: chrono 0.4.45 is flagged unmaintained (not vulnerable;
+# all versions, no patched release, and 0.4.45 is the newest). Eight members
+# name chrono directly, and rmcp, teloxide-core and tokio-cron-scheduler bring
+# it in whatever the workspace does. The owner accepted it on 2026-11-17
+# until the workspace moves off chrono, which he tied to the openalpaca_wake
+# rework. Lifted when no workspace manifest (a member's, or the root's
+# [workspace.dependencies]) names chrono: scripts/repo_policy.py's `chrono`
+# rule then fails until this ignore goes.
+ignore = [
+    { id = "RUSTSEC-2026-0543", reason = "chrono unmaintained; accepted 2026-11-17 until the workspace moves off chrono" },
+]
 
 [licenses]
 # Each licence a crate in Cargo.lock needs, by name, and nothing more: a crate
@@ -40,6 +50,13 @@ allow = [
     "MPL-2.0",
     "Unicode-3.0",
     "Zlib",
+]
+# A licence allowed for one crate only, not the workspace: MIT-0 (MIT No
+# Attribution, OSI-approved) for borrow-or-share, which jsonschema brings in
+# (referencing -> fluent-uri -> borrow-or-share, none optional; M82). Not in
+# `allow`, so no other crate and no JavaScript package gains it.
+exceptions = [
+    { crate = "borrow-or-share", allow = ["MIT-0"] },
 ]
 confidence-threshold = 0.8
 

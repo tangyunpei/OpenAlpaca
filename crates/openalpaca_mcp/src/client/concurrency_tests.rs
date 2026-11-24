@@ -142,9 +142,9 @@ async fn a_disconnect_does_not_wait_for_a_call_in_flight_and_the_call_reads_clos
         .await
         .expect("the call ends with the close")
         .expect("call task");
-    assert!(
-        matches!(outcome, Err(McpError::Closed)),
-        "a call the owner's disable cut off reads Closed, got {:?}",
-        outcome.map(|_| "a result")
+    std::assert_matches!(
+        outcome,
+        Err(McpError::Closed),
+        "a call the owner's disable cut off reads Closed",
     );
 }

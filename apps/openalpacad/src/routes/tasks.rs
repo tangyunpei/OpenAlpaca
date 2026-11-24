@@ -4,7 +4,8 @@
 //! GET  /v1/tasks           -> list tasks (query: created_by, status, limit)
 //! GET  /v1/tasks/{id}      -> get a single task + agent runs
 //! GET  /v1/tasks/{id}/timeline -> the run's swimlanes (GAP-09)
-//! POST /v1/tasks/{id}/action -> perform action (cancel, pause, resume, start)
+//! POST /v1/tasks/{id}/action -> perform action (cancel, resume, start; `pause`
+//!                               is refused `409` until a later design)
 //!                               `resume` un-pauses a paused run, and — on an
 //!                               `interrupted` one, with `resume_enabled` —
 //!                               replays it from its session log (§5.6c, S2)
@@ -31,8 +32,8 @@ use openalpaca_core::context::SharedContext;
 use openalpaca_core::daemon_config::RoutingConfig;
 use openalpaca_core::events::SystemEvent;
 use openalpaca_core::orchestrator::{
-    Orchestrator, ParsedOutcomeFields, TaskActionError, TaskLaunchError, apply_task_action,
-    parse_outcome,
+    Orchestrator, PAUSE_UNSUPPORTED, ParsedOutcomeFields, TaskActionError, TaskLaunchError,
+    apply_task_action, parse_outcome,
 };
 use openalpaca_core::runner::steering::{SteeringMsg, SteeringOrigin, SteeringPushError, push_steering};
 use openalpaca_core::security::confirmation::ConfirmationBroker;
@@ -184,7 +185,23 @@ pub async fn list_tasks_handler(
     State(state): State<Arc<AppState>>,
     Query(query): Query<ListTasksQuery>,
 ) -> impl IntoResponse {
-    let repo = TaskRepository::new(&state.db);
+    list_tasks(
+        &state.db,
+        &state.gateway.shared_context,
+        &state.local_user_id,
+        query,
+    )
+}
+
+/// `GET /v1/tasks`'s answer (split out for the API contract's sample,
+/// API-CONTRACT).
+fn list_tasks(
+    db: &Database,
+    shared_context: &SharedContext,
+    owner_id: &str,
+    query: ListTasksQuery,
+) -> (StatusCode, Json<serde_json::Value>) {
+    let repo = TaskRepository::new(db);
     // Clamped (D13): an oversized page is not just a big response — the grouped
     // cost query below binds one SQLite parameter per row, so a page of 1 000
     // asked for more than the 999-variable limit and every `cost_usd` came back
@@ -225,7 +242,7 @@ pub async fn list_tasks_handler(
             // of one per row. A read failure yields an empty map, so the page
             // renders with zeroes rather than 500-ing.
             let task_ids: Vec<String> = tasks.iter().map(|t| t.id.clone()).collect();
-            let costs = LlmUsageRepository::new(&state.db)
+            let costs = LlmUsageRepository::new(db)
                 .cost_for_tasks(&task_ids)
                 .unwrap_or_else(|e| {
                     // The same stance as the subagent counts below: a read
@@ -234,7 +251,7 @@ pub async fn list_tasks_handler(
                     tracing::warn!("Failed to read costs for task list: {e}");
                     Default::default()
                 });
-            let subagent_counts = SubagentSpanRepository::new(&state.db)
+            let subagent_counts = SubagentSpanRepository::new(db)
                 .counts_for_tasks(&task_ids)
                 .unwrap_or_else(|e| {
                     tracing::warn!("Failed to read subagent counts for task list: {e}");
@@ -242,7 +259,7 @@ pub async fn list_tasks_handler(
                 });
             // M4, the same shape again: one grouped query for the page, so a
             // row's artifact count is what the store holds for that run.
-            let produced_counts = FileAssetRepository::new(&state.db)
+            let produced_counts = FileAssetRepository::new(db)
                 .produced_counts_for_tasks(&task_ids)
                 .unwrap_or_else(|e| {
                     tracing::warn!("Failed to read produced artifact counts for task list: {e}");
@@ -258,8 +275,7 @@ pub async fn list_tasks_handler(
                     let subagent_count = subagent_counts.get(&t.id).copied().unwrap_or(0);
                     // R40 — an in-memory lookup per row (the registered inbox),
                     // no query: the list stays one page, three queries.
-                    let steerable =
-                        is_steerable(&t, &state.gateway.shared_context, &state.local_user_id);
+                    let steerable = is_steerable(&t, shared_context, owner_id);
                     TaskSummaryResponse {
                         task: t,
                         outcome,
@@ -286,24 +302,39 @@ pub async fn get_task_handler(
     State(state): State<Arc<AppState>>,
     Path(id): Path<String>,
 ) -> impl IntoResponse {
-    let repo = TaskRepository::new(&state.db);
+    get_task(
+        &state.db,
+        &state.gateway.shared_context,
+        &state.local_user_id,
+        &id,
+    )
+}
 
-    match repo.get(&id) {
+/// `GET /v1/tasks/{id}`'s answer (split out for the API contract's sample,
+/// API-CONTRACT).
+fn get_task(
+    db: &Database,
+    shared_context: &SharedContext,
+    owner_id: &str,
+    id: &str,
+) -> (StatusCode, Json<serde_json::Value>) {
+    let repo = TaskRepository::new(db);
+
+    match repo.get(id) {
         Ok(Some(mut task)) => {
             let mut outcome = parse_outcome(&task);
             // M4: what the run produced is what `file_assets` holds for it,
             // whoever wrote it — the lead or a subagent — and whether or not
             // the row's stored count was ever right.
-            let produced = FileAssetRepository::new(&state.db)
-                .produced_for_task(&id)
+            let produced = FileAssetRepository::new(db)
+                .produced_for_task(id)
                 .map(|p| p.len() as i64)
                 .unwrap_or_else(|e| {
                     tracing::warn!(task_id = %id, "Failed to count produced artifacts: {e}");
                     0
                 });
             reconcile_artifact_count(&mut task, outcome.as_mut(), produced);
-            let steerable =
-                is_steerable(&task, &state.gateway.shared_context, &state.local_user_id);
+            let steerable = is_steerable(&task, shared_context, owner_id);
             (
                 StatusCode::OK,
                 Json(
@@ -500,38 +531,73 @@ pub async fn task_action_handler(
         );
     }
 
-    // Shared with the orchestrator chat handler: registry-first resolution with
-    // DB fallback, transition validation, token cancel, persistence, lane sync,
-    // and TaskUpdated event all live in core.
-    let outcome = apply_task_action(
+    match transition_task(
         &state.gateway.shared_context,
         &state.gateway.lane_manager,
         &state.gateway.bus,
-        Some(&state.db),
+        &state.db,
         &id,
         &request.action,
-    );
+    ) {
+        Some(answer) => answer,
+        // §5.6c — `resume` is two verbs sharing one word, and the row decides
+        // which. `apply_task_action` owns the original: paused → running, a
+        // pure transition. Everything it refuses (`CannotResume`) is where
+        // S2's replay resume takes over, so the un-pause path is untouched
+        // byte for byte and the new verb answers exactly the cases the old one
+        // never could — starting with `interrupted`, which is the only status
+        // it accepts.
+        None => {
+            resume_task(
+                &state.orchestrator,
+                &state.db,
+                &state.local_user_id,
+                &id,
+                request.unattended,
+            )
+            .await
+        }
+    }
+}
 
-    // §5.6c — `resume` is two verbs sharing one word, and the row decides
-    // which. `apply_task_action` owns the original: paused → running, a pure
-    // transition. Everything it refuses (`CannotResume`) is where S2's replay
-    // resume takes over, so the un-pause path is untouched byte for byte and
-    // the new verb answers exactly the cases the old one never could —
-    // starting with `interrupted`, which is the only status it accepts.
-    if request.action == RESUME_ACTION
-        && matches!(outcome, Err(TaskActionError::CannotResume { .. }))
-    {
-        return resume_task(
-            &state.orchestrator,
-            &state.db,
-            &state.local_user_id,
-            &id,
-            request.unattended,
-        )
-        .await;
+/// The route's transitions — `cancel` and the un-pause `resume` — and its
+/// refusal of `pause`, split out so every status code is provable without an
+/// `AppState`. `None` is a `resume` that [`apply_task_action`] refused
+/// (`CannotResume`): §5.6c's replay resume answers it, in the handler.
+///
+/// PAUSE-OFF: `pause` is refused first, `409` with the chat's own sentence
+/// ([`PAUSE_UNSUPPORTED`]), until a later design: a pause never stopped a
+/// run, so no row, registry entry or lane moves and no `TaskUpdated` is
+/// published. It stays one of [`VALID_ACTIONS`] — a known word, refused, not
+/// a typo's `400`.
+fn transition_task(
+    shared_context: &SharedContext,
+    lane_manager: &openalpaca_core::lane::LaneManager,
+    bus: &EventBus,
+    db: &Database,
+    id: &str,
+    action: &str,
+) -> Option<Response> {
+    if action == PAUSE_ACTION {
+        return Some(
+            (
+                StatusCode::CONFLICT,
+                Json(serde_json::json!({ "error": PAUSE_UNSUPPORTED })),
+            )
+                .into_response(),
+        );
     }
 
-    match outcome {
+    // Shared with the orchestrator chat handler: registry-first resolution with
+    // DB fallback, transition validation, token cancel, persistence, lane sync,
+    // and TaskUpdated event all live in core.
+    let outcome = apply_task_action(shared_context, lane_manager, bus, Some(db), id, action);
+
+    if action == RESUME_ACTION && matches!(outcome, Err(TaskActionError::CannotResume { .. })) {
+        return None;
+    }
+
+    let answer = match outcome {
         Ok(new_status) => (
             StatusCode::OK,
             Json(serde_json::json!({
@@ -549,6 +615,8 @@ pub async fn task_action_handler(
                 "error": format!("Cannot cancel a task in '{}' state", current)
             })),
         ),
+        // Not reached from here since PAUSE-OFF (`pause` is refused above);
+        // the match stays exhaustive over core's error.
         Err(TaskActionError::CannotPause { current }) => (
             StatusCode::CONFLICT,
             Json(serde_json::json!({
@@ -561,18 +629,20 @@ pub async fn task_action_handler(
                 "error": format!("Can only resume a paused task, current state: '{}'", current)
             })),
         ),
-        Err(TaskActionError::UnknownAction) => unknown_action(&request.action),
+        Err(TaskActionError::UnknownAction) => unknown_action(action),
         Err(TaskActionError::Db(e)) => (
             StatusCode::INTERNAL_SERVER_ERROR,
             Json(serde_json::json!({ "error": e })),
         ),
-    }
-    .into_response()
+    };
+    Some(answer.into_response())
 }
 
-/// Every word `POST /v1/tasks/{id}/action` accepts: the three transitions
+/// Every word `POST /v1/tasks/{id}/action` knows: the three transitions
 /// `apply_task_action` knows, plus [`START_ACTION`], which this route answers
 /// itself. Named so the refusal cannot list a set the route does not honour.
+/// `pause` is among them though the route refuses it ([`PAUSE_ACTION`]):
+/// a word the route knows and refuses is a `409`, not an unknown one's `400`.
 ///
 /// `resume` is one word over two verbs — un-pause a paused run, or (§5.6c,
 /// opt-in) replay-resume an interrupted one — so the set does not grow.
@@ -622,6 +692,10 @@ const START_ACTION: &str = "start";
 /// [`apply_task_action`] has refused it — see [`task_action_handler`].
 const RESUME_ACTION: &str = "resume";
 
+/// The action word the route refuses before [`apply_task_action`]
+/// (PAUSE-OFF) — see [`transition_task`].
+const PAUSE_ACTION: &str = "pause";
+
 /// `Ok(())` when `id` names a run this owner started **on a lane this owner
 /// owns**; the refusal otherwise.
 ///
@@ -635,7 +709,7 @@ const RESUME_ACTION: &str = "resume";
 ///
 /// A run this caller cannot see gets the same `404` a missing one does — never
 /// a `403`, which would confirm that the id belongs to somebody.
-#[allow(
+#[expect(
     clippy::result_large_err,
     reason = "the Err is the route's answer, an axum Response"
 )]
@@ -937,7 +1011,7 @@ fn is_steerable(task: &Task, shared_context: &SharedContext, owner_id: &str) -> 
 
 /// Apply one steering push, as a `Response`. Split out from the handler so
 /// every status code is provable without a router or an `AppState`.
-#[allow(
+#[expect(
     clippy::too_many_arguments,
     reason = "the handler's state, passed apart so no AppState is needed"
 )]
@@ -1091,7 +1165,7 @@ pub async fn steer_task_handler(
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
     use axum::body::to_bytes;
     use openalpaca_core::bus::EventBus;
@@ -2285,7 +2359,6 @@ mod tests {
     /// takes the same path production does; the run itself never gets far.
     struct StubLlm;
 
-    #[async_trait::async_trait]
     impl LlmProvider for StubLlm {
         fn name(&self) -> &str {
             "stub"
@@ -2301,6 +2374,7 @@ mod tests {
                 usage: Usage::default(),
                 finish_reason: FinishReason::Stop,
                 thinking: None,
+                echo: None,
                 parts: None,
             })
         }
@@ -2588,10 +2662,7 @@ mod tests {
         let (code, body) = split(start_task(&orchestrator, &db, LAUNCH_OWNER, "task-1", None)).await;
         assert_eq!(code, StatusCode::OK);
         assert_eq!(body["task_id"], "task-1", "D5: the id does not change");
-        assert!(matches!(
-            body["status"].as_str(),
-            Some("queued") | Some("running")
-        ));
+        std::assert_matches!(body["status"].as_str(), Some("queued") | Some("running"));
         // One row before, one row after — and it is the same row.
         assert_eq!(TaskRepository::new(&db).list_recent(10).unwrap().len(), 1);
     }
@@ -2855,6 +2926,54 @@ mod tests {
         assert_eq!(row.status, TaskStatus::Running);
     }
 
+    // ── PAUSE-OFF: the route refuses pause until a later design ──
+
+    /// **PAUSE-OFF.** `pause` on a running row is the chat's own sentence as a
+    /// `409`, and nothing moves: the row stays `running` and no `TaskUpdated`
+    /// reaches a subscriber taken before the call. A pause never stopped the
+    /// run it labelled.
+    #[tokio::test]
+    async fn pausing_a_running_run_is_a_409_that_moves_nothing() {
+        let (_dir, db) = launch_db(TaskStatus::Running, Some("write the changelog"));
+        let ctx = SharedContext::new();
+        let lanes = openalpaca_core::lane::LaneManager::new();
+        let bus = EventBus::default();
+        let mut events = bus.subscribe();
+
+        let answer = transition_task(&ctx, &lanes, &bus, &db, "task-1", "pause")
+            .expect("pause is answered here, never by the replay resume");
+        let (status, body) = split(answer).await;
+
+        assert_eq!(status, StatusCode::CONFLICT);
+        assert_eq!(body, serde_json::json!({ "error": PAUSE_UNSUPPORTED }));
+        let row = TaskRepository::new(&db).get("task-1").unwrap().unwrap();
+        assert_eq!(row.status, TaskStatus::Running, "the row is not paused");
+        std::assert_matches!(
+            events.try_recv(),
+            Err(tokio::sync::broadcast::error::TryRecvError::Empty),
+            "no TaskUpdated is published"
+        );
+    }
+
+    /// The kept path: a row an earlier build left `paused` is still un-paused
+    /// by the route's `resume`, `200` and `running`, so no row is stuck.
+    #[tokio::test]
+    async fn a_row_left_paused_is_still_resumed_by_the_route() {
+        let (_dir, db) = launch_db(TaskStatus::Paused, Some("write the changelog"));
+        let ctx = SharedContext::new();
+        let lanes = openalpaca_core::lane::LaneManager::new();
+        let bus = EventBus::default();
+
+        let answer = transition_task(&ctx, &lanes, &bus, &db, "task-1", "resume")
+            .expect("a paused row is un-paused here, not replayed");
+        let (status, body) = split(answer).await;
+
+        assert_eq!(status, StatusCode::OK, "{body}");
+        assert_eq!(body["status"], "running");
+        let row = TaskRepository::new(&db).get("task-1").unwrap().unwrap();
+        assert_eq!(row.status, TaskStatus::Running);
+    }
+
     /// The refusal a client sees for a typo has to list the verb the route
     /// actually grew, or `start` looks unimplemented.
     #[test]
@@ -2954,5 +3073,131 @@ mod tests {
             serde_json::from_str(r#"{"unattended":true}"#).expect("parse");
         assert_eq!(rerun.unattended, Some(true));
         assert_eq!(RerunTaskRequest::default().unattended, None);
+    }
+
+    // ── The API contract's samples (API-CONTRACT) ─────────────────────
+
+    /// `/v1/tasks*`'s JSON bodies for the API contract's folder: a finished
+    /// run with a mixed outcome and a lane, a live run steered, one
+    /// created, re-run, started, cancelled and replay-resumed.
+    pub(crate) async fn contract_samples(out: &mut crate::contract::Samples) {
+        use crate::contract::ok_body;
+        let (_dir, db) = timeline_db(TaskStatus::Running);
+        open_span(&db, "n1", "review_agent", "review_agent::a");
+        let mut finished = make_test_task();
+        finished.id = "task-2".to_string();
+        finished.description = Some("write the changelog".to_string());
+        finished.workspace_id = Some("project-1".to_string());
+        finished.source_task_id = Some("task-1".to_string());
+        finished.session_id = Some("s1".to_string());
+        finished.progress_current = Some(1);
+        finished.progress_total = Some(2);
+        finished.outcome_kind = Some(OutcomeKind::Mixed);
+        finished.artifact_count = 1;
+        finished.outcome_json = Some(
+            serde_json::json!({
+                "summary": "Report with a chart",
+                "outcome_kind": "mixed",
+                "artifacts": [
+                    {"key": "chart.png", "label": "Chart", "agent_id": "researcher", "step_order": 0},
+                ],
+                "no_artifact_reason": "none"
+            })
+            .to_string(),
+        );
+        TaskRepository::new(&db)
+            .create(&finished)
+            .expect("create task");
+        let (shared, bus, _inbox) = steerable(16);
+        let query = ListTasksQuery {
+            status: None,
+            created_by: None,
+            limit: None,
+        };
+        let (_, Json(body)) = list_tasks(&db, &shared, STEER_OWNER, query);
+        out.response("get-tasks", body);
+        let (_, Json(body)) = get_task(&db, &shared, STEER_OWNER, "task-2");
+        out.response("get-tasks-id", body);
+        let (_, Json(body)) = task_timeline(&db, None, "task-1");
+        out.response("get-tasks-id-timeline", body);
+        let body = ok_body(steer_task(
+            &db,
+            &shared,
+            &bus,
+            &RoutingConfig::default(),
+            STEER_OWNER,
+            "task-1",
+            steer_request("focus on the tests"),
+            None,
+        ))
+        .await;
+        out.response("post-tasks-id-steer", body);
+        let lanes = openalpaca_core::lane::LaneManager::new();
+        let body = ok_body(
+            transition_task(&shared, &lanes, &bus, &db, "task-1", "cancel")
+                .expect("a cancel answers"),
+        )
+        .await;
+        out.response("post-tasks-id-action-cancel", body);
+
+        let created = ok_body(create_task(
+            &db,
+            &SharedContext::new(),
+            &lanes,
+            &bus,
+            LAUNCH_OWNER,
+            CreateTaskRequest {
+                title: "Ship it".to_string(),
+                description: None,
+                priority: None,
+                created_by: "someone-else".to_string(),
+                source_lane: "user-1:gui".to_string(),
+                unattended: false,
+            },
+        ))
+        .await;
+        out.response("post-tasks", created);
+
+        for (name, body) in launched().await {
+            out.response(name, body);
+        }
+    }
+
+    /// The three launch verbs' answers. Each dispatches a lead agent, which
+    /// outlives the verb; so they run on a runtime of their own, on a thread
+    /// holding a temporary home store, and the runtime is dropped — what it
+    /// started with it — before the guard is, as a `#[tokio::test]` of
+    /// their own would end.
+    async fn launched() -> Vec<(&'static str, serde_json::Value)> {
+        use crate::contract::ok_body;
+        tokio::task::spawn_blocking(|| {
+            let home = tempfile::tempdir().expect("home store");
+            let _env = crate::test_util::HomeStoreGuard::set(&home.path().join(".openalpaca"));
+            let runtime = tokio::runtime::Builder::new_multi_thread()
+                .enable_all()
+                .build()
+                .expect("a runtime");
+            let bodies = runtime.block_on(async {
+                let mut bodies = Vec::new();
+                let (_dir, db) = launch_db(TaskStatus::Completed, Some("write the changelog"));
+                let orchestrator = launch_orchestrator(&db, true);
+                let response = rerun_task(&orchestrator, &db, LAUNCH_OWNER, "task-1", None);
+                bodies.push(("post-tasks-id-rerun", ok_body(response).await));
+                let (_dir, db) = launch_db(TaskStatus::Queued, Some("write the changelog"));
+                let orchestrator = launch_orchestrator(&db, true);
+                let response = start_task(&orchestrator, &db, LAUNCH_OWNER, "task-1", None);
+                bodies.push(("post-tasks-id-action-start", ok_body(response).await));
+                let (_dir, logs, db) = resumable_db(TaskStatus::Interrupted);
+                let orchestrator = launch_orchestrator(&db, true);
+                with_session_logs(&orchestrator, logs.path(), true);
+                let response = resume_task(&orchestrator, &db, LAUNCH_OWNER, "task-1", None).await;
+                bodies.push(("post-tasks-id-action-resume", ok_body(response).await));
+                bodies
+            });
+            drop(runtime);
+            bodies
+        })
+        .await
+        .expect("the launch samples")
     }
 }

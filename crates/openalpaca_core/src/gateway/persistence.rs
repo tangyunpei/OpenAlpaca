@@ -413,6 +413,7 @@ mod tests {
             size_bytes: 123,
             extracted_text: None,
             storage_path: "/tmp/sample.pdf".to_string(),
+            extraction_failed: false,
         }
     }
 
@@ -425,6 +426,7 @@ mod tests {
             size_bytes: text.len() as i64,
             extracted_text: Some(text.to_string()),
             storage_path: "/tmp/resume.docx".to_string(),
+            extraction_failed: false,
         }
     }
 

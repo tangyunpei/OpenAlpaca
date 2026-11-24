@@ -222,6 +222,35 @@ async fn a_hand_edit_still_reloads() {
     assert_eq!(h.web_search.load().timeout_secs, 42);
 }
 
+/// C7 (M-3): a hand edit pinning a model alias under
+/// `[providers.<name>.model_aliases]` reaches the router on the watcher's
+/// tick, and removing the pin gives the table's answer back — here Ollama's,
+/// which has no compiled row, so the alias is the parent's own model.
+#[tokio::test]
+async fn a_hand_edited_alias_pin_reaches_the_router_on_reload() {
+    use openalpaca_llm::ModelAlias;
+    let two_models =
+        format!("{CONFIG}\n[models.\"qwen3:4b\"]\nprovider = \"ollama\"\ncontext = 8192\n");
+    let h = Harness::with_config(two_models.clone());
+    assert!(h.router.is_routable("llama3.1") && h.router.is_routable("qwen3:4b"));
+    let fast = |h: &Harness| {
+        h.router
+            .resolve_alias(ModelAlias::Fast, Some("llama3.1"))
+            .expect("fast resolves")
+            .model
+    };
+    assert_eq!(fast(&h), "llama3.1", "no pin: the parent's model");
+
+    let pinned = format!("{two_models}\n[providers.ollama.model_aliases]\nfast = \"qwen3:4b\"\n");
+    std::fs::write(&h.path, &pinned).expect("hand edit");
+    assert!(h.tick(), "a hand edit is not the daemon's write");
+    assert_eq!(fast(&h), "qwen3:4b", "the pin is taken on reload");
+
+    std::fs::write(&h.path, &two_models).expect("hand edit");
+    assert!(h.tick());
+    assert_eq!(fast(&h), "llama3.1", "the pin is gone on reload");
+}
+
 /// **L13.** Hand-editing `llm.toml` to enable a provider the daemon booted
 /// without used to do nothing until a restart: the tick reloads runtime
 /// config, models, the default and the key pools, and every one of those
@@ -277,4 +306,78 @@ async fn an_edit_does_not_re_register_a_provider_that_is_already_loaded() {
         "its declared [models] row is untouched"
     );
     assert_eq!(h.web_search.load().timeout_secs, 42);
+}
+
+/// What a test's subscriber writes, read back as text.
+#[derive(Clone, Default)]
+struct LogBuf(Arc<std::sync::Mutex<Vec<u8>>>);
+
+impl LogBuf {
+    fn text(&self) -> String {
+        String::from_utf8_lossy(&self.0.lock().expect("log buffer")).into_owned()
+    }
+}
+
+impl std::io::Write for LogBuf {
+    fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+        self.0.lock().expect("log buffer").extend_from_slice(buf);
+        Ok(buf.len())
+    }
+
+    fn flush(&mut self) -> std::io::Result<()> {
+        Ok(())
+    }
+}
+
+impl<'a> tracing_subscriber::fmt::MakeWriter<'a> for LogBuf {
+    type Writer = LogBuf;
+
+    fn make_writer(&'a self) -> Self::Writer {
+        self.clone()
+    }
+}
+
+/// RETIRED-ID (pending-decisions *Rev 125*: (a) with (c)): a hot reload
+/// says once more which ids a provider listed that the catalogue retired,
+/// though it runs no discovery for a provider already loaded, and in a
+/// file with no `[models]` table. An id the file itself names
+/// (`[orchestrator] model`, a retired one here) is not said: that half was
+/// closed as no change (*Rev 105*). Red on the parent (a no-op
+/// `warn_retired_listed` in the red run), whose tick says nothing.
+#[tokio::test]
+async fn a_hand_edit_names_each_listed_retired_id_once() {
+    // An Ollama whose one tag is named like a retired id: the listing
+    // path is the same for every provider.
+    let ollama = MockOllama::start(&["o3"], 32_768).await;
+    let with_ollama = format!(
+        "{NO_OLLAMA}\n[providers.ollama]\nenabled = true\nbase_url = \"{}\"\n",
+        ollama.base_url
+    );
+    let h = Harness::with_config(with_ollama.clone());
+    h.router.refresh_models_for(&ProviderType::Ollama).await;
+    assert!(h.router.is_routable("o3"), "listed");
+
+    let logs = LogBuf::default();
+    let subscriber = tracing_subscriber::fmt()
+        .with_writer(logs.clone())
+        .with_ansi(false)
+        .with_max_level(tracing::Level::WARN)
+        .finish();
+    let _default = tracing::subscriber::set_default(subscriber);
+
+    let edited = format!("{with_ollama}\n[web_search]\ntimeout_secs = 42\n");
+    std::fs::write(&h.path, &edited).expect("hand edit");
+    assert!(h.tick(), "a hand edit is not the daemon's write");
+
+    let text = logs.text();
+    let named = text
+        .lines()
+        .filter(|line| line.contains("retired in the catalogue"))
+        .collect::<Vec<_>>();
+    assert_eq!(named.len(), 1, "one line: {text}");
+    assert!(named[0].contains("model=o3"), "{text}");
+    assert!(
+        !named[0].contains("claude-haiku-4-5-20251001"),
+        "the file's own id is not said: {text}"
+    );
 }

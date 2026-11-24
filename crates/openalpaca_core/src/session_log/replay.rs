@@ -37,7 +37,7 @@
 //!   saying what happened.
 
 use super::reader::{LoggedRecord, read_records_after_torn};
-use super::record::{RESULTS_DIR, command_stub_budget};
+use super::record::{RESULTS_DIR, command_stub_budget, no_output_line};
 use super::{command_spill_stub, spill_stub};
 use crate::orchestrator::working_state::WorkingState;
 use chrono::{DateTime, Utc};
@@ -102,6 +102,11 @@ pub struct ReplayPlan {
     /// `subagent_open` and `subagent_close` records left them (N-LEAD-4) —
     /// what the resumed run's tracker is rebuilt from.
     pub subagents: Vec<ReplayedSubagent>,
+    /// The run ids of the subagents spawned with a `result_schema` — those
+    /// whose `subagent_open` record carried `"typed": true` (SA-4, Y-15
+    /// (4)) — so a resumed run can tell a typed lane. Its close already
+    /// holds the typed outcome, which `restore` rebuilds as any close.
+    pub typed_runs: Vec<String>,
 }
 
 /// One subagent of the run, as the log left it (N-LEAD-4).
@@ -372,14 +377,19 @@ pub fn rebuild(session_dir: &Path, task_id: &str, tail_keep: usize) -> io::Resul
                 .as_deref()
                 .is_some_and(|span| !span.is_empty() && span != lead_span);
             match record.kind.as_str() {
-                "subagent_open" if is_subagent_lane(record) => {
-                    if let (Some(span), Some(run_id)) = (&record.span_id, subagent_run_id(record)) {
-                        subagent_lanes.insert(span.clone(), plan.subagents.len());
-                        plan.subagents.push(ReplayedSubagent {
-                            run_id,
-                            close: None,
-                        });
+                "subagent_open"
+                    if is_subagent_lane(record)
+                        && let (Some(span), Some(run_id)) =
+                            (&record.span_id, subagent_run_id(record)) =>
+                {
+                    if record.data.get("typed") == Some(&Value::Bool(true)) {
+                        plan.typed_runs.push(run_id.clone());
                     }
+                    subagent_lanes.insert(span.clone(), plan.subagents.len());
+                    plan.subagents.push(ReplayedSubagent {
+                        run_id,
+                        close: None,
+                    });
                 }
                 "subagent_close" if is_subagent_lane(record) => {
                     let close = ReplayedClose {
@@ -576,6 +586,8 @@ fn assistant_message(round: &Round) -> ChatMessage {
         tool_calls: (!round.calls.is_empty()).then(|| round.calls.clone()),
         tool_call_id: None,
         is_error: false,
+        echo: None,
+        notice: false,
     }
 }
 
@@ -606,7 +618,13 @@ fn tool_calls_of(data: &Value) -> Vec<ToolCall> {
 
 /// What the model is handed for one recorded result.
 ///
-/// A result that sat inline comes back as itself. A **spilled** one comes back
+/// A result that sat inline comes back as itself — bar a success with nothing
+/// to read, whose record keeps the tool's own empty output and which comes
+/// back as the line the loop handed the model in its place
+/// ([`no_output_line`], N-TOOL-6). A record whose spill was never written
+/// (`spill_ref`, beside `spill_error`) keeps only the result's first 2 KB
+/// as its string: that is a preview, not the output, and comes back as
+/// itself, never as the line. A **spilled** one comes back
 /// as the stub the loop handed the model when the call first ran, byte for
 /// byte, because the payload never entered the context the first time and
 /// re-priming must not put it there now: [`spill_stub`] from the record's
@@ -624,7 +642,14 @@ fn tool_calls_of(data: &Value) -> Vec<ToolCall> {
 /// replays as the head-only stub with one.
 fn result_text(session_dir: &Path, record: &LoggedRecord, plan: &mut ReplayPlan) -> String {
     match record.data.get("result") {
-        Some(Value::String(inline)) => inline.clone(),
+        Some(Value::String(inline)) => {
+            let ok = record.data.get("ok").and_then(Value::as_bool) == Some(true)
+                && record.data.get("spill_ref").is_none();
+            let tool = record.data.get("name").and_then(Value::as_str);
+            tool.filter(|_| ok)
+                .and_then(|tool| no_output_line(tool, inline))
+                .unwrap_or_else(|| inline.clone())
+        }
         Some(Value::Object(spilled)) => {
             plan.spills_referenced += 1;
             let preview = spilled

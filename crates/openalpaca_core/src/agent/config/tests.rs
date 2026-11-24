@@ -44,7 +44,7 @@ fn test_into_subagent() {
     assert_eq!(agent.id, "test_agent");
     assert_eq!(agent.name, "Test Agent");
     assert_eq!(agent.capabilities.len(), 2);
-    assert_eq!(agent.preset.temperature, 0.3);
+    assert_eq!(agent.preset.temperature, Some(0.3));
     assert_eq!(agent.constraints.max_tool_calls, Some(20));
     assert!(agent.status.is_available());
 }
@@ -222,7 +222,7 @@ fn test_from_template_roundtrip_to_subagent() {
     assert_eq!(agent.id, "bridge_agent");
     assert_eq!(agent.template_id, "bridge_agent");
     assert_eq!(agent.capabilities.len(), 2);
-    assert_eq!(agent.preset.temperature, 0.3);
+    assert_eq!(agent.preset.temperature, Some(0.3));
     assert!(
         agent
             .constraints
@@ -241,7 +241,7 @@ fn test_into_template() {
     assert_eq!(template.frontmatter.name, "Test Agent");
     assert_eq!(template.frontmatter.capabilities, vec!["web_search", "summarize"]);
     assert_eq!(template.frontmatter.denied_capabilities, vec!["shell_execute"]);
-    assert_eq!(template.frontmatter.temperature, 0.3);
+    assert_eq!(template.frontmatter.temperature, Some(0.3));
     assert_eq!(template.frontmatter.max_tool_calls, Some(20));
     assert!(
         template
@@ -263,11 +263,67 @@ fn test_into_template_roundtrip() {
 
     assert_eq!(agent.id, "test_agent");
     assert_eq!(agent.capabilities.len(), 2);
-    assert_eq!(agent.preset.temperature, 0.3);
+    assert_eq!(agent.preset.temperature, Some(0.3));
     assert!(
         agent
             .constraints
             .denied_capabilities
             .contains(&"shell_execute".to_string())
     );
+}
+
+/// TEMPLATE-TEMP-OPTIONAL (item 24 of the owner's answer of 2026-11-14): a
+/// template that sets no `temperature` gives a config without one —
+/// `GET /v1/agents/{id}/config`, so `openalpaca agents config`, shows none,
+/// neither a default 0.5 nor a `null` — from the template, from its
+/// instance, and from the instance a set rebuilds.
+#[test]
+fn a_template_that_sets_no_temperature_gives_a_config_without_one() {
+    use crate::agent::template::parse_agent_markdown;
+    let template = parse_agent_markdown(
+        "---\nid: \"plain_agent\"\nname: \"Plain\"\ndescription: \"Sets no temperature\"\n---\n\n## Persona\n\nCount.\n",
+    )
+    .unwrap();
+
+    let from_template = serde_json::to_value(AgentConfigFile::from_template(&template)).unwrap();
+    assert!(
+        from_template["preset"].get("temperature").is_none(),
+        "{from_template}"
+    );
+
+    let agent = template.to_subagent("plain_agent", "task-1");
+    let config = AgentConfigFile::from_subagent(&agent);
+    let from_instance = serde_json::to_value(&config).unwrap();
+    assert!(
+        from_instance["preset"].get("temperature").is_none(),
+        "{from_instance}"
+    );
+
+    let rebuilt = serde_json::to_value(config.into_subagent().preset).unwrap();
+    assert!(rebuilt.get("temperature").is_none(), "{rebuilt}");
+}
+
+/// The save path of `POST`/`PUT /v1/agent-templates`: the config JSON
+/// the route reads, `into_template`, then `render_agent_markdown`. A
+/// template that sets no temperature is saved without the line; one that
+/// sets a figure keeps it.
+#[test]
+fn a_template_saved_through_the_config_keeps_its_temperature_or_none() {
+    use crate::agent::template::{parse_agent_markdown, render_agent_markdown};
+    let save = |markdown: &str| {
+        let template = parse_agent_markdown(markdown).unwrap();
+        let body = serde_json::to_string(&AgentConfigFile::from_template(&template)).unwrap();
+        let config: AgentConfigFile = serde_json::from_str(&body).unwrap();
+        render_agent_markdown(&config.into_template())
+    };
+
+    let unset = save(
+        "---\nid: \"plain_agent\"\nname: \"Plain\"\ndescription: \"Sets no temperature\"\n---\n\n## Persona\n\nCount.\n",
+    );
+    assert!(!unset.contains("\ntemperature:"), "{unset}");
+
+    let set = save(
+        "---\nid: \"warm_agent\"\nname: \"Warm\"\ndescription: \"Sets one\"\ntemperature: 0.3\n---\n\n## Persona\n\nCount.\n",
+    );
+    assert!(set.contains("\ntemperature: 0.3\n"), "{set}");
 }

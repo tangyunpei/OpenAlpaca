@@ -109,7 +109,7 @@ pub struct StaticPromptSubFingerprints {
 /// Tagged cache value that pairs each output with its per-sub-field
 /// fingerprints. Replaces the previous `GlobalCacheValue` shape.
 #[derive(Debug, Clone)]
-#[allow(
+#[expect(
     clippy::large_enum_variant,
     reason = "each entry sits behind an Arc in the LRU, built once"
 )]
@@ -498,7 +498,10 @@ impl ComposeEngine {
     /// event `lane_id` field via `lane_key()`. The four layer inputs are
     /// passed in explicitly because the loader layer (a later phase) will
     /// build them from `ComposeRequest` + live orchestrator state.
-    #[allow(clippy::too_many_arguments)]
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "the four layer inputs are passed apart for the loader layer"
+    )]
     pub fn compose(
         &self,
         request: &ComposeRequest,

@@ -99,7 +99,13 @@ describe("StopDaemonDialog", () => {
     renderDialog();
     const dialog = screen.getByRole("dialog");
 
-    expect(dialog).toHaveTextContent("Nothing is finished first.");
+    expect(dialog).toHaveTextContent(
+      "Everything OpenAlpaca is doing stops within a few seconds.",
+    );
+    expect(dialog).toHaveTextContent(
+      "Nothing is finished first, except a file attachment whose text is being read: it gets up to about ten seconds to finish.",
+    );
+    expect(dialog).not.toHaveTextContent("stops immediately");
     expect(dialog).toHaveTextContent(/comes back marked .interrupted./);
     expect(dialog).toHaveTextContent("choose Rerun");
     expect(dialog).toHaveTextContent(

@@ -25,13 +25,11 @@ pub(super) async fn update_state_with_retry(
     const MAX_RETRIES: usize = 3;
     for attempt in 0..MAX_RETRIES {
         let repo = openalpaca_storage::repository::TaskRepository::new(db);
-        let existing = match repo.get(task_id) {
-            Ok(Some(t)) => t,
-            _ => return false,
+        let Ok(Some(existing)) = repo.get(task_id) else {
+            return false;
         };
-        let sj = match existing.state_json.as_deref() {
-            Some(s) => s,
-            None => return false,
+        let Some(sj) = existing.state_json.as_deref() else {
+            return false;
         };
         let mut state: TaskState = match serde_json::from_str(sj) {
             Ok(s) => s,
@@ -618,7 +616,10 @@ pub(super) fn finalize_task_with_outcome(
 }
 
 /// Update task status in registry + DB + emit event for a completed or failed task.
-#[allow(clippy::too_many_arguments)]
+#[expect(
+    clippy::too_many_arguments,
+    reason = "the task's final fields, for its registry entry, row and event"
+)]
 pub(super) fn finalize_task(
     ctx: &crate::context::SharedContext,
     bus: &crate::bus::EventBus,
@@ -708,6 +709,10 @@ pub(super) fn completion_status_line(
         LoopFinishReason::Truncated => Some("Task ended early (output truncated):"),
         LoopFinishReason::Cancelled => Some("Task was cancelled before finishing:"),
         LoopFinishReason::Error(_) => Some("Task ended with an error:"),
+        LoopFinishReason::ResultSubmitted => None,
+        LoopFinishReason::ResultRejected => {
+            Some("Task ended early (result did not match its result_schema):")
+        }
     }
 }
 
@@ -737,7 +742,10 @@ pub(super) fn completion_status_line(
 /// only reason that exists is that this message belongs to a run started
 /// there. `None` means "wherever this lane is talking now", which is what lane
 /// chatter wants, and it creates the lane's session if it has none.
-#[allow(clippy::too_many_arguments)]
+#[expect(
+    clippy::too_many_arguments,
+    reason = "the database and the columns of the message row it writes"
+)]
 pub fn persist_conversation(
     db: &openalpaca_storage::Database,
     lane_key: &str,
@@ -810,7 +818,10 @@ pub fn persist_conversation(
 ///
 /// A failure to link is logged, never fatal: the report itself is the record of
 /// the run, and losing a chip must not lose the message.
-#[allow(clippy::too_many_arguments)]
+#[expect(
+    clippy::too_many_arguments,
+    reason = "the database and the columns of the report's message row"
+)]
 pub fn persist_completion_report(
     db: &openalpaca_storage::Database,
     lane_key: &str,

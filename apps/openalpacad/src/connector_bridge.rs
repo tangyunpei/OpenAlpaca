@@ -4,7 +4,6 @@
 //! `ConnectorSendBridge` — outbound message sending via Telegram + iMessage.
 
 use arc_swap::ArcSwap;
-use async_trait::async_trait;
 use openalpaca_core::orchestrator::{ConnectorSendProvider, ConnectorStatusProvider};
 use openalpaca_storage::{Database, PreferenceRepository};
 use std::sync::Arc;
@@ -159,7 +158,6 @@ impl ConnectorSendBridge {
     }
 }
 
-#[async_trait]
 impl ConnectorSendProvider for ConnectorSendBridge {
     async fn send_message(
         &self,
@@ -479,7 +477,7 @@ mod tests {
     fn validate_telegram_recipient_default() {
         let result = validate_telegram_recipient("default");
         assert!(result.is_ok());
-        assert!(matches!(result.unwrap(), TelegramRecipient::Default));
+        std::assert_matches!(result.unwrap(), TelegramRecipient::Default);
     }
 
     #[test]
@@ -525,7 +523,7 @@ mod tests {
     fn validate_discord_recipient_default() {
         let result = validate_discord_recipient("default");
         assert!(result.is_ok());
-        assert!(matches!(result.unwrap(), DiscordRecipient::Default));
+        std::assert_matches!(result.unwrap(), DiscordRecipient::Default);
     }
 
     #[test]

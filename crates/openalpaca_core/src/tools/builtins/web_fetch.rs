@@ -1,7 +1,5 @@
 use crate::tools::registry::{BuiltInTool, RegisteredTool, ToolBackend};
-use async_trait::async_trait;
 use openalpaca_llm::ToolDefinition;
-use std::sync::Arc;
 
 use super::annotations_for_builtin;
 
@@ -25,7 +23,6 @@ fn http_error(status: reqwest::StatusCode) -> String {
 
 struct WebFetchTool;
 
-#[async_trait]
 impl BuiltInTool for WebFetchTool {
     async fn execute(&self, arguments: &serde_json::Value) -> Result<String, String> {
         let url = arguments
@@ -152,7 +149,7 @@ pub(super) fn web_fetch_tool() -> RegisteredTool {
                 serde_json::json!({"url": "https://api.example.com/data"}),
             ]),
         },
-        backend: ToolBackend::BuiltIn(Arc::new(WebFetchTool)),
+        backend: ToolBackend::built_in(WebFetchTool),
         provides_capabilities: vec!["web_access".into()],
         exempt_from_timeout: false,
         annotations: annotations_for_builtin("web_fetch"),

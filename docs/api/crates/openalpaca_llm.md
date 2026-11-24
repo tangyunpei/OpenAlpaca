@@ -1,6 +1,6 @@
 # `openalpaca_llm`
 
-> Generated from source by `python3 scripts/gen_api_docs.py`.
+> Generated from source by `python3.11 scripts/gen_api_docs.py`.
 
 ## Overview
 
@@ -22,18 +22,19 @@
 ## Re-exports
 
 - `pub use cli_backend::{ ClaudeCodeCliProvider, CliBackendConfig, CliBackendStatus, CliBackendsConfig, CodexCliProvider, detect_cli_backends, };`
-- `pub use config::llm_config::{ EndpointsConfig, EnvVarsConfig, KeyConfig, LlmRouterConfig, LlmRuntimeConfig, ModelConfigEntry, OrchestratorLlmConfig, ProviderConfig, ProviderDefaults, SecurityConfig, TimeoutsConfig, WebSearchConfig, build_router, build_router_with_secret_store, collect_secret_refs, migrate_llm_secrets, read_config, resolve_key_from_config, reverse_migrate_llm_secrets, write_config, };`
+- `pub use config::llm_config::{ EndpointsConfig, EnvVarsConfig, KeyConfig, LlmRouterConfig, LlmRuntimeConfig, ModelConfigEntry, OrchestratorLlmConfig, ProviderConfig, ProviderDefaults, SecurityConfig, TimeoutsConfig, WebSearchConfig, build_router, build_router_with_secret_store, collect_secret_refs, is_local_url, migrate_llm_secrets, read_config, resolve_key_from_config, reverse_migrate_llm_secrets, write_config, };`
 - `pub use config::settings_service::{ ConfigWriter, LlmSettingsService, OrchestratorConfigResponse, ProviderEnabledOutcome, SetProviderEnabledError, UpdateOrchestratorRequest, };`
 - `pub use error::LlmError;`
 - `pub use keys::credential_discovery::{ CredentialDiscoveryConfig, CredentialSource, DiscoveredCredential, DiscoveredCredentialInfo, OAuthToken, TokenManager, };`
 - `pub use keys::key_pool::{ ApiKey, CallResult, KeyGuard, KeyHealthStatus, KeyPool, KeyPoolError, KeyPriority, KeySource, KeyStatus, ProviderType, SelectionStrategy, mask_secret, };`
 - `pub use keys::secret_store::{ CachingSecretStore, KeyringSecretStore, MemorySecretStore, SecretStore, };`
 - `pub use routing::cost_tracker::{ CacheStats, CallRecord, CostSnapshot, CostTracker, ModelUsageStats, UsageStats, };`
-- `pub use routing::model_registry::{ DiscoveredModel, ModelEntry, ModelInfo, ModelRegistry, PricingInfo, ProviderDiscovery, };`
+- `pub use routing::model_alias::{ALIAS_TABLE, AliasRow, ModelAlias, ModelChoice, compiled_alias};`
+- `pub use routing::model_registry::{ CacheRates, DiscoveredModel, LongPromptRate, ModelEntry, ModelInfo, ModelRegistry, PricingInfo, ProviderDiscovery, RequestContract, };`
 - `pub use routing::provider_usage::{ExternalUsage, ProviderUsageSummary, ProviderUsageTracker};`
 - `pub use routing::rate_limiter::{ CircuitState, RateLimitConfig, RateLimiterRegistry, backoff_with_jitter, };`
-- `pub use routing::router::{ LlmCapacityInfo, LlmRouter, LlmRouterError, ProviderEntry, RateHeadroom, RequestContext, RoutedStream, RouterRequest, };`
-- `pub use streaming::collect_stream;`
+- `pub use routing::router::{ AliasResolution, LlmRouter, LlmRouterError, ProviderEntry, RateHeadroom, RequestContext, RoutedStream, RouterRequest, };`
+- `pub use streaming::{collect_stream, collect_stream_idle};`
 - `pub use tool_arguments::UnreadableArguments;`
 - `pub use types::*;`
 

@@ -5,7 +5,6 @@ use crate::lane::{LaneKey, LaneManager};
 use crate::memory::learning::LearningQueue;
 use crate::memory::service::MemoryUsed;
 use crate::security::policy::{Principal, Scope};
-use async_trait::async_trait;
 use openalpaca_api::events::EventSource;
 use openalpaca_storage::Database;
 use std::sync::Arc;
@@ -20,6 +19,12 @@ pub struct ResolvedAttachment {
     pub size_bytes: i64,
     pub extracted_text: Option<String>,
     pub storage_path: String,
+    /// The file's text extraction failed: its row is `Error`, as distinct
+    /// from pending (`Uploaded`, `Processing`), whose text may still come.
+    /// Read only from the row's status, never from its `extract_error`
+    /// (a `Processing` row carries its attempt tag there too); the error's
+    /// own text is never carried, so it cannot reach the model.
+    pub extraction_failed: bool,
 }
 
 /// Structured metadata for a delegated task, carried alongside the ack text
@@ -113,8 +118,8 @@ impl HandleResult {
 /// One inbound turn, as a [`MessageHandler`] receives it.
 ///
 /// This used to be a positional argument list, and GAP-13's `model_override`
-/// would have been its ninth entry — eight already needed
-/// `#[allow(clippy::too_many_arguments)]`, and a call site passing
+/// would have been its ninth entry — eight already needed clippy's
+/// `too_many_arguments` lint silenced, and a call site passing
 /// `None, None, None` in a row says nothing about which `None` is which. Named
 /// fields make each caller legible and let the next field be added without
 /// re-punctuating every one of them.
@@ -190,18 +195,23 @@ impl HandleRequest {
 
 /// Trait for processing messages through the pipeline.
 /// The daemon implements this by delegating to the Orchestrator.
-#[async_trait]
+#[dynosaur::dynosaur(pub DynMessageHandler = dyn(box) MessageHandler)]
 pub trait MessageHandler: Send + Sync {
-    async fn handle(&self, request: HandleRequest) -> Result<HandleResult, String>;
+    fn handle(
+        &self,
+        request: HandleRequest,
+    ) -> impl Future<Output = Result<HandleResult, String>> + Send;
 
     /// Handle a message with attachments. Default delegates to `handle()`.
-    async fn handle_with_attachments(
+    fn handle_with_attachments(
         &self,
         request: HandleRequest,
         attachments: Vec<ResolvedAttachment>,
-    ) -> Result<HandleResult, String> {
-        let _ = attachments; // default: ignore attachments
-        self.handle(request).await
+    ) -> impl Future<Output = Result<HandleResult, String>> + Send {
+        async move {
+            let _ = attachments; // default: ignore attachments
+            self.handle(request).await
+        }
     }
 }
 
@@ -283,7 +293,7 @@ pub struct GatewayResponse {
 pub struct Gateway {
     pub shared_context: Arc<SharedContext>,
     pub lane_manager: Arc<LaneManager>,
-    pub handler: Arc<dyn MessageHandler>,
+    pub handler: Arc<DynMessageHandler<'static>>,
     pub bus: EventBus,
     persistence: Option<GatewayPersistence>,
     /// Learning v2 (design 09 §1.5): the queue every persisted turn is fed
@@ -295,7 +305,7 @@ impl Gateway {
     pub fn new(
         shared_context: Arc<SharedContext>,
         lane_manager: Arc<LaneManager>,
-        handler: Arc<dyn MessageHandler>,
+        handler: Arc<impl MessageHandler + 'static>,
         bus: EventBus,
         db: Option<Database>,
     ) -> Self {
@@ -303,7 +313,7 @@ impl Gateway {
         Self {
             shared_context,
             lane_manager,
-            handler,
+            handler: DynMessageHandler::from_arc(handler),
             bus,
             persistence,
             learning: None,

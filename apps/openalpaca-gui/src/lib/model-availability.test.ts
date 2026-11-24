@@ -6,7 +6,7 @@ import { effectiveModelNote } from "./model-availability";
 
 /**
  * L3: `[orchestrator] model` may name a model this install cannot serve —
- * every shipped agent template pins a Claude id. A picker that shows only that
+ * a seeded Claude id with no Anthropic key, say. A picker that shows only that
  * id disagrees with every reply the daemon gives.
  */
 describe("the note about the model that would really answer", () => {

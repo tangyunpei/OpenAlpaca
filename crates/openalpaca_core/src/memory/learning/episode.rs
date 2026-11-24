@@ -93,7 +93,6 @@ pub(crate) fn build_request(
         thinking: Some(openalpaca_llm::ThinkingConfig::Disabled),
         context_management: None,
         fallback_models: Vec::new(),
-        ephemeral_system_notice: None,
     }
 }
 
@@ -590,6 +589,6 @@ mod tests {
         assert_eq!(picked.len(), MAX_SOURCES);
         assert_eq!(picked.first(), Some(&1));
         assert_eq!(picked.last(), Some(&20));
-        assert!(picked.windows(2).all(|w| w[0] < w[1]), "{picked:?}");
+        assert!(picked.is_sorted_by(|a, b| a < b), "{picked:?}");
     }
 }

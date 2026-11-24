@@ -76,7 +76,7 @@ export function keptLine(kept: ProjectDataDeletion["kept"]): string | null {
     kept.artifacts > 0
       ? counted(kept.artifacts, "by-product", "by-products")
       : null,
-  ].filter((part): part is string => part !== null);
+  ].filter((part) => part !== null);
   if (parts.length === 0) return null;
   // An upload is kept whole; only a by-product is cut to its newest version.
   const rule =

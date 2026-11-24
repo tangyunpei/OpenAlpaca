@@ -70,10 +70,18 @@ pub const CONNECTOR_NOT_WIRED: &str = "plugin.toml declares types.connector, but
      not supported: the plugin connector bridge is not wired, so nothing this plugin offers as a \
      connector is used";
 
-/// The warning for `types.provider` while no plugin provider is wired.
-pub const PROVIDER_NOT_WIRED: &str = "plugin.toml declares types.provider, but the plugin \
-     provider bridge is not wired: OpenAlpaca does not use a plugin as a model provider, so \
-     nothing this plugin offers as one is used";
+/// The warning for `types.provider`: the plugin provider type is removed
+/// (M86, D-I (revised)). The key still parses, and such a plugin's tools,
+/// skills and agents work.
+pub const PROVIDER_TYPE_REMOVED: &str = "plugin.toml declares types.provider, but the plugin \
+     provider type is removed: LLM providers are the built-in ones, configured in llm.toml or \
+     in Settings → Models & keys, so nothing this plugin offers as a model provider is used";
+
+/// The warning for a `[config]` on an `mcp_compatible` plugin, which is opened
+/// with MCP's `initialize` and so is sent no configuration (N-PLUG-5).
+pub const MCP_COMPATIBLE_GETS_NO_CONFIG: &str = "plugin.toml declares [config] keys, but the \
+     plugin sets mcp_compatible = true: it is opened with MCP's initialize handshake, which \
+     carries no configuration, so it never receives them";
 
 #[derive(Debug, Clone, Deserialize)]
 pub struct PluginMeta {
@@ -248,8 +256,9 @@ impl PluginManifest {
     }
 
     /// What this manifest declares that OpenAlpaca will not act on, one
-    /// sentence each: every key it does not read ([`Self::unknown_keys`]), and
-    /// `types.connector` / `types.provider` while their bridges are unwired.
+    /// sentence each: every key it does not read ([`Self::unknown_keys`]),
+    /// `types.connector` while its bridge is unwired, and `types.provider`,
+    /// whose plugin provider type is removed (M86).
     ///
     /// Warnings, never refusals (N-PLUG-2): the validate dry run and the
     /// install preview carry them on the summary, install, update and approve
@@ -291,7 +300,10 @@ impl PluginManifest {
             warnings.push(CONNECTOR_NOT_WIRED.to_string());
         }
         if self.types.provider {
-            warnings.push(PROVIDER_NOT_WIRED.to_string());
+            warnings.push(PROVIDER_TYPE_REMOVED.to_string());
+        }
+        if self.plugin.mcp_compatible && !self.config.is_empty() {
+            warnings.push(MCP_COMPATIBLE_GETS_NO_CONFIG.to_string());
         }
         warnings
     }
@@ -566,21 +578,50 @@ description = "Rate limit"
         assert!(!warnings[0].contains('\u{202e}') && !warnings[0].contains('\u{200b}'));
     }
 
-    /// `types.connector` and `types.provider` warn while their bridges are
-    /// unwired — and only those two types.
+    /// `types.connector` warns while its bridge is unwired, and
+    /// `types.provider` says the plugin provider type is removed (M86, D-I
+    /// (revised)) — and only those two types warn.
     #[test]
-    fn the_unwired_types_warn_and_the_wired_ones_do_not() {
+    fn the_unused_types_warn_and_the_wired_ones_do_not() {
         let manifest = PluginManifest::parse(&format!(
             "{MINIMAL}[types]\ntools = true\nskill = true\nagent = true\nconnector = true\n\
              provider = true\n"
         ))
         .unwrap();
+        let warnings = manifest.warnings();
+        assert_eq!(warnings.len(), 2, "{warnings:?}");
+        assert_eq!(warnings[0], CONNECTOR_NOT_WIRED);
         assert_eq!(
-            manifest.warnings(),
-            vec![
-                CONNECTOR_NOT_WIRED.to_string(),
-                PROVIDER_NOT_WIRED.to_string()
-            ]
+            warnings[1],
+            "plugin.toml declares types.provider, but the plugin provider type is removed: \
+             LLM providers are the built-in ones, configured in llm.toml or in Settings → \
+             Models & keys, so nothing this plugin offers as a model provider is used"
+        );
+    }
+
+    /// N-PLUG-5: an `mcp_compatible` plugin is opened with MCP's `initialize`,
+    /// which carries no configuration, so a `[config]` it declares warns —
+    /// and the same keys without the flag do not.
+    #[test]
+    fn config_keys_on_an_mcp_compatible_plugin_warn() {
+        let config = "[config.api_key]\ntype = \"secret\"\n";
+        let flagged =
+            PluginManifest::parse(&format!("{MINIMAL}mcp_compatible = true\n{config}")).unwrap();
+        let warnings = flagged.warnings();
+        assert_eq!(warnings.len(), 1, "{warnings:?}");
+        assert!(
+            warnings[0].contains("mcp_compatible") && warnings[0].contains("no configuration"),
+            "{warnings:?}"
+        );
+
+        let plain = PluginManifest::parse(&format!("{MINIMAL}{config}")).unwrap();
+        assert!(plain.warnings().is_empty(), "{:?}", plain.warnings());
+        let no_config =
+            PluginManifest::parse(&format!("{MINIMAL}mcp_compatible = true\n")).unwrap();
+        assert!(
+            no_config.warnings().is_empty(),
+            "{:?}",
+            no_config.warnings()
         );
     }
 

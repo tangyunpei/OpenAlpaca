@@ -4,12 +4,15 @@
  * Mounting this is what connects the daemon socket: events invalidate the
  * cache, and a resync (reconnect or daemon restart) invalidates everything,
  * because the server drops frames for a lagged client without telling it.
+ * It also keeps the cached connection's token fresh on the wall clock while
+ * mounted (`keepConnectionFresh`, TOKEN-REREAD).
  */
 
 import { QueryClientProvider } from "@tanstack/react-query";
 import { useEffect, type ReactNode } from "react";
 import type { QueryClient } from "@tanstack/react-query";
 
+import { keepConnectionFresh } from "./connection";
 import { daemonEvents } from "./events";
 import {
   invalidateAfterResync,
@@ -41,10 +44,12 @@ export function QueryProvider({
     });
 
     void daemonEvents.connect();
+    const stopKeepingFresh = keepConnectionFresh();
 
     return () => {
       offEvent();
       offResync();
+      stopKeepingFresh();
       daemonEvents.disconnect();
     };
   }, [client, connectEvents]);

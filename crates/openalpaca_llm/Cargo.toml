@@ -10,10 +10,22 @@ license.workspace = true
 default = []
 anthropic = ["dep:reqwest"]
 openai = ["dep:reqwest"]
-ollama = ["dep:reqwest"]
+# Ollama is served through the OpenAI provider (its OpenAI-compatible
+# `/v1` surface), so the feature brings `openai` with it.
+ollama = ["openai"]
+# LLM-TEST-GUARD: test builds of the crates that depend on this one turn it on
+# through their [dev-dependencies], so a provider refuses Anthropic's and
+# OpenAI's real hosts in the test binaries of the crates that turn it on and
+# in no release, `cargo run` or sidecar build (as openalpaca_storage's
+# `test-home-guard`).
+test-endpoint-guard = []
+# Turned on only by openalpaca_core's `live-eval`: the owner's live evals call
+# the real providers on purpose, so the guard yields to it. Additive, as
+# features must be: it is how a `live-eval` build switches the guard off.
+live-eval = []
 
 [dependencies]
-async-trait.workspace = true
+dynosaur.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 thiserror.workspace = true
@@ -30,7 +42,6 @@ base64.workspace = true
 rand.workspace = true
 uuid.workspace = true
 keyring-core.workspace = true
-file-lock.workspace = true
 
 # Streaming support
 futures-util.workspace = true
@@ -38,6 +49,10 @@ bytes.workspace = true
 
 # Optional: HTTP client (only when a provider feature is enabled)
 reqwest = { workspace = true, optional = true }
+# The locality test (`is_local_url`) reads a base URL with the parser
+# reqwest connects by; reqwest itself is optional, and core builds this
+# crate with no provider feature.
+url.workspace = true
 
 # Credential discovery + CLI backends
 which.workspace = true

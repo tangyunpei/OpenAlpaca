@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # scaffold.sh — Create the full directory structure for a new skill.
 #
-# Usage: scaffold.sh --id=<skill-id> [--scope=project|user] [--dirs=scripts,examples,templates,assets]
+# Usage: scaffold.sh --id=<skill-id> [--scope=project] [--dirs=scripts,examples,templates,assets]
 #
 # Creates:
 #   config/skills/<id>/
@@ -14,10 +14,24 @@
 
 set -euo pipefail
 
-# Resolve project root from script location:
-# script is at <project>/config/skills/create-skill/scripts/scaffold.sh
+# The skills root, the one directory the daemon reads skills from: the daemon
+# names it in OPENALPACA_SKILLS_DIR (<config>/skills) when it runs a skill
+# script, since the built-in create-skill runs from its own copy under
+# state/cache/bundled-skills/. Run by hand, the script finds it from its own
+# location: at <config>/skills/create-skill/scripts/, the root is the skills
+# directory this skill was loaded from.
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
-PROJECT_ROOT="$(cd "$SCRIPT_DIR/../../../.." && pwd)"
+SKILLS_ROOT="${OPENALPACA_SKILLS_DIR:-$(cd "$SCRIPT_DIR/../.." && pwd)}"
+
+# The built-in skills, which a skill of the same id overrides: where the daemon
+# says they are (OPENALPACA_BUNDLED_SKILLS_DIR), else, run by hand, this
+# script's own skills directory when that is not SKILLS_ROOT. None when the
+# two are one.
+OWN_ROOT="$(cd "$SCRIPT_DIR/../.." && pwd)"
+BUNDLED_ROOT="${OPENALPACA_BUNDLED_SKILLS_DIR:-$OWN_ROOT}"
+if [[ "$BUNDLED_ROOT" == "$SKILLS_ROOT" ]]; then
+  BUNDLED_ROOT=""
+fi
 
 SKILL_ID=""
 SCOPE="project"
@@ -33,6 +47,13 @@ for arg in "$@"; do
     *) echo "Unknown argument: $arg" >&2; exit 1 ;;
   esac
 done
+
+# One root, so one scope: `user` wrote under ~/.config/openalpaca/skills,
+# which nothing reads, and reported success.
+if [[ "$SCOPE" != "project" ]]; then
+  echo "Error: --scope=$SCOPE is refused: the daemon reads skills only from $SKILLS_ROOT (--scope=project, the default)" >&2
+  exit 1
+fi
 
 if [[ -z "$SKILL_ID" ]]; then
   echo "Error: --id is required" >&2
@@ -54,18 +75,17 @@ case "$SKILL_ID" in
     ;;
 esac
 
-# Determine base path
-if [[ "$SCOPE" == "user" ]]; then
-  BASE_DIR="$HOME/.config/openalpaca/skills"
-else
-  BASE_DIR="$PROJECT_ROOT/config/skills"
-fi
+SKILL_DIR="$SKILLS_ROOT/$SKILL_ID"
 
-SKILL_DIR="$BASE_DIR/$SKILL_ID"
-
-# Check for existing skill
+# Check for existing skill. When a built-in skill holds the id too, the
+# folder may be an unedited copy an earlier build seeded, which the daemon
+# sets aside (not read; the built-in skill runs): say so, and the two ways on.
 if [[ -f "$SKILL_DIR/SKILL.md" ]]; then
-  echo "Error: skill '$SKILL_ID' already exists at $SKILL_DIR/SKILL.md" >&2
+  if [[ -n "$BUNDLED_ROOT" && -f "$BUNDLED_ROOT/$SKILL_ID/SKILL.md" ]]; then
+    echo "Error: skill '$SKILL_ID' already exists at $SKILL_DIR/SKILL.md, and a built-in skill has this id too. If that folder is an unedited copy an earlier build seeded, this build does not read it (openalpaca skills tidy lists it): move it aside with openalpaca skills tidy --apply and run this again, or edit that folder to make it your own override of the built-in skill" >&2
+  else
+    echo "Error: skill '$SKILL_ID' already exists at $SKILL_DIR/SKILL.md" >&2
+  fi
   exit 1
 fi
 
@@ -103,7 +123,6 @@ echo "  \"skill_id\": \"$SKILL_ID\","
 echo "  \"path\": \"$SKILL_DIR\","
 echo "  \"created_dirs\": ["
 
-FIRST=true
 echo -n "    \"$SKILL_DIR\""
 if [[ -n "$DIRS" ]]; then
   IFS=',' read -ra DIR_LIST <<< "$DIRS"

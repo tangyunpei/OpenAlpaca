@@ -52,6 +52,10 @@ pub enum SkillDiagnosticCode {
     /// `tools.allow`, no `scripts`, no `depends_on` — so it runs with none
     /// (audit Z3-04).
     NoTools,
+    /// A folder that overrides a bundled skill holds a file an earlier build
+    /// shipped, since changed in the bundle: the override runs the old file
+    /// (subagent design §2.8 W-2).
+    StaleShippedFile,
 }
 
 impl SkillDiagnosticCode {
@@ -70,6 +74,7 @@ impl SkillDiagnosticCode {
             SkillParseError::SlashConflict { .. } => Self::SlashConflict,
             SkillParseError::UnknownKey(_) => Self::UnknownKey,
             SkillParseError::NoTools => Self::NoTools,
+            SkillParseError::StaleShippedFile { .. } => Self::StaleShippedFile,
         }
     }
 
@@ -86,6 +91,7 @@ impl SkillDiagnosticCode {
             Self::UnknownKey => "unknown_key",
             Self::TooLarge => "too_large",
             Self::NoTools => "no_tools",
+            Self::StaleShippedFile => "stale_shipped_file",
         }
     }
 
@@ -104,7 +110,8 @@ impl SkillDiagnosticCode {
             | Self::DeprecatedField
             | Self::SlashConflict
             | Self::UnknownKey
-            | Self::NoTools => SkillDiagnosticSeverity::Warning,
+            | Self::NoTools
+            | Self::StaleShippedFile => SkillDiagnosticSeverity::Warning,
         }
     }
 }

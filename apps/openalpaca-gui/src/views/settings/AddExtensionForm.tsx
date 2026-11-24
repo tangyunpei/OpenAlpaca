@@ -12,9 +12,9 @@
  *    `config/mcp.toml` is the consent, so there is no approve step — `Connect
  *    now` is the ENABLE bit, and clearing it declares the server turned off.
  *
- * The picker is a dynamic import: outside the Tauri shell (`bun run dev`, the
- * test environment) there is no dialog plugin, and the typed path is the whole
- * form either way.
+ * The picker is the host's (`lib/host/`), its plugin loaded by a dynamic
+ * import: outside the Tauri shell (`bun run dev`, the test environment) the
+ * host has no dialog, and the typed path is the whole form either way.
  */
 
 import { useState } from "react";
@@ -28,6 +28,7 @@ import {
 } from "@/hooks/useExtensions";
 import type { ManifestSummary, McpDeclaration } from "@/lib/api/types";
 import { escapeHiddenLine } from "@/lib/hidden-chars";
+import { host } from "@/lib/host";
 
 import { extensionErrorCopy } from "./extension-row";
 
@@ -39,12 +40,13 @@ export interface AddExtensionFormProps {
   onCancel: () => void;
 }
 
-/** Open the native directory picker, if there is one. */
+/**
+ * Open the native directory picker, if there is one: the host's
+ * (`lib/host/`), which only the app's shell has.
+ */
 export async function pickDirectory(): Promise<string | null> {
   try {
-    const { open } = await import("@tauri-apps/plugin-dialog");
-    const picked = await open({ directory: true, multiple: false });
-    return typeof picked === "string" ? picked : null;
+    return (await host().dialog?.pickDirectory()) ?? null;
   } catch {
     // No Tauri shell (or the user has no picker): the text field is the form.
     return null;

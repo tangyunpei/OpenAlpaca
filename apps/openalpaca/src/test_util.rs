@@ -105,7 +105,120 @@ pub(crate) fn serve(
                     }
                 }
             }
-            seen.push(String::from_utf8_lossy(&raw).to_string());
+            seen.push(String::from_utf8_lossy_owned(raw));
+            socket
+                .write_all(answer.as_bytes())
+                .expect("the answer is written");
+            socket.flush().ok();
+        }
+        seen
+    });
+    (addr, server)
+}
+
+/// [`serve`], ending early when no connection comes for `idle`: what a
+/// test needs whose code under test may open fewer connections than it
+/// offers answers for (the daemon check's tests, which also run on the
+/// parent's code, where no health is asked). The requests received, on
+/// join, as [`serve`]'s.
+pub(crate) fn serve_until_idle(
+    answers: Vec<String>,
+    idle: std::time::Duration,
+) -> (std::net::SocketAddr, std::thread::JoinHandle<Vec<String>>) {
+    serve_while(answers, move |waiting_since| waiting_since.elapsed() < idle)
+}
+
+/// A [`serve_until_stopped`] server: [`Self::stop`] ends it and hands back
+/// the requests it received; dropped unstopped (a test that panicked
+/// first), it is told to end all the same.
+pub(crate) struct StoppableServer {
+    stop: std::sync::Arc<std::sync::atomic::AtomicBool>,
+    server: Option<std::thread::JoinHandle<Vec<String>>>,
+}
+
+impl StoppableServer {
+    /// Ends the server — at once if it is waiting for a connection — and
+    /// returns the raw requests it received. Called after the code under
+    /// test has returned, every request that code sent has been answered,
+    /// so the list is all it sent: what a test that offers an answer the
+    /// code must not ask for checks, with no idle window to wait out.
+    pub(crate) fn stop(mut self) -> Vec<String> {
+        self.stop.store(true, std::sync::atomic::Ordering::SeqCst);
+        self.server
+            .take()
+            .expect("the server is joined once")
+            .join()
+            .expect("the server finishes")
+    }
+}
+
+impl Drop for StoppableServer {
+    fn drop(&mut self) {
+        self.stop.store(true, std::sync::atomic::Ordering::SeqCst);
+    }
+}
+
+/// [`serve`], ending when the test calls [`StoppableServer::stop`] or every
+/// answer is served.
+pub(crate) fn serve_until_stopped(answers: Vec<String>) -> (std::net::SocketAddr, StoppableServer) {
+    let stop = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let told = std::sync::Arc::clone(&stop);
+    let (addr, server) = serve_while(answers, move |_| {
+        !told.load(std::sync::atomic::Ordering::SeqCst)
+    });
+    (
+        addr,
+        StoppableServer {
+            stop,
+            server: Some(server),
+        },
+    )
+}
+
+/// [`serve`], waiting for each connection only while `keep_waiting`, given
+/// the instant the wait began, says so.
+fn serve_while(
+    answers: Vec<String>,
+    mut keep_waiting: impl FnMut(std::time::Instant) -> bool + Send + 'static,
+) -> (std::net::SocketAddr, std::thread::JoinHandle<Vec<String>>) {
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("a loopback port");
+    let addr = listener.local_addr().expect("the bound address");
+    listener
+        .set_nonblocking(true)
+        .expect("a non-blocking listener");
+    let server = std::thread::spawn(move || {
+        let mut seen = Vec::new();
+        for answer in answers {
+            let waiting_since = std::time::Instant::now();
+            let mut socket = loop {
+                match listener.accept() {
+                    Ok((socket, _)) => break Some(socket),
+                    Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => {
+                        if !keep_waiting(waiting_since) {
+                            break None;
+                        }
+                        std::thread::sleep(std::time::Duration::from_millis(5));
+                    }
+                    Err(e) => panic!("accept: {e}"),
+                }
+            };
+            let Some(socket) = socket.as_mut() else {
+                break;
+            };
+            socket.set_nonblocking(false).expect("a blocking socket");
+            let mut raw = Vec::new();
+            let mut buf = [0u8; 4096];
+            loop {
+                let n = socket.read(&mut buf).expect("the request is readable");
+                if n == 0 {
+                    break;
+                }
+                raw.extend_from_slice(&buf[..n]);
+                if raw.windows(4).any(|w| w == b"\r\n\r\n") {
+                    break;
+                }
+            }
+            seen.push(String::from_utf8_lossy_owned(raw));
             socket
                 .write_all(answer.as_bytes())
                 .expect("the answer is written");
@@ -150,9 +263,9 @@ const LOCKED: &str = "OPENALPACA_TEST_LOCK_HELD";
 /// — what a running, or still booting, daemon looks like to anything that
 /// tries to take that lock.
 ///
-/// It has to be another process. The lock is a POSIX `fcntl` record lock, and
-/// a process never conflicts with itself on one: a second acquisition in the
-/// same process succeeds, and dropping it releases the first.
+/// It is another process, as a daemon is, so the lock is held exactly as a
+/// running daemon holds it. The lock is a `flock` lock, which belongs to the
+/// open file description.
 pub(crate) struct LockHolder {
     child: Child,
     stdout: BufReader<ChildStdout>,
@@ -232,7 +345,7 @@ fn singleton_lock_holder_process() {
         Some(root),
         "the lock holder must inherit a sandboxed store; refusing to lock anything else"
     );
-    let _lock = openalpaca_storage::discovery::acquire_single_instance_lock(false)
+    let _lock = openalpaca_app_support::discovery::acquire_single_instance_lock()
         .expect("take the singleton lock");
     println!("{LOCKED}");
     std::io::stdout().flush().expect("flush");
@@ -246,4 +359,94 @@ fn singleton_lock_holder_process() {
 #[test]
 fn the_storage_test_home_guard_is_armed_in_this_test_build() {
     assert!(openalpaca_storage::store::projects::test_home_guard_armed());
+}
+
+/// LLM-TEST-GUARD: a provider refuses Anthropic's and OpenAI's real hosts
+/// only in a build that carries `openalpaca_llm`'s `test-endpoint-guard`,
+/// which this crate turns on through `[dev-dependencies]` — unless a
+/// workspace run unifies core's `live-eval` on, which turns it off.
+#[test]
+fn the_llm_test_endpoint_guard_is_armed_in_this_test_build() {
+    assert_eq!(
+        openalpaca_llm::providers::test_endpoint_guard_armed(),
+        !openalpaca_llm::providers::test_endpoint_guard_yields()
+    );
+}
+
+/// The `discovery.json` a daemon listening on `port`, started `hours_up`
+/// hours ago, has written by now on T21's schedule — the start's token, then
+/// a new one each time `rotation_due` said so, looked at every minute as the
+/// daemon looks — written where the sandboxed CLI reads it.
+pub(crate) fn discovery_of_a_daemon_up_for(
+    port: u16,
+    hours_up: i64,
+) -> openalpaca_app_support::discovery::Discovery {
+    use openalpaca_app_support::discovery;
+    let now = chrono::Utc::now();
+    let started = now - chrono::TimeDelta::hours(hours_up);
+    let mut d = discovery::make_discovery("127.0.0.1", port, "instance-t21".into(), "0.1.0");
+    d.started_at = started;
+    d = d.with_rotated_auth(started);
+    let mut at = started;
+    while at <= now {
+        if d.rotation_due(at) {
+            d = d.with_rotated_auth(at);
+        }
+        at += chrono::TimeDelta::minutes(1);
+    }
+    discovery::write_discovery_atomic(&d).expect("write discovery.json");
+    d
+}
+
+/// A `200` JSON answer for [`serve`].
+pub(crate) fn ok_json(body: &str) -> String {
+    format!(
+        "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+        body.len()
+    )
+}
+
+/// The bearer token a raw request from [`serve`] carried, if any.
+pub(crate) fn bearer_of(request: &str) -> Option<String> {
+    request.lines().find_map(|line| {
+        let (name, value) = line.split_once(':')?;
+        if !name.trim().eq_ignore_ascii_case("authorization") {
+            return None;
+        }
+        value.trim().strip_prefix("Bearer ").map(str::to_string)
+    })
+}
+
+/// Set in the child [`run_with_home`] starts: the test it runs checks the
+/// lookup under the home the child was given, and starts no child itself.
+pub(crate) const HOME_CHILD_ENV: &str = "OPENALPACA_TEST_HOME_CHILD";
+
+/// Run this binary's test `test` (`module_path!()`-qualified) again in a
+/// child process whose `HOME` is `home` and whose directory is `cwd`, with
+/// [`HOME_CHILD_ENV`] set and each of `cleared` unset, and assert that the
+/// child ran that one test and it passed. A lookup of the user's home is
+/// tested this way (121-2's wiring) because this binary runs its tests on
+/// parallel threads and `ENV_LOCK` does not hold `HOME`: moving it here
+/// would move it under every other test. `home` is never unset, since
+/// `std::env::home_dir` would then read the account's real home.
+pub(crate) fn run_with_home(test: &str, home: &Path, cwd: &Path, cleared: &[&str]) {
+    let name = test.split_once("::").map_or(test, |(_, rest)| rest);
+    let mut cmd = Command::new(std::env::current_exe().expect("this test binary"));
+    cmd.args([name, "--exact", "--nocapture", "--test-threads=1"])
+        .current_dir(cwd)
+        .env("HOME", home)
+        .env(HOME_CHILD_ENV, "1");
+    for var in cleared {
+        cmd.env_remove(var);
+    }
+    let out = cmd.output().expect("the test binary runs again");
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert!(
+        out.status.success()
+            && stdout.contains("running 1 test")
+            && stdout.contains("test result: ok. 1 passed"),
+        "the child with HOME={} running {name}:\n{stdout}\n{}",
+        home.display(),
+        String::from_utf8_lossy(&out.stderr)
+    );
 }

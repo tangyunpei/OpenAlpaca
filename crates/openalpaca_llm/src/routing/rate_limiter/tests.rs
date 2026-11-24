@@ -254,7 +254,7 @@ fn test_config_default() {
     let config = RateLimitConfig::default();
     assert_eq!(config.default_rpm, 50);
     assert_eq!(config.default_tpm, 40_000);
-    assert_eq!(config.per_key_concurrency, 5);
+    assert_eq!(config.per_key_concurrency, 8);
     assert_eq!(config.global_concurrency, 10);
     assert_eq!(config.backoff_base_ms, 500);
     assert_eq!(config.backoff_cap_ms, 30_000);
@@ -289,7 +289,26 @@ fn test_config_serde_defaults_from_empty() {
     let parsed: RateLimitConfig = serde_json::from_str("{}").unwrap();
     assert_eq!(parsed.default_rpm, 50);
     assert_eq!(parsed.default_tpm, 40_000);
-    assert_eq!(parsed.per_key_concurrency, 5);
+    assert_eq!(parsed.per_key_concurrency, 8);
+}
+
+/// N-LLM-1: a key admits eight concurrent calls unless `llm.toml` says
+/// otherwise — with no `[rate_limits]` table, and with one that names other
+/// fields only — so a full batch of subagents, and the lead's stock bound of
+/// six with the lead beside them, never wait on one key's permits.
+#[test]
+fn a_rate_limits_table_without_per_key_concurrency_gives_each_key_eight() {
+    for text in ["", "[rate_limits]\ndefault_rpm = 60\n"] {
+        let config: crate::config::LlmRouterConfig = toml::from_str(text).unwrap();
+        let rate_limits = config.rate_limits.unwrap_or_default();
+        assert_eq!(rate_limits.per_key_concurrency, 8, "{text:?}");
+        let registry = RateLimiterRegistry::new(rate_limits);
+        let limiter = registry.get_or_create("k1", None);
+        assert_eq!(limiter.concurrency.available_permits(), 8, "{text:?}");
+    }
+    let config: crate::config::LlmRouterConfig =
+        toml::from_str("[rate_limits]\ndefault_rpm = 60\n").unwrap();
+    assert_eq!(config.rate_limits.unwrap().default_rpm, 60);
 }
 
 // ── KeyRateLimiter tests ──────────────────────────────────────

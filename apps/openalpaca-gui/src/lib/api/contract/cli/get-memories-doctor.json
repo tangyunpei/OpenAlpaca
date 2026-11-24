@@ -1,0 +1,36 @@
+{
+  "idless_project_snapshots": [],
+  "owner_key": "",
+  "partitions": [
+    {
+      "conflicts": [],
+      "duplicates": [
+        {
+          "files": [
+            ""
+          ],
+          "id": ""
+        }
+      ],
+      "health": "",
+      "malformed": [
+        {
+          "path": "",
+          "reason": ""
+        }
+      ],
+      "notes": 0,
+      "orphan": false,
+      "owner_key": "",
+      "partition_key": "",
+      "pending": null,
+      "quarantine_reason": null,
+      "root": "",
+      "scope": "",
+      "tombstones": 0,
+      "unverified": 0
+    }
+  ],
+  "refused": [],
+  "unreadable_snapshots": []
+}

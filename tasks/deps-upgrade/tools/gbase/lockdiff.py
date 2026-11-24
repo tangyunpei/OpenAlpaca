@@ -1,4 +1,4 @@
-#!/usr/bin/env python3
+#!/usr/bin/env python3.11
 """Compare two Cargo.lock files as sets of (name, version); say which differences are expected.
 
 Usage:
@@ -21,7 +21,7 @@ listed with both.
 
 Exit status: 0 when the locks are equal or every difference is expected; 1 when at
 least one difference is unexpected — and only then; 2 on anything else: a usage error,
-a file it cannot read, a file that is not a Cargo.lock (not UTF-8 text, or no
+a file it cannot read, a file that is not a Cargo.lock (not UTF-8 text, not TOML, or no
 `[[package]]` with a name and a version), or any error the code did not foresee (its
 traceback goes to stderr). gbase.sh's compare_lock reads 1 as "a difference was found",
 so nothing but a finished comparison may exit 1; it also refuses any output whose first
@@ -32,6 +32,7 @@ import collections
 import os
 import re
 import sys
+import tomllib
 import traceback
 
 
@@ -43,32 +44,32 @@ def fail(message):
     sys.exit(2)
 
 
-def read_lines(path, what):
-    """The file's lines, or exit 2 when it cannot be read as UTF-8 text."""
+def read_text(path, what):
+    """The file's text, or exit 2 when it cannot be read as UTF-8 text."""
     try:
         with open(path, encoding="utf-8") as fh:
-            return fh.read().splitlines()
+            return fh.read()
     except OSError as e:
         fail("lockdiff: cannot read %s %s: %s" % (what, path, e))
     except UnicodeDecodeError as e:
         fail("lockdiff: %s %s is not UTF-8 text: %s" % (what, path, e))
 
 
+def read_lines(path, what):
+    """The file's lines, or exit 2 when it cannot be read as UTF-8 text."""
+    return read_text(path, what).splitlines()
+
+
 def load(path):
+    """{name: {version, …}} of every `[[package]]` with a string name and version, read by tomllib."""
+    try:
+        doc = tomllib.loads(read_text(path, "lock"))
+    except tomllib.TOMLDecodeError as e:
+        fail("lockdiff: %s is not TOML (%s): not a Cargo.lock" % (path, e))
     pkgs = collections.defaultdict(set)
-    name = None
-    for line in read_lines(path, "lock"):
-        if line == "[[package]]":
-            name = None
-            continue
-        m = re.match(r'^name = "(.*)"$', line)
-        if m:
-            name = m.group(1)
-            continue
-        m = re.match(r'^version = "(.*)"$', line)
-        if m and name is not None:
-            pkgs[name].add(m.group(1))
-            name = None
+    for p in doc.get("package", []):
+        if isinstance(p, dict) and isinstance(p.get("name"), str) and isinstance(p.get("version"), str):
+            pkgs[p["name"]].add(p["version"])
     if not pkgs:
         fail("lockdiff: %s holds no [[package]] with a name and a version: not a Cargo.lock" % path)
     return pkgs

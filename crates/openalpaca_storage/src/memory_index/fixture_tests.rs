@@ -495,8 +495,9 @@ fn check_search(
             class, "invalid_input",
             "{label}: only invalid_input is an index refusal"
         );
-        assert!(
-            matches!(result, Err(IndexError::InvalidInput(_))),
+        std::assert_matches!(
+            result,
+            Err(IndexError::InvalidInput(_)),
             "{label}: expected an invalid_input refusal"
         );
         return;

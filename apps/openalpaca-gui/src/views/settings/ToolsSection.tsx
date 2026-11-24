@@ -77,7 +77,7 @@ export function skillsByLogKey(
 ): Map<string, SkillCatalogEntry> {
   // Code-unit order, not `localeCompare` — the daemon compares `&str` bytes,
   // and a locale collation would disagree with it on `-` versus `_`.
-  const byId = [...catalog].sort((a, b) =>
+  const byId = catalog.toSorted((a, b) =>
     a.id < b.id ? -1 : a.id > b.id ? 1 : 0,
   );
   const byKey = new Map<string, SkillCatalogEntry>();

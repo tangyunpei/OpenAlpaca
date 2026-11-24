@@ -560,3 +560,138 @@ fn test_confirmation_intercept_broker_roundtrip() {
     assert!(reply.contains("Denied"));
     assert!(!rx.try_recv().unwrap().approved);
 }
+
+// ============================================================================
+// The user's home (121-1, 121-2)
+// ============================================================================
+
+/// chat.db is under the home `paths::user_home` reports; with no usable
+/// home there is no path, never one under a guessed `/Users`.
+#[test]
+fn chat_db_is_under_the_users_home_or_nowhere() {
+    use super::connector::chat_db_path;
+    use std::path::{Path, PathBuf};
+    assert_eq!(
+        chat_db_path(Some(Path::new("/Users/someone"))),
+        Some(PathBuf::from("/Users/someone/Library/Messages/chat.db"))
+    );
+    assert_eq!(chat_db_path(None), None);
+    let relative = openalpaca_app_support::paths::usable_home(Some("relative-home".into()));
+    assert_eq!(chat_db_path(relative.as_deref()), None);
+}
+
+/// An attachment's `~` expands to the user's home; with no usable home a
+/// path that needs one is none (the attachment skipped), and a path with no
+/// `~` is kept as chat.db stores it.
+#[test]
+fn an_attachments_tilde_needs_a_usable_home() {
+    use super::reader::resolve_attachment_path;
+    use std::path::Path;
+    let home = Path::new("/Users/someone");
+    assert_eq!(
+        resolve_attachment_path("~/Library/Messages/Attachments/a.png", Some(home)),
+        Some("/Users/someone/Library/Messages/Attachments/a.png".to_string())
+    );
+    assert_eq!(
+        resolve_attachment_path("~/Library/Messages/Attachments/a.png", None),
+        None
+    );
+    assert_eq!(
+        resolve_attachment_path("/var/tmp/b.png", None),
+        Some("/var/tmp/b.png".to_string())
+    );
+    assert_eq!(resolve_attachment_path("", None), Some(String::new()));
+}
+
+/// Set in the child [`run_with_home`] starts: the test it runs checks the
+/// lookup under the home the child was given, and starts no child itself.
+pub(super) const HOME_CHILD_ENV: &str = "OPENALPACA_TEST_HOME_CHILD";
+
+/// Run this binary's test `test` (`module_path!()`-qualified) again in a
+/// child process whose `HOME` is `home` and whose directory is `cwd`, with
+/// [`HOME_CHILD_ENV`] set, and assert that the child ran that one test and
+/// it passed. A lookup of the user's home is tested this way (121-2's
+/// wiring) because this binary runs its tests on parallel threads and no
+/// guard of it holds `HOME`: moving it here would move it under every
+/// other test. `home` is never unset, since `std::env::home_dir` would then
+/// read the account's real home.
+pub(super) fn run_with_home(test: &str, home: &std::path::Path, cwd: &std::path::Path) {
+    let name = test.split_once("::").map_or(test, |(_, rest)| rest);
+    let out = std::process::Command::new(std::env::current_exe().expect("this test binary"))
+        .args([name, "--exact", "--nocapture", "--test-threads=1"])
+        .current_dir(cwd)
+        .env("HOME", home)
+        .env(HOME_CHILD_ENV, "1")
+        .output()
+        .expect("the test binary runs again");
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert!(
+        out.status.success()
+            && stdout.contains("running 1 test")
+            && stdout.contains("test result: ok. 1 passed"),
+        "the child with HOME={} running {name}:\n{stdout}\n{}",
+        home.display(),
+        String::from_utf8_lossy(&out.stderr)
+    );
+}
+
+/// 121-2's wiring: `IMessageConnector::new` itself takes chat.db's place
+/// from the home `paths::user_home` reports. A child of this binary builds
+/// one under an absolute `HOME`, whose chat.db it names, and under a
+/// relative one, where it names none: a hand read of `HOME` would name
+/// `<relative>/Library/Messages/chat.db`, which the child's directory
+/// resolves. Nothing is opened: `new` only names the path.
+#[test]
+fn the_connector_takes_chat_db_from_the_home_user_home_reports() {
+    use super::connector::IMessageConnector;
+    use arc_swap::ArcSwap;
+    use openalpaca_core::{
+        bus::EventBus,
+        context::SharedContext,
+        daemon_config::DaemonConfig,
+        gateway::{Gateway, HandleRequest, HandleResult, MessageHandler},
+        lane::LaneManager,
+    };
+    use std::path::{Path, PathBuf};
+    use std::sync::Arc;
+
+    struct Unused;
+    impl MessageHandler for Unused {
+        async fn handle(&self, _request: HandleRequest) -> Result<HandleResult, String> {
+            Err("not called".to_string())
+        }
+    }
+
+    if std::env::var_os(HOME_CHILD_ENV).is_some() {
+        let home = PathBuf::from(std::env::var_os("HOME").expect("the child's HOME"));
+        let dir = tempfile::tempdir().unwrap();
+        let db = Arc::new(openalpaca_storage::Database::open(&dir.path().join("t.db")).unwrap());
+        let gateway = Arc::new(Gateway::new(
+            Arc::new(SharedContext::new()),
+            Arc::new(LaneManager::new()),
+            Arc::new(Unused),
+            EventBus::default(),
+            None,
+        ));
+        let connector = IMessageConnector::new(
+            db,
+            Arc::new(EventBus::default()),
+            gateway,
+            Arc::new(ArcSwap::from_pointee(DaemonConfig::default())),
+            tokio_util::sync::CancellationToken::new(),
+            None,
+        );
+        let expected = home
+            .is_absolute()
+            .then(|| home.join("Library").join("Messages").join("chat.db"));
+        assert_eq!(connector.chat_db_path, expected, "HOME={home:?}");
+        return;
+    }
+    let root = tempfile::tempdir().unwrap();
+    let test = concat!(
+        module_path!(),
+        "::the_connector_takes_chat_db_from_the_home_user_home_reports"
+    );
+    run_with_home(test, &root.path().join("abs-home"), root.path());
+    run_with_home(test, Path::new("rel-home"), root.path());
+}

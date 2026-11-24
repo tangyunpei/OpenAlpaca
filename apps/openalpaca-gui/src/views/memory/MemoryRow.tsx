@@ -40,15 +40,13 @@ export function listRow(
       .filter((part) => part !== "")
       .join(" · "),
     excerpt: null,
-    tags: [statusTag(item.effective_status)].filter(
-      (tag): tag is string => tag !== null,
-    ),
+    tags: [statusTag(item.effective_status)].filter((tag) => tag !== null),
   };
 }
 
 export function searchRow(result: MemorySearchResult): MemoryRowModel {
   const tags = [statusTag(result.effective_status)].filter(
-    (tag): tag is string => tag !== null,
+    (tag) => tag !== null,
   );
   if (result.conflict) tags.push("conflict");
   return {

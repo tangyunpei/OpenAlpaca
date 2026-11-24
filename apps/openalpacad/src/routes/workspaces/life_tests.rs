@@ -2313,3 +2313,40 @@ async fn a_non_ascii_projects_data_is_deleted_and_its_kept_file_addressed_by_its
     assert_eq!(projects::lookup(&p.root).expect("lookup"), None);
     assert_eq!(project_snapshots(&p.id), 0);
 }
+
+/// `/v1/workspaces*`'s JSON bodies for the API contract's folder
+/// (API-CONTRACT): the scene's projects listed, one described, one chosen,
+/// one re-pointed and one deleted.
+pub(crate) async fn contract_samples(out: &mut crate::contract::Samples) {
+    use crate::contract::ok_body;
+    let w = World::new();
+    let scene = w.scene();
+    let body = ok_body(get_workspace(&w.db, WorkspaceQuery { path: None })).await;
+    out.response("get-workspaces", body);
+    let body = ok_body(get_workspace(
+        &w.db,
+        WorkspaceQuery {
+            path: Some(text(&scene.q.root)),
+        },
+    ))
+    .await;
+    out.response("get-workspaces-path", body);
+    let chosen = w.repo("chosen");
+    let body = ok_body(choose_workspace(ChooseWorkspaceRequest {
+        path: text(&chosen),
+    }))
+    .await;
+    out.response("post-workspaces", body);
+    let moved = w.project("old-home");
+    let root = text(&moved.root);
+    w.session("s-1", &root);
+    w.message("s-1", &root);
+    w.task("t-1", &root, "completed");
+    let new = w.dir("new-home");
+    let (status, body) = w.repoint(&moved.root, &new).await;
+    assert!(status.is_success(), "{body}");
+    out.response("patch-workspaces", body);
+    let (status, body) = w.delete(&scene.p.root, false).await;
+    assert!(status.is_success(), "{body}");
+    out.response("post-workspaces-purge", body);
+}

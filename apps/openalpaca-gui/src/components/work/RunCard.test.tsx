@@ -1,7 +1,7 @@
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { render, screen } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
-import { afterEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 afterEach(() => {
   vi.unstubAllGlobals();
@@ -9,18 +9,19 @@ afterEach(() => {
 
 import { resetConnection } from "@/lib/connection";
 import type { TaskTimeline } from "@/lib/api/tasks";
+import { fixtureHost } from "@/lib/host/fixture";
 
 import { RunCard } from "./RunCard";
 import type { Run } from "./run-model";
 import { useRunController } from "./useRunController";
 
-vi.mock("@tauri-apps/api/core", () => ({
-  invoke: vi.fn(async () => ({
+beforeEach(() => {
+  fixtureHost!.answerConnection({
     baseUrl: "http://127.0.0.1:9999",
     token: "tok en/+",
     instanceId: "7f3a1122",
-  })),
-}));
+  });
+});
 
 const TIMELINE: TaskTimeline = {
   task_id: "b41c8e02",
@@ -76,11 +77,14 @@ describe("RunCard (§3.19)", () => {
     );
   });
 
-  // On a *running* card all five are live. `Start now` takes Pause's slot only
-  // on a queued run (§3.19).
-  it("shows the five live controls, all enabled", () => {
+  // On a *running* card all four are live. PAUSE-OFF: the daemon refuses
+  // `pause` until a later design, so the card offers no Pause; the slot holds
+  // `Start now` on a queued run and `Resume` on a paused one (§3.19).
+  it("shows the four live controls, all enabled, and no Pause", () => {
     card({ status: "running" });
-    expect(screen.getByRole("button", { name: "Pause" })).toBeEnabled();
+    expect(
+      screen.queryByRole("button", { name: "Pause" }),
+    ).not.toBeInTheDocument();
     expect(screen.getByRole("button", { name: "Steer" })).toBeEnabled();
     expect(
       screen.getByRole("button", { name: "Queue follow-up" }),
@@ -246,9 +250,9 @@ describe("RunCard (§3.19)", () => {
   it("reports the action and the run it belongs to", async () => {
     const onAction = vi.fn();
     card({ status: "running" }, { onAction });
-    await userEvent.click(screen.getByRole("button", { name: "Pause" }));
+    await userEvent.click(screen.getByRole("button", { name: "Steer" }));
     expect(onAction).toHaveBeenCalledWith(
-      "pause",
+      "steer",
       expect.objectContaining({ id: "b41c8e02" }),
     );
   });

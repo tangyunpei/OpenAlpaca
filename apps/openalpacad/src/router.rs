@@ -162,6 +162,12 @@ pub fn build_router(state: Arc<AppState>) -> Router {
             "/v1/files/{id}/open",
             post(crate::routes::open_file_handler),
         )
+        // Q06: Reveal by file id — the daemon shows the file in its folder
+        // and answers no path; the shell's `reveal_path` went.
+        .route(
+            "/v1/files/{id}/reveal",
+            post(crate::routes::reveal_file_handler),
+        )
         // Artifact routes (plan §4.9). The content routes are likewise on the
         // `content` sub-router; everything that returns JSON stays here.
         .route("/v1/artifacts", get(crate::routes::list_artifacts_handler))
@@ -444,7 +450,7 @@ pub fn build_router(state: Arc<AppState>) -> Router {
         // names absolute paths; `/v1/health` stays the public liveness probe.
         .route("/v1/status", get(crate::routes::status_handler))
         .layer(axum::middleware::from_fn_with_state(
-            state.clone(),
+            state.tokens.clone(),
             crate::middleware::auth_middleware,
         ));
 
@@ -500,15 +506,27 @@ async fn health_handler(State(state): State<Arc<AppState>>) -> Json<serde_json::
 }
 
 /// `GET /v1/health`'s body: the public liveness probe the GUI polls every
-/// 30 s, clearing its client when `instance_id` changes. Its shape is a wire
-/// contract (`health_tests` pins it).
+/// 30 s, clearing its client when `instance_id` changes, and the second step
+/// of the app shell's probe (Q04), which reads `instance_id` and `protocol`
+/// (`openalpaca_app_support::protocol::reported()`, the one read site of
+/// the debug override). Its shape is a wire contract (`health_tests` pins it).
 fn health_json(instance_id: &str) -> serde_json::Value {
     serde_json::json!({
         "status": "ok",
         "version": env!("CARGO_PKG_VERSION"),
         "pid": std::process::id(),
-        "instance_id": instance_id
+        "instance_id": instance_id,
+        "protocol": openalpaca_app_support::protocol::reported()
     })
+}
+
+/// `GET /v1/health`'s sample for the API contract's folder (API-CONTRACT).
+#[cfg(test)]
+pub(crate) fn contract_samples(out: &mut crate::contract::Samples) {
+    out.response(
+        "get-health",
+        health_json("0f1e2d3c-4b5a-4968-8776-655443322110"),
+    );
 }
 
 /// Root endpoint (basic info)
@@ -589,9 +607,10 @@ mod cors_tests {
 
 /// `GET /v1/health`'s body is a wire contract (deps plan Q01): the public
 /// liveness probe `useHealth` polls every 30 s, clearing its client when
-/// `instance_id` changes. Exactly these four keys, in serde_json's order
+/// `instance_id` changes. Exactly these five keys, in serde_json's order
 /// (sorted — the workspace does not turn `preserve_order` on), `status` always
-/// `ok`, `version` this crate's, and the daemon's own pid.
+/// `ok`, `version` this crate's, the daemon's own pid, and (Q04) `protocol`,
+/// the protocol the daemon speaks, which the shell's `decide_reuse` judges.
 #[cfg(test)]
 mod health_tests {
     use super::health_json;
@@ -604,11 +623,44 @@ mod health_tests {
             format!(
                 concat!(
                     r#"{{"instance_id":"0f1e2d3c-4b5a-4968-8776-655443322110","#,
-                    r#""pid":{pid},"status":"ok","version":"{version}"}}"#
+                    r#""pid":{pid},"protocol":{protocol},"status":"ok","version":"{version}"}}"#
                 ),
                 pid = std::process::id(),
+                protocol = openalpaca_app_support::protocol::PROTOCOL,
                 version = env!("CARGO_PKG_VERSION"),
             )
+        );
+    }
+
+    /// `protocol` is the one read site's,
+    /// `openalpaca_app_support::protocol::reported()`, not a literal (C-20):
+    /// in a child of this test binary given the debug override — so no other
+    /// test in this process, nor a daemon one spawns, sees the variable — the
+    /// body says `PROTOCOL + 1`.
+    #[cfg(debug_assertions)]
+    #[test]
+    fn the_health_body_s_protocol_is_the_one_read_site_s() {
+        use openalpaca_app_support::protocol::{PROTOCOL, PROTOCOL_PLUS_ONE_ENV};
+        const CHILD: &str = "OPENALPACA_TEST_HEALTH_PROTOCOL_CHILD";
+        if std::env::var_os(CHILD).is_some() {
+            assert_eq!(health_json("i")["protocol"], PROTOCOL + 1);
+            return;
+        }
+        let out = std::process::Command::new(std::env::current_exe().expect("this test binary"))
+            .args([
+                "--exact",
+                "router::health_tests::the_health_body_s_protocol_is_the_one_read_site_s",
+                "--test-threads=1",
+            ])
+            .env(CHILD, "1")
+            .env(PROTOCOL_PLUS_ONE_ENV, "1")
+            .output()
+            .expect("the child run");
+        let stdout = String::from_utf8_lossy(&out.stdout);
+        assert!(
+            out.status.success() && stdout.contains("test result: ok. 1 passed"),
+            "{stdout}{}",
+            String::from_utf8_lossy(&out.stderr)
         );
     }
 }

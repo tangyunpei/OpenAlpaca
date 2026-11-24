@@ -269,7 +269,10 @@ impl Deps<'_> {
 
     /// Load a session for a **read**: unscoped by owner (R40); `404` when the
     /// id is unknown.
-    #[allow(clippy::result_large_err)]
+    #[expect(
+        clippy::result_large_err,
+        reason = "the Err is the not-found or database Response the routes send"
+    )]
     fn load_for_read(&self, id: &str) -> Result<Conversation, Response> {
         match self.repo().get_session(id) {
             Ok(Some(session)) => Ok(session),
@@ -280,7 +283,10 @@ impl Deps<'_> {
 
     /// Load a session for a **write**: another owner's row answers `404`, not
     /// `403`, so the route never confirms someone else's conversation exists.
-    #[allow(clippy::result_large_err)]
+    #[expect(
+        clippy::result_large_err,
+        reason = "the Err is the not-found or database Response the routes send"
+    )]
     fn load_for_write(&self, id: &str) -> Result<Conversation, Response> {
         let session = self.load_for_read(id)?;
         if !is_lane_owned_by(&session.lane_key, self.owner) {
@@ -916,4 +922,4 @@ pub(crate) fn remove_scratch_folder(id: &str) {
 }
 
 #[cfg(test)]
-mod tests;
+pub(crate) mod tests;

@@ -85,6 +85,9 @@ pub struct FileWatcherContext {
 
     pub orchestrator: Arc<Orchestrator>,
     pub agent_registry: Arc<openalpaca_core::agent::registry::AgentRegistry>,
+    /// Where the agents directory's rescan writes each changed template's
+    /// `agent` row (subagent design §2.4 L-3).
+    pub db: openalpaca_storage::Database,
     pub llm_router: Option<Arc<openalpaca_llm::LlmRouter>>,
     /// The settings service, for the one thing the router alone cannot do:
     /// build and register a provider the daemon booted without, which is what
@@ -129,9 +132,12 @@ pub fn spawn_file_watcher(
 ) {
     tokio::spawn(async move {
         loop {
-            let event = tokio::select! {
-                Some(ev) = wake_rx.recv() => ev,
-                _ = cancel.cancelled() => break,
+            // A closed channel (`Some(None)`) ends the loop, as the cancel
+            // does. Under `select!` its refutable arm was disabled instead and
+            // the loop parked on the token; neither is reachable while the
+            // loop lives, since `ctx.wake_manager` holds the sender.
+            let Some(Some(event)) = cancel.run_until_cancelled(wake_rx.recv()).await else {
+                break;
             };
             info!("Received WakeEvent: {:?}", event);
 
@@ -471,6 +477,10 @@ pub(crate) fn llm_config_watcher_tick(
     if let Some(ref models) = new_config.models {
         router.model_registry().reload_from_config(models, &disabled);
     }
+    // A reload runs no discovery for a provider already loaded, so the ids
+    // a provider listed that the catalogue retired are said again here
+    // (RETIRED-ID, pending-decisions *Rev 125*: (a) with (c)).
+    router.warn_retired_listed();
 
     // 3. Reload default model
     if let Some(ref orch) = new_config.orchestrator {
@@ -544,13 +554,17 @@ async fn handle_mcp_config_change(ctx: &FileWatcherContext) {
     );
 }
 
+/// A change under `skills/` reloads its folder, which the catalog classifies
+/// again and resolves over the bundled layer (subagent design §2.4 L-5): a
+/// deleted override brings the bundled skill back, a folder edited out of
+/// being an unedited copy overrides it, and a deleted unedited copy changes
+/// nothing. A change under `skills/.archived/` reloads nothing (D-3).
 async fn handle_skills_change(ctx: &FileWatcherContext, changed_path: &Path) {
-    // Determine which skill folder changed
-    if let Ok(relative) = changed_path.strip_prefix(&ctx.skills_dir)
-        && let Some(skill_folder) = relative.components().next()
-    {
-        let skill_dir = ctx.skills_dir.join(skill_folder);
-        let skill_name = skill_folder.as_os_str().to_string_lossy().to_string();
+    if let Some(skill_dir) = changed_skill_folder(&ctx.skills_dir, changed_path) {
+        let skill_name = skill_dir
+            .file_name()
+            .map(|name| name.to_string_lossy().to_string())
+            .unwrap_or_default();
         let action = match ctx.skill_catalog.reload_skill(&skill_dir) {
             Ok(()) => {
                 info!("Skill hot-reloaded: {}", skill_dir.display());
@@ -583,78 +597,65 @@ async fn handle_skills_change(ctx: &FileWatcherContext, changed_path: &Path) {
     }
 }
 
+/// The skill folder a change under `skills_dir` belongs to: the first
+/// component under it. None for `skills_dir` itself and for anything under
+/// `.archived/`, where `openalpaca skills tidy --apply` moves the unedited
+/// copies it tidies: nothing there is a skill (subagent design §2.12 D-3),
+/// so the move's own event reloads no folder named like the archive.
+fn changed_skill_folder(skills_dir: &Path, changed_path: &Path) -> Option<PathBuf> {
+    let relative = changed_path.strip_prefix(skills_dir).ok()?;
+    let skill_folder = relative.components().next()?;
+    if skill_folder.as_os_str() == ".archived" {
+        return None;
+    }
+    Some(skills_dir.join(skill_folder))
+}
+
 async fn handle_agents_change(ctx: &FileWatcherContext, changed_path: &Path) {
-    // Only handle .md files (legacy .toml handled at startup only)
-    if changed_path.extension().and_then(|e| e.to_str()) != Some("md") {
+    // Legacy `.toml` agents are read at start only.
+    if changed_path.extension().and_then(|e| e.to_str()) == Some("toml") {
         return;
     }
-    match std::fs::read_to_string(changed_path) {
-        Ok(content) => {
-            match openalpaca_core::agent::template::parse_agent_markdown(&content) {
-                Ok(template) => {
-                    let template_id = template.frontmatter.id.clone();
+    reload_agent_templates(
+        &ctx.agents_dir,
+        &ctx.agent_registry,
+        &ctx.tool_registry,
+        &ctx.db,
+    );
+}
 
-                    // Upsert template: remove_template() first because register_template()
-                    // is insert-only and silently no-ops if the key already exists.
-                    ctx.agent_registry.remove_template(&template_id);
-                    ctx.agent_registry.register_template(template.clone());
-
-                    // Also upsert the singleton agent instance — but only if Idle.
-                    // If the agent is currently Busy running a task, leave it alone;
-                    // it will pick up the new template on its next spawn.
-                    //
-                    // We use get_with_version() + update_config() (optimistic locking)
-                    // to avoid a TOCTOU race where the dispatcher claims the agent
-                    // between our status check and the replacement.
-                    //
-                    // Note: to_subagent() always constructs with AgentStatus::Busy;
-                    // we override to Idle + clear current_task since this is a
-                    // config reload, not a task dispatch.
-                    if let Some((existing, version)) =
-                        ctx.agent_registry.get_with_version(&template_id)
-                    {
-                        if existing.status.is_available() {
-                            let mut fresh = template.to_subagent(&template_id, "");
-                            fresh.status = openalpaca_core::agent::AgentStatus::Idle;
-                            fresh.current_task = None;
-                            if let Err(e) =
-                                ctx.agent_registry
-                                    .update_config(&template_id, fresh, version)
-                            {
-                                warn!(
-                                    "Agent instance update skipped (concurrent claim): {e}"
-                                );
-                            }
-                        }
-                    } else {
-                        // No instance yet — safe to register a new one
-                        let mut idle_agent = template.to_subagent(&template_id, "");
-                        idle_agent.status = openalpaca_core::agent::AgentStatus::Idle;
-                        idle_agent.current_task = None;
-                        ctx.agent_registry.register(idle_agent);
-                    }
-
-                    info!("Agent template hot-reloaded: {}", changed_path.display());
-                }
-                Err(e) => {
-                    warn!(
-                        "Agent template reload failed for {}: {e}; keeping last active template",
-                        changed_path.display()
-                    );
-                }
-            }
-        }
-        Err(e) => {
-            warn!(
-                "Failed to read agent template {}: {e}",
-                changed_path.display()
-            );
-        }
+/// Any change under `agents/` rescans the whole directory (subagent design
+/// §2.4 L-3): a file deleted, renamed or given a new `id:` leaves the
+/// catalog, an edit that no longer parses — or names an unknown
+/// `annotation:` capability — withholds its id with a `WARN`, and the idle
+/// instances follow, a busy one at the next change. The rescan is
+/// idempotent, so the event a template route's own write raises changes
+/// nothing more.
+pub(crate) fn reload_agent_templates(
+    agents_dir: &Path,
+    registry: &openalpaca_core::agent::registry::AgentRegistry,
+    tool_registry: &openalpaca_core::tools::ToolRegistry,
+    db: &openalpaca_storage::Database,
+) {
+    if let Err(e) = openalpaca_core::agent::file_layer::rescan_file_layer(
+        agents_dir,
+        openalpaca_core::agent::file_layer::LoadMode::Reload,
+        registry,
+        tool_registry,
+        db,
+    ) {
+        warn!("Agent templates reload failed: {e}");
     }
 }
 
 #[cfg(test)]
 mod llm_dedup_tests;
+
+#[cfg(test)]
+mod agents_tests;
+
+#[cfg(test)]
+mod skills_tests;
 
 /// Spawn soul hot-reload subscriber via EventBus (agent-initiated updates).
 ///
@@ -671,13 +672,10 @@ pub fn spawn_soul_reload_subscriber(
     let mut rx = bus.subscribe();
     tokio::spawn(async move {
         loop {
-            let event = tokio::select! {
-                result = rx.recv() => match result {
-                    Ok(ev) => ev,
-                    Err(broadcast::error::RecvError::Closed) => break,
-                    Err(broadcast::error::RecvError::Lagged(_)) => continue,
-                },
-                _ = cancel.cancelled() => break,
+            let event = match cancel.run_until_cancelled(rx.recv()).await {
+                Some(Ok(ev)) => ev,
+                Some(Err(broadcast::error::RecvError::Lagged(_))) => continue,
+                Some(Err(broadcast::error::RecvError::Closed)) | None => break,
             };
             if let openalpaca_core::events::SystemEvent::SoulUpdated {
                 actor,
@@ -726,13 +724,10 @@ pub fn spawn_user_reload_subscriber(
     let mut rx = bus.subscribe();
     tokio::spawn(async move {
         loop {
-            let event = tokio::select! {
-                result = rx.recv() => match result {
-                    Ok(ev) => ev,
-                    Err(broadcast::error::RecvError::Closed) => break,
-                    Err(broadcast::error::RecvError::Lagged(_)) => continue,
-                },
-                _ = cancel.cancelled() => break,
+            let event = match cancel.run_until_cancelled(rx.recv()).await {
+                Some(Ok(ev)) => ev,
+                Some(Err(broadcast::error::RecvError::Lagged(_))) => continue,
+                Some(Err(broadcast::error::RecvError::Closed)) | None => break,
             };
             if let openalpaca_core::events::SystemEvent::UserProfileUpdated {
                 actor,
@@ -784,13 +779,10 @@ pub fn spawn_identity_reload_subscriber(
     let mut rx = bus.subscribe();
     tokio::spawn(async move {
         loop {
-            let event = tokio::select! {
-                result = rx.recv() => match result {
-                    Ok(ev) => ev,
-                    Err(broadcast::error::RecvError::Closed) => break,
-                    Err(broadcast::error::RecvError::Lagged(_)) => continue,
-                },
-                _ = cancel.cancelled() => break,
+            let event = match cancel.run_until_cancelled(rx.recv()).await {
+                Some(Ok(ev)) => ev,
+                Some(Err(broadcast::error::RecvError::Lagged(_))) => continue,
+                Some(Err(broadcast::error::RecvError::Closed)) | None => break,
             };
             if let openalpaca_core::events::SystemEvent::IdentityUpdated {
                 actor,

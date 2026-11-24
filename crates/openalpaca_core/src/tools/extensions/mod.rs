@@ -22,6 +22,7 @@ mod ledger;
 pub mod scan;
 #[cfg(test)]
 mod scan_tests;
+pub mod stderr;
 
 pub use describe::{Audience, Described, is_withheld_refusal};
 pub use ledger::{CallGuard, ExtensionLedger, ExtensionRecord, ScopedRun, Transition};
@@ -154,8 +155,9 @@ pub struct DeclaredContributions {
     /// `plugin.toml`'s `[types]` table, as declared.
     pub types: std::collections::BTreeMap<String, bool>,
     /// What the declaration holds that nothing acts on — a key OpenAlpaca does
-    /// not read, `types.connector` / `types.provider` while their bridges are
-    /// unwired (N-PLUG-2) — in the daemon's words, a key's hidden characters
+    /// not read, `types.connector` while its bridge is unwired, or
+    /// `types.provider`, whose plugin provider type is removed (N-PLUG-2,
+    /// M86) — in the daemon's words, a key's hidden characters
     /// already shown as `<U+XXXX>`. Standing, unlike the row's per-call
     /// `warnings`, so the row awaiting consent says them before Approve.
     #[serde(default)]
@@ -436,29 +438,45 @@ pub enum ExtensionError {
 /// through the trait — **write the bit, then reconcile** — not a second API
 /// beside them. The plugin-only `approve`/`deny`/`remove_orphan` and the
 /// MCP-only `on_tool_list_changed` live on their implementations, not here.
-#[async_trait::async_trait]
+///
+/// A native async trait: each verb returns `impl Future + Send`, so an
+/// implementation writes plain `async fn` and every future stays spawnable.
+/// It is not dyn-compatible; the daemon dispatches by kind over a closed enum
+/// of its two supervisors.
 pub trait ExtensionSupervisor: Send + Sync {
     /// W (write `enabled = true`) then E0–E5. `200` even when bring-up fails.
-    async fn enable(&self, id: &ExtensionId) -> Result<ExtensionRecord, ExtensionError>;
+    fn enable(
+        &self,
+        id: &ExtensionId,
+    ) -> impl Future<Output = Result<ExtensionRecord, ExtensionError>> + Send;
 
     /// W (write `enabled = false`) then T0–T5.
-    async fn disable(&self, id: &ExtensionId) -> Result<ExtensionRecord, ExtensionError>;
+    fn disable(
+        &self,
+        id: &ExtensionId,
+    ) -> impl Future<Output = Result<ExtensionRecord, ExtensionError>> + Send;
 
     /// T0–T4 then E0–E5 under one hold of the per-extension mutex, bit
     /// untouched, no W (design §3.4.1).
-    async fn reload(&self, id: &ExtensionId) -> Result<ExtensionRecord, ExtensionError>;
+    fn reload(
+        &self,
+        id: &ExtensionId,
+    ) -> impl Future<Output = Result<ExtensionRecord, ExtensionError>> + Send;
 
     /// Bring one extension's reality in line with its declaration + bit.
-    async fn reconcile(&self, id: &ExtensionId) -> Result<ExtensionRecord, ExtensionError>;
+    fn reconcile(
+        &self,
+        id: &ExtensionId,
+    ) -> impl Future<Output = Result<ExtensionRecord, ExtensionError>> + Send;
 
     /// The boot and watcher entry point: diff desired against actual.
-    async fn reconcile_all(&self);
+    fn reconcile_all(&self) -> impl Future<Output = ()> + Send;
 
     /// Every record this supervisor owns, for `GET /v1/extensions`.
-    async fn list(&self) -> Vec<ExtensionRecord>;
+    fn list(&self) -> impl Future<Output = Vec<ExtensionRecord>> + Send;
 
     /// T2–T4 for every `Enabled` extension (design §3.5).
-    async fn shutdown_all(&self);
+    fn shutdown_all(&self) -> impl Future<Output = ()> + Send;
 }
 
 #[cfg(test)]

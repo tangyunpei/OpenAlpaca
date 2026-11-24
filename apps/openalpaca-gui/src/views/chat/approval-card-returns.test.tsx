@@ -54,6 +54,7 @@ import {
 } from "@/lib/confirmations-over";
 import { resetConnection } from "@/lib/connection";
 import { daemonEvents, type ServerEvent } from "@/lib/events";
+import { fixtureHost } from "@/lib/host/fixture";
 import { createQueryClient, invalidateForEvent } from "@/lib/query-client";
 import { qk } from "@/lib/query-keys";
 import { QueryProvider } from "@/lib/query-provider";
@@ -65,24 +66,26 @@ import { useUiStore } from "@/stores/ui";
 import ChatView from "./ChatView";
 import { useResolutions } from "./resolution-store";
 
-vi.mock("@tauri-apps/api/core", () => ({
-  invoke: vi.fn(async () => ({
+beforeEach(() => {
+  fixtureHost!.answerConnection({
     baseUrl: "http://127.0.0.1:9999",
     token: "test-token",
     instanceId: "7f3a1122",
-  })),
-}));
+  });
+});
 
 /* ── transports ──────────────────────────────────────────────────────────── */
 
 type Listener = (event: { data?: unknown }) => void;
 
 class FakeEventSource {
+  readonly url: string;
   static instances: FakeEventSource[] = [];
   private readonly listeners = new Map<string, Listener[]>();
   closed = false;
 
-  constructor(readonly url: string) {
+  constructor(url: string) {
+    this.url = url;
     FakeEventSource.instances.push(this);
   }
 

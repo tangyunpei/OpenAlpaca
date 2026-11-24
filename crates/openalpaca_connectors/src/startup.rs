@@ -7,7 +7,10 @@ use openalpaca_core::gateway::Gateway;
 use openalpaca_storage::Database;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
-#[allow(unused_imports)]
+#[expect(
+    unused_imports,
+    reason = "no logging call in this file uses them in any build"
+)]
 use tracing::{info, warn};
 
 #[cfg(feature = "telegram")]
@@ -39,7 +42,13 @@ pub enum ConnectorHandle {
 
 /// Guard that clears a running flag on drop.
 /// Wrap a connector future with this so the flag is cleared on exit.
-#[allow(dead_code)] // constructed only in feature-gated connector spawn paths
+#[cfg_attr(
+    not(any(feature = "discord", all(feature = "imessage", target_os = "macos"))),
+    expect(
+        dead_code,
+        reason = "constructed only in feature-gated connector spawn paths"
+    )
+)]
 pub(crate) struct RunningGuard(pub Arc<AtomicBool>);
 
 impl Drop for RunningGuard {

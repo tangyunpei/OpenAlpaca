@@ -1,0 +1,641 @@
+//! The home store's own paths: its root, the machine's `state/` and what
+//! lives in it — the database's and `discovery.json`'s names, the singleton
+//! lock, the logs with their rotation and tail, the caches, the backups —
+//! and the human's `config/` and `plugins/`, with the root's `README.md` and
+//! `.layout` (Q05, DU-27 (a): moved out of `openalpaca_storage`'s `store`,
+//! which keeps the content stores and the projects and imports these).
+//!
+//! There is one root — `~/.openalpaca` ([`home_root`], overridable with
+//! [`HOME_STORE_ENV`]). The layout, and the rule that `state/` is the
+//! machine's and everything else at the root the human's, are written in the
+//! root's README ([`ensure_home_store`] seeds it) and in
+//! `openalpaca_storage::store`'s module documentation.
+
+use anyhow::{Context, Result, bail};
+use std::fs;
+use std::path::{Path, PathBuf};
+
+/// Environment override for the home root (D4). Absolute paths only.
+pub const HOME_STORE_ENV: &str = "OPENALPACA_HOME_STORE";
+
+/// The home store's directory name under the user's home: `~/.openalpaca`.
+/// No store is made inside a project (storage design ST-1): a project's
+/// content lives in its folder under `projects/` here, and an `.openalpaca/`
+/// an earlier build left in a project is never read (ST-9).
+pub const STORE_DIR_NAME: &str = ".openalpaca";
+
+/// Layout version written to line 1 of `.layout`.
+pub const LAYOUT_VERSION: u32 = 1;
+
+/// The database file name under `state/`, so [`database_path`] and
+/// `openalpaca_storage::store::open_home_database` cannot drift.
+const DB_FILE: &str = "openalpaca.db";
+
+const LAYOUT_FILE: &str = ".layout";
+const README_FILE: &str = "README.md";
+const INSTALL_ID_KEY: &str = "install_id";
+
+// ============================================================================
+// Roots
+// ============================================================================
+
+/// The user's home, as `std::env::home_dir` reports it (on Unix `HOME`
+/// unless empty, else the user database's entry), when it is usable
+/// ([`usable_home`]): every home lookup of the workspace goes through this
+/// or through [`usable_home`], so none reads `HOME` by hand.
+pub fn user_home() -> Option<PathBuf> {
+    usable_home(std::env::home_dir())
+}
+
+/// A home is usable only when it is absolute: an empty or relative one is
+/// no home (121-1). The standard library answers a user-database entry
+/// whose home field is empty as `Some("")`, and a hand-set `HOME` as given,
+/// so either would make a path under it — the store, a `PATH` entry, a
+/// file looked for — one the process's directory resolves.
+pub fn usable_home(home: Option<PathBuf>) -> Option<PathBuf> {
+    home.filter(|home| home.is_absolute())
+}
+
+/// The home root: `$OPENALPACA_HOME_STORE` if set, else `<home>/.openalpaca`,
+/// `<home>` the user's home as [`user_home`] reports it.
+///
+/// Read on every call — never cached — so a test (or a wrapper script) can point
+/// the whole process at another root by setting the variable. Relative values are
+/// rejected: a relative store root would silently re-introduce CWD dependence.
+pub fn home_root() -> Result<PathBuf> {
+    resolve_home_root(
+        std::env::var_os(HOME_STORE_ENV).map(PathBuf::from),
+        std::env::home_dir(),
+    )
+}
+
+/// Pure resolution behind [`home_root`], so the rules are testable without
+/// mutating the process environment. A home that is not usable
+/// ([`usable_home`]: empty or relative) is no home, and the store is
+/// refused rather than made relative.
+pub fn resolve_home_root(
+    override_value: Option<PathBuf>,
+    home: Option<PathBuf>,
+) -> Result<PathBuf> {
+    if let Some(path) = override_value {
+        if !path.is_absolute() {
+            bail!(
+                "{HOME_STORE_ENV} must be an absolute path, got '{}'",
+                path.display()
+            );
+        }
+        return Ok(path);
+    }
+    let home = usable_home(home).context("Failed to determine the home directory")?;
+    Ok(home.join(STORE_DIR_NAME))
+}
+
+/// `home_root()/state` — machine state. Created (0700 on Unix) if missing.
+pub fn state_dir() -> Result<PathBuf> {
+    let dir = home_root()?.join("state");
+    create_private_dir(&dir)?;
+    Ok(dir)
+}
+
+/// `home_root()/state` without creating it — the file accessors below are pure
+/// path queries, so merely *reading* discovery never materialises a store.
+/// Public for the store's own paths under `state/` (Open's copies,
+/// `openalpaca_storage::store::open_copies_dir`).
+pub fn state_dir_path() -> Result<PathBuf> {
+    Ok(home_root()?.join("state"))
+}
+
+/// `state/openalpaca.db`
+pub fn database_path() -> Result<PathBuf> {
+    Ok(state_dir_path()?.join(DB_FILE))
+}
+
+/// `state/discovery.json`
+pub fn discovery_path() -> Result<PathBuf> {
+    Ok(state_dir_path()?.join("discovery.json"))
+}
+
+/// `state/openalpacad.lock`
+pub fn lock_path() -> Result<PathBuf> {
+    Ok(state_dir_path()?.join("openalpacad.lock"))
+}
+
+/// Directory holding `.master_key` — the state dir. Passed to `KeyEncryptor::ensure_at`.
+pub fn master_key_dir() -> Result<PathBuf> {
+    state_dir()
+}
+
+/// `state/logs` — created if missing.
+pub fn logs_dir() -> Result<PathBuf> {
+    let dir = state_dir()?.join(LOGS_DIR);
+    fs::create_dir_all(&dir)
+        .with_context(|| format!("Failed to create logs directory: {}", dir.display()))?;
+    Ok(dir)
+}
+
+/// `state/logs/daemon.log` — the log a launched daemon writes to.
+///
+/// One name, three consumers: both launchers — `openalpaca daemon start` and
+/// the GUI sidecar — point the child's stdout and stderr at it (rotating
+/// first, with [`rotate_daemon_log`], so it stays bounded), and
+/// `GET /v1/status` reports it when it exists.
+/// Non-creating, like [`database_path`] — naming a file is not a reason to
+/// make its directory, and the status route's question is whether the file is
+/// *there*.
+pub fn daemon_log_path() -> Result<PathBuf> {
+    Ok(state_dir_path()?.join(LOGS_DIR).join(DAEMON_LOG_FILE))
+}
+
+/// `state/logs/gui.log` — the app shell's own log (Q14): its `tracing`
+/// output, Tauri's `log` records, its startup marks, a panic and a web
+/// content process that ended. Only the app writes it, appending, after
+/// [`rotate_gui_log`]. Non-creating, like [`daemon_log_path`].
+pub fn gui_log_path() -> Result<PathBuf> {
+    Ok(state_dir_path()?.join(LOGS_DIR).join(GUI_LOG_FILE))
+}
+
+/// `state/logs/gui-dev.log` — the output of `bun run tauri dev` when
+/// `openalpaca gui start` launches the app from a source checkout (Q14):
+/// appended after [`rotate_gui_dev_log`], so a dev launch never truncates
+/// [`gui_log_path`], which the shell it starts writes itself. Non-creating.
+pub fn gui_dev_log_path() -> Result<PathBuf> {
+    Ok(state_dir_path()?.join(LOGS_DIR).join(GUI_DEV_LOG_FILE))
+}
+
+const LOGS_DIR: &str = "logs";
+const DAEMON_LOG_FILE: &str = "daemon.log";
+const GUI_LOG_FILE: &str = "gui.log";
+const GUI_DEV_LOG_FILE: &str = "gui-dev.log";
+
+/// Set on the environment of a daemon whose launcher pointed its stdout and
+/// stderr at `daemon_log_path()` and rotated the file first — marks *this*
+/// daemon instance as that file's owner. `openalpaca daemon start` and the GUI
+/// sidecar both set it; a bare `cargo run` does not. `GET /v1/status` gates
+/// `log_path` on this in addition to the file existing, so a daemon nobody
+/// pointed at the file never reports a path to some *other* daemon's leftover
+/// `daemon.log` just because one happens to be sitting there (T44 fix round 1,
+/// Important #3). The meaning is ownership, not which launcher: the sidecar
+/// used to send its daemon's output to `/dev/null`, and was left out for that
+/// reason alone (T30).
+pub const MANAGED_LOG_ENV: &str = "OPENALPACA_MANAGED_LOG";
+
+/// Set by the app on the daemon it spawns, beside [`MANAGED_LOG_ENV`]: where
+/// the daemon's `PATH` came from and how long the app's capture of it took,
+/// `<source> <milliseconds>` — `login-shell 212`, `fallback-list 3001`, or
+/// `login-shell-noninteractive 1840` when the login shell, run
+/// interactively, ended before it printed its environment and a second run
+/// without `-i` answered (CAPTURE-RETRY) — never the `PATH` itself (Q21).
+/// After the number, the names of the variables the app passed beside
+/// `PATH` because `daemon.toml`'s `[daemon.env] passthrough_keys` lists
+/// them, comma-separated —
+/// `login-shell 212 AWS_PROFILE` — never their values (N-DAEMON-2). The
+/// daemon logs it in one boot line; a daemon started without it (from a
+/// terminal) logs `inherited`. The daemon reads it once, in its preamble,
+/// and removes it ([`take_path_source`]), so no child it spawns inherits it.
+pub const PATH_SOURCE_ENV: &str = "OPENALPACA_PATH_SOURCE";
+
+/// [`PATH_SOURCE_ENV`]'s value, read and removed from this process's
+/// environment, so no child spawned after it — a shell command, an MCP
+/// server, a plugin, a daemon an agent starts — inherits the app's word
+/// about a `PATH` it did not capture for them (LOGIN-CAPTURE, *Rev 91* (2)).
+/// `None` when it was not set, which leaves the environment as it was.
+///
+/// # Safety
+///
+/// It changes the process's environment: call it only while no other thread
+/// can read or write it, as the daemon's single-threaded preamble does,
+/// beside the master key's removal (`std::env::remove_var`'s own contract).
+pub unsafe fn take_path_source() -> Option<std::ffi::OsString> {
+    let value = std::env::var_os(PATH_SOURCE_ENV)?;
+    // SAFETY: the caller guarantees no other thread touches the environment.
+    unsafe { std::env::remove_var(PATH_SOURCE_ENV) };
+    Some(value)
+}
+
+/// `daemon.log` is rotated once it is past this size — 16 MB.
+pub const DAEMON_LOG_MAX_BYTES: u64 = 16 * 1024 * 1024;
+
+/// Rotated generations kept: `daemon.log.1` … `daemon.log.3`, so the log costs
+/// at most four files however long a daemon runs.
+pub const DAEMON_LOG_KEEP: usize = 3;
+
+/// The most a tail read takes from the end of a log — one seek and one short
+/// read, however large the file has grown.
+pub const LOG_TAIL_READ_BYTES: u64 = 64 * 1024;
+
+/// Rotate `daemon.log` once it is past [`DAEMON_LOG_MAX_BYTES`], keeping
+/// [`DAEMON_LOG_KEEP`] generations.
+///
+/// The file is a launched daemon's stdout and stderr, and nothing else bounds
+/// it: a long-lived daemon that logs at `info` would fill a disk given months.
+/// The caps are deliberately dumb — a size check at launch, no timer, no
+/// compression, no dependency. Shared, because there are two launchers and
+/// only one of them used to do this: the GUI sidecar discarded its daemon's
+/// output entirely, which is how a fatal boot error came to reach nobody.
+///
+/// Callers treat a failure as a warning, never as a reason not to start: a
+/// daemon that will not start because its log could not be renamed is the
+/// worse bug.
+pub fn rotate_daemon_log() -> Result<()> {
+    rotate_store_log(&daemon_log_path()?)
+}
+
+/// Rotate `gui.log` under the daemon log's caps ([`DAEMON_LOG_MAX_BYTES`],
+/// [`DAEMON_LOG_KEEP`]) — the app, once at each start, before it opens the
+/// file to append (Q14). A failure is a warning, never a reason not to start.
+pub fn rotate_gui_log() -> Result<()> {
+    rotate_store_log(&gui_log_path()?)
+}
+
+/// Rotate `gui-dev.log` under the same caps — `openalpaca gui start`'s dev
+/// launch, before it opens the file to append (Q14).
+pub fn rotate_gui_dev_log() -> Result<()> {
+    rotate_store_log(&gui_dev_log_path()?)
+}
+
+/// One of the store's logs, rotated under the shared caps.
+fn rotate_store_log(path: &Path) -> Result<()> {
+    rotate_log(path, DAEMON_LOG_MAX_BYTES, DAEMON_LOG_KEEP)
+        .with_context(|| format!("Failed to rotate {}", path.display()))
+}
+
+/// Shift a log's generations down one when it is past `max_bytes`.
+///
+/// `daemon.log` → `.1` → `.2` → … → `.{keep}`, and whatever was at `.{keep}`
+/// is gone. A log that does not exist, or that is still under the cap, is left
+/// alone — the first start of a fresh install rotates nothing.
+fn rotate_log(path: &Path, max_bytes: u64, keep: usize) -> std::io::Result<()> {
+    match fs::metadata(path) {
+        Ok(meta) if meta.len() > max_bytes => {}
+        // Absent, or small enough: nothing to do. An unreadable log is not a
+        // reason to refuse to start, so it is treated the same way.
+        _ => return Ok(()),
+    }
+
+    // Oldest first, so no rename can overwrite a generation that has not moved
+    // yet. `keep` is the last one kept, which makes `.{keep}` the one dropped.
+    let _ = fs::remove_file(log_generation(path, keep));
+    for n in (1..keep).rev() {
+        let from = log_generation(path, n);
+        if from.exists() {
+            fs::rename(&from, log_generation(path, n + 1))?;
+        }
+    }
+    fs::rename(path, log_generation(path, 1))
+}
+
+/// `daemon.log` + `.n` — appended, never substituted, so the base name's own
+/// extension survives.
+fn log_generation(path: &Path, n: usize) -> PathBuf {
+    let mut name = path.as_os_str().to_os_string();
+    name.push(format!(".{n}"));
+    PathBuf::from(name)
+}
+
+/// The last `lines` lines a log gained at or after byte `from`, newest last.
+///
+/// Reads at most [`LOG_TAIL_READ_BYTES`] from the end of the file. `from` is
+/// where the run being asked about began writing — the file's length just
+/// before that daemon was spawned, or `0` for the whole file — so a daemon
+/// that died before writing a byte reads as an empty tail, never as the
+/// *previous* run's last words presented as this one's. When the window
+/// starts inside that range, its first line is a fragment of one it did not
+/// reach and is dropped: nothing is shown cut mid-line. A missing file is an
+/// empty tail. Everything else is [`log_tail`]'s.
+pub fn read_log_tail(path: &Path, from: u64, lines: usize) -> std::io::Result<String> {
+    use std::io::{Read, Seek, SeekFrom};
+
+    let mut file = match fs::File::open(path) {
+        Ok(file) => file,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(String::new()),
+        Err(e) => return Err(e),
+    };
+    let len = file.metadata()?.len();
+    // A file shorter than `from` was rotated or truncated under us: the run's
+    // output, if any, is all of what is there now.
+    let from = if from > len { 0 } else { from };
+    let start = from.max(len.saturating_sub(LOG_TAIL_READ_BYTES));
+    file.seek(SeekFrom::Start(start))?;
+    let mut bytes = Vec::new();
+    file.take(LOG_TAIL_READ_BYTES).read_to_end(&mut bytes)?;
+
+    let text = String::from_utf8_lossy(&bytes);
+    let text = if start > from {
+        text.split_once('\n').map_or("", |(_, rest)| rest)
+    } else {
+        &text
+    };
+    Ok(log_tail(text, lines))
+}
+
+/// The last `lines` lines of `text`, newest last, as a person should read them.
+///
+/// Verbatim otherwise: no line is reworded, prefixed or cut, and a blank line
+/// *inside* the window stays — a multi-paragraph message must still read as
+/// the paragraphs it was written in. Three things are removed, none of them
+/// text: trailing blank lines (a log ends in a newline,
+/// and a daemon that died mid-write can leave more), the blank lines the
+/// window would otherwise open with, and ANSI colour escapes — the daemon's
+/// `tracing` output carries them even into a file, and a panel that renders
+/// the tail would print them as `[2m` noise.
+pub fn log_tail(text: &str, lines: usize) -> String {
+    let cleaned: Vec<String> = text.lines().map(strip_ansi).collect();
+    let end = cleaned
+        .iter()
+        .rposition(|line| !line.trim().is_empty())
+        .map_or(0, |last| last + 1);
+    let window = &cleaned[end.saturating_sub(lines)..end];
+    let first = window
+        .iter()
+        .position(|line| !line.trim().is_empty())
+        .unwrap_or(window.len());
+    window[first..].join("\n")
+}
+
+/// `line` without its ANSI CSI escape sequences (`ESC [` … final byte), which
+/// is every colour and style code `tracing`'s formatter writes.
+fn strip_ansi(line: &str) -> String {
+    let mut out = String::with_capacity(line.len());
+    let mut chars = line.chars().peekable();
+    while let Some(c) = chars.next() {
+        if c == '\u{1b}' && chars.peek() == Some(&'[') {
+            chars.next();
+            // Parameter and intermediate bytes, then one final byte in
+            // `@`..=`~`. A sequence the line ends inside is dropped whole.
+            for next in chars.by_ref() {
+                if ('@'..='~').contains(&next) {
+                    break;
+                }
+            }
+        } else {
+            out.push(c);
+        }
+    }
+    out
+}
+
+/// `state/cache` — derived data the machine can rebuild: the memory search
+/// index, `memory-index-v1.sqlite`, Open's copies of uploads under `open/`
+/// (`openalpaca_storage::store::stage_open_copy`) and the built-in skills'
+/// files under `bundled-skills/` ([`bundled_skills_dir`]). A pure path query: the index
+/// opens it, and Open's staging and the daemon's start make it when it is
+/// missing. Deleting the directory costs one rebuild of the index from the
+/// notes on disk, and the skills' files written again, and nothing else.
+pub fn cache_dir() -> Result<PathBuf> {
+    Ok(state_dir()?.join(CACHE_DIR))
+}
+
+/// The folder's name under `state/` — public for the store's own folders
+/// under it (Open's copies).
+pub const CACHE_DIR: &str = "cache";
+
+/// `state/cache/bundled-skills` — the built-in skills' files, written from
+/// the binary at each daemon start (subagent design §2.6 K-1, K-2), where a
+/// built-in skill's scripts run from. The machine's, never the person's:
+/// they read and override skills in `config/skills/`. A pure path query.
+pub fn bundled_skills_dir() -> Result<PathBuf> {
+    Ok(state_dir_path()?.join(CACHE_DIR).join(BUNDLED_SKILLS_DIR))
+}
+
+/// The folder's name under `state/cache/`.
+const BUNDLED_SKILLS_DIR: &str = "bundled-skills";
+
+/// `state/editor` — the CLI's editor buffers: `openalpaca memory add|edit`
+/// and `openalpaca persona edit user` hand `$EDITOR` a file here, and a
+/// refused or conflicting edit keeps the text in it. The user's unsaved text,
+/// not derived data, so not under `cache/`. Created (0700 on Unix) if
+/// missing, with `state/`.
+pub fn editor_dir() -> Result<PathBuf> {
+    let dir = state_dir()?.join(EDITOR_DIR);
+    create_private_dir(&dir)?;
+    Ok(dir)
+}
+
+const EDITOR_DIR: &str = "editor";
+
+/// `state/backups` — created if missing. The atomic config writer's rotation target.
+pub fn backups_dir() -> Result<PathBuf> {
+    let dir = state_dir()?.join("backups");
+    fs::create_dir_all(&dir)
+        .with_context(|| format!("Failed to create backups directory: {}", dir.display()))?;
+    Ok(dir)
+}
+
+/// `home_root()/plugins` — user-dropped plugin directories. Created if missing.
+pub fn plugins_dir() -> Result<PathBuf> {
+    let dir = home_root()?.join("plugins");
+    fs::create_dir_all(&dir)
+        .with_context(|| format!("Failed to create plugins directory: {}", dir.display()))?;
+    Ok(dir)
+}
+
+/// `home_root()/config` — the runtime config dir GUI/CLI-managed daemons are
+/// started with (`OPENALPACA_CONFIG_DIR`).
+///
+/// A pure path query: the CLI calls this only to *test* whether a runtime
+/// `llm.toml`/`daemon.toml` exists before falling back to the repo's `./config`,
+/// and asking must not materialise a store. Use [`ensure_runtime_config_dir`]
+/// where something is about to be written.
+///
+/// The *semantics* of `OPENALPACA_CONFIG_DIR` are untouched by the root move:
+/// a dev run from the repo still resolves `./config` through the exe/CWD walk-up.
+pub fn runtime_config_dir() -> Result<PathBuf> {
+    Ok(home_root()?.join("config"))
+}
+
+/// [`runtime_config_dir`], created if missing.
+///
+/// The GUI and the CLI pass this to a daemon they spawn, and
+/// `resolve_config_base_dir` ignores an `OPENALPACA_CONFIG_DIR` that does not
+/// exist — so the directory has to be there before the spawn, not after.
+pub fn ensure_runtime_config_dir() -> Result<PathBuf> {
+    let dir = runtime_config_dir()?;
+    fs::create_dir_all(&dir)
+        .with_context(|| format!("Failed to create config directory: {}", dir.display()))?;
+    Ok(dir)
+}
+
+/// Creates the home root and seeds its metadata: `README.md` and `.layout`
+/// (line 2 `install_id=<uuid-v4>`). Idempotent — each file is written only
+/// when absent, so user edits stick. `openalpaca_storage::store::ensure_store`
+/// answers its home scope with this.
+pub fn ensure_home_store() -> Result<PathBuf> {
+    let root = home_root()?;
+    fs::create_dir_all(&root)
+        .with_context(|| format!("Failed to create store root: {}", root.display()))?;
+    let readme = root.join(README_FILE);
+    if !readme.exists() {
+        write_new(&readme, HOME_README)?;
+    }
+    ensure_layout(&root)?;
+    Ok(root)
+}
+
+/// The layout version recorded in `<root>/.layout`, or `None` when the root
+/// carries no marker (not a store yet).
+pub fn layout_version(root: &Path) -> Result<Option<u32>> {
+    let path = root.join(LAYOUT_FILE);
+    let text = match fs::read_to_string(&path) {
+        Ok(t) => t,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(e) => {
+            return Err(e).with_context(|| format!("Failed to read {}", path.display()));
+        }
+    };
+    let first = text.lines().next().unwrap_or("").trim();
+    let version = first
+        .parse::<u32>()
+        .with_context(|| format!("Malformed layout version in {}: {first:?}", path.display()))?;
+    Ok(Some(version))
+}
+
+/// The install id recorded on line 2 of the home root's `.layout`, if present.
+pub fn install_id(root: &Path) -> Result<Option<String>> {
+    Ok(layout_text(root)?.as_deref().and_then(read_install_id))
+}
+
+/// `<root>/.layout`'s contents, or `None` when the root carries no marker.
+fn layout_text(root: &Path) -> Result<Option<String>> {
+    let path = root.join(LAYOUT_FILE);
+    match fs::read_to_string(&path) {
+        Ok(text) => Ok(Some(text)),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(None),
+        Err(e) => Err(e).with_context(|| format!("Failed to read {}", path.display())),
+    }
+}
+
+// ============================================================================
+// Internals
+// ============================================================================
+
+/// `dir` and its missing parents, `dir` made 0700 on Unix (best effort) —
+/// how `state/` and the folders the machine keeps private under it are made.
+pub fn create_private_dir(dir: &Path) -> Result<()> {
+    fs::create_dir_all(dir)
+        .with_context(|| format!("Failed to create directory: {}", dir.display()))?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        // Best effort: don't fail if permissions can't be set.
+        let _ = fs::set_permissions(dir, fs::Permissions::from_mode(0o700));
+    }
+    Ok(())
+}
+
+fn write_new(path: &Path, contents: &str) -> Result<()> {
+    fs::write(path, contents).with_context(|| format!("Failed to write {}", path.display()))
+}
+
+/// Write through a sibling temp file and `rename`, so a crash can never leave a
+/// half-written file behind.
+fn write_atomic(path: &Path, contents: &str) -> Result<()> {
+    let mut tmp_name = path
+        .file_name()
+        .with_context(|| format!("Not a file path: {}", path.display()))?
+        .to_os_string();
+    tmp_name.push(".tmp");
+    let tmp = path.with_file_name(tmp_name);
+
+    let mut file =
+        fs::File::create(&tmp).with_context(|| format!("Failed to create {}", tmp.display()))?;
+    use std::io::Write;
+    file.write_all(contents.as_bytes())
+        .and_then(|()| file.sync_all())
+        .with_context(|| format!("Failed to write {}", tmp.display()))?;
+    drop(file);
+
+    fs::rename(&tmp, path).with_context(|| format!("Failed to move {} into place", tmp.display()))
+}
+
+/// Writes the home root's `.layout` when absent — line 1 the layout version,
+/// line 2 `install_id=<uuid>` — and repairs an unreadable version line.
+/// Nothing is ever added to a marker that exists: it keeps whatever keys it
+/// has, and any other line already there is carried through untouched.
+fn ensure_layout(root: &Path) -> Result<()> {
+    let path = root.join(LAYOUT_FILE);
+    let existing = match fs::read_to_string(&path) {
+        Ok(t) => Some(t),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => None,
+        Err(e) => return Err(e).with_context(|| format!("Failed to read {}", path.display())),
+    };
+
+    let Some(text) = existing else {
+        let fresh = format!(
+            "{LAYOUT_VERSION}\n{INSTALL_ID_KEY}={}\n",
+            uuid::Uuid::new_v4()
+        );
+        return write_atomic(&path, &fresh);
+    };
+
+    // Line 1 is the layout version. Something that is not an integer is not a
+    // version — repair it rather than preserve it and keep failing every read.
+    let mut lines: Vec<String> = text.lines().map(str::to_string).collect();
+    if lines
+        .first()
+        .is_some_and(|first| first.trim().parse::<u32>().is_ok())
+    {
+        return Ok(());
+    }
+    tracing::warn!(
+        "Repairing the layout marker in {}: line 1 was not a version",
+        path.display()
+    );
+    match lines.first_mut() {
+        Some(first) => *first = LAYOUT_VERSION.to_string(),
+        None => lines.push(LAYOUT_VERSION.to_string()),
+    }
+    let mut out = lines.join("\n");
+    out.push('\n');
+    write_atomic(&path, &out)
+}
+
+fn read_install_id(layout: &str) -> Option<String> {
+    read_layout_value(layout, INSTALL_ID_KEY)
+}
+
+/// One `key=value` line of a `.layout` marker, from line 2 onwards (line 1 is
+/// the version).
+fn read_layout_value(layout: &str, key: &str) -> Option<String> {
+    layout
+        .lines()
+        .skip(1)
+        .find_map(|line| line.trim().strip_prefix(&format!("{key}=")))
+        .map(|v| v.trim().to_string())
+        .filter(|v| !v.is_empty())
+}
+
+/// The home root's `README.md`, written by [`ensure_home_store`] when absent.
+const HOME_README: &str = r#"# OpenAlpaca — home store
+
+Created and maintained by OpenAlpaca. The rule for this directory: **`state/` is
+the machine's; everything else here is yours.**
+
+A factory reset (`openalpaca config reset --factory`) deletes the database
+inside `state/` and nothing else there — the master key, the memory control
+snapshots, the search index, the logs and the backups stay. Deleting a content
+directory loses those files only.
+
+| Entry | Holds | Retention class |
+|---|---|---|
+| `state/` | database (+ WAL/SHM), `discovery.json`, `openalpacad.lock`, `.master_key`, `repl_history` (the line history of `openalpaca chat`) | never swept — a factory reset deletes the database here and leaves the rest |
+| `state/memory-control/` | one control snapshot per memory partition: the revision the service last wrote, each note's origin, the tombstones of forgotten notes | never swept — the notes' authority and forget history; a backup of `memory/` includes it |
+| `state/backups/` | rotated copies of hand-edited config (`<name>.bak.<ts>`, `<name>.unparseable-<ts>`) | regenerable — swept freely; never user-edited |
+| `state/logs/` | `daemon.log`, `gui.log` (the app's own), `gui-dev.log` (`openalpaca gui start` from a source checkout), each rotated past 16 MB | regenerable — swept freely |
+| `state/cache/` | derived data the machine can rebuild — `memory-index-v1.sqlite`, the memory search index; `open/<file id>/`, the copy of an upload made each time you open it, under the name you uploaded it with; and `bundled-skills/`, the built-in skills' files, written at each start | regenerable — deleting it costs one rebuild from the notes on the next start; the copies under `open/` go at each daemon start, and with their project's data; `bundled-skills/` is written again at each start, or when a built-in skill next runs |
+| `state/editor/` | the files `openalpaca memory add`, `memory edit` and `persona edit user` open in your editor; a refused or conflicting edit keeps your text here and says where | yours to delete — never swept; remove a kept file once you have merged it |
+| `config/` | your runtime config: `llm.toml`, `daemon.toml`, `mcp.toml`, `orchestrator/`, `tools/`, and `agents/` and `skills/`, your own agent templates and skills and those that override the built-in ones (an unedited copy of a built-in one is not read) | yours — never swept |
+| `plugins/` | plugin directories you dropped in, `.permissions.toml`, `.config/<name>.toml`, `.data/<name>/` | yours — never swept |
+| `projects/` | one folder per project you work in, named after the project's path: `project.json` (the project's id and the path of its own folder) and that project's `artifacts/` (its by-products: drafts, pictures, things handed between agents), `uploads/` and `memory/`, laid out like the entries below. OpenAlpaca's stores write nothing inside the project's own folder: the files an agent writes or edits there are real files of the project, each write asking you first. OpenAlpaca keeps no versions of them: before `file_write` or `file_edit` replaces or edits a file, the content it had is copied into that conversation's log (`sessions/<id>/snapshots/`, size-capped like the rest of the log; a shell command's changes keep no copy), and any longer history is the project's own — git's, where the project is a repository | yours — never swept; a factory reset leaves it; `openalpaca store purge <project>` deletes one project's folder with the rest of its data, and never the project's own files |
+| `artifacts/` | files produced by tasks that had no project; under `kept/`, a deleted project's files that another conversation still shows | never garbage-collected |
+| `uploads/` | files you uploaded that carried no project signal; under `kept/`, a deleted project's uploads that another conversation still shows | swept: an upload attached to no message is deleted once past the grace period |
+| `sessions/` | session event logs — all sessions live here, never in a project | size-capped; no age sweep yet (owner decision T12) |
+| `memory/` | your memory notes outside any project, per owner: `owners/<owner-key>/notes/*.md`, with `.history/` (the last five service-written revisions) and `MEMORY.md` (a rebuildable index) beside them | yours — never swept; a factory reset leaves them, orphaned until the new owner adopts them |
+| `scratch/` | one working folder per conversation with no project, `scratch/<conversation id>/`: where its agents read and list files and run shell commands, made the first time a tool works there (a file they save with `file_write` is a by-product under `artifacts/`) | removed with its conversation — deleting it, or deleting the data of the project it was later bound to; clearing or archiving it keeps the folder, and nothing else sweeps it |
+
+Directories OpenAlpaca did not create are never touched and never swept.
+
+`.layout` records this store's layout version and its install id. Do not edit it.
+"#;
+
+#[cfg(test)]
+mod tests;

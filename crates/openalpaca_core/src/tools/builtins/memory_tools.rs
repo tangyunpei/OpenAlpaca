@@ -32,7 +32,6 @@ use crate::memory::service::{
     wire,
 };
 use crate::tools::registry::{BuiltInTool, RegisteredTool, ToolBackend, ToolContext};
-use async_trait::async_trait;
 use chrono::{DateTime, Utc};
 use openalpaca_llm::ToolDefinition;
 use openalpaca_storage::memory_files::{
@@ -60,13 +59,13 @@ fn closed_schema(properties: serde_json::Value, required: &[&str]) -> serde_json
 
 fn registered(
     definition: ToolDefinition,
-    backend: Arc<dyn BuiltInTool>,
+    backend: impl BuiltInTool + 'static,
     capability: &str,
 ) -> RegisteredTool {
     RegisteredTool {
         annotations: annotations_for_builtin(&definition.name),
         definition,
-        backend: ToolBackend::BuiltIn(backend),
+        backend: ToolBackend::built_in(backend),
         provides_capabilities: vec![capability.to_string()],
         exempt_from_timeout: false,
         version: env!("CARGO_PKG_VERSION").to_string(),
@@ -178,7 +177,6 @@ struct MemorySearchTool {
     service: Arc<MemoryService>,
 }
 
-#[async_trait]
 impl BuiltInTool for MemorySearchTool {
     async fn execute(&self, _arguments: &serde_json::Value) -> Result<String, String> {
         Err("memory_search requires execution context — use execute_with_context".to_string())
@@ -294,7 +292,6 @@ struct MemoryReadTool {
     service: Arc<MemoryService>,
 }
 
-#[async_trait]
 impl BuiltInTool for MemoryReadTool {
     async fn execute(&self, _arguments: &serde_json::Value) -> Result<String, String> {
         Err("memory_read requires execution context — use execute_with_context".to_string())
@@ -379,7 +376,6 @@ struct MemoryTimelineTool {
     service: Arc<MemoryService>,
 }
 
-#[async_trait]
 impl BuiltInTool for MemoryTimelineTool {
     async fn execute(&self, _arguments: &serde_json::Value) -> Result<String, String> {
         Err("memory_timeline requires execution context — use execute_with_context".to_string())
@@ -478,7 +474,6 @@ struct MemoryListTool {
     service: Arc<MemoryService>,
 }
 
-#[async_trait]
 impl BuiltInTool for MemoryListTool {
     async fn execute(&self, _arguments: &serde_json::Value) -> Result<String, String> {
         Err("memory_list requires execution context — use execute_with_context".to_string())
@@ -544,28 +539,28 @@ pub fn memory_read_tools(service: Arc<MemoryService>) -> Vec<RegisteredTool> {
     vec![
         registered(
             memory_search_tool_definition(),
-            Arc::new(MemorySearchTool {
+            MemorySearchTool {
                 service: service.clone(),
-            }),
+            },
             "memory_read",
         ),
         registered(
             memory_read_tool_definition(),
-            Arc::new(MemoryReadTool {
+            MemoryReadTool {
                 service: service.clone(),
-            }),
+            },
             "memory_read",
         ),
         registered(
             memory_list_tool_definition(),
-            Arc::new(MemoryListTool {
+            MemoryListTool {
                 service: service.clone(),
-            }),
+            },
             "memory_read",
         ),
         registered(
             memory_timeline_tool_definition(),
-            Arc::new(MemoryTimelineTool { service }),
+            MemoryTimelineTool { service },
             "memory_read",
         ),
     ]
@@ -637,7 +632,6 @@ impl MemoryStoreTool {
     }
 }
 
-#[async_trait]
 impl BuiltInTool for MemoryStoreTool {
     async fn execute(&self, _arguments: &serde_json::Value) -> Result<String, String> {
         Err("memory_store requires execution context — use execute_with_context".to_string())
@@ -806,7 +800,6 @@ impl MemoryUpdateTool {
     }
 }
 
-#[async_trait]
 impl BuiltInTool for MemoryUpdateTool {
     async fn execute(&self, _arguments: &serde_json::Value) -> Result<String, String> {
         Err("memory_update requires execution context — use execute_with_context".to_string())
@@ -968,7 +961,6 @@ impl MemoryConfirmTool {
     }
 }
 
-#[async_trait]
 impl BuiltInTool for MemoryConfirmTool {
     async fn execute(&self, _arguments: &serde_json::Value) -> Result<String, String> {
         Err("memory_confirm requires execution context — use execute_with_context".to_string())
@@ -1171,7 +1163,6 @@ impl MemoryForgetTool {
     }
 }
 
-#[async_trait]
 impl BuiltInTool for MemoryForgetTool {
     async fn execute(&self, _arguments: &serde_json::Value) -> Result<String, String> {
         Err("memory_forget requires execution context — use execute_with_context".to_string())

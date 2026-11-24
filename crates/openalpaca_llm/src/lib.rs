@@ -22,8 +22,8 @@ pub use config::llm_config::{
     EndpointsConfig, EnvVarsConfig, KeyConfig, LlmRouterConfig, LlmRuntimeConfig, ModelConfigEntry,
     OrchestratorLlmConfig, ProviderConfig, ProviderDefaults, SecurityConfig, TimeoutsConfig,
     WebSearchConfig, build_router, build_router_with_secret_store, collect_secret_refs,
-    migrate_llm_secrets, read_config, resolve_key_from_config, reverse_migrate_llm_secrets,
-    write_config,
+    is_local_url, migrate_llm_secrets, read_config, resolve_key_from_config,
+    reverse_migrate_llm_secrets, write_config,
 };
 pub use config::settings_service::{
     ConfigWriter, LlmSettingsService, OrchestratorConfigResponse, ProviderEnabledOutcome,
@@ -44,28 +44,31 @@ pub use keys::secret_store::{
 pub use routing::cost_tracker::{
     CacheStats, CallRecord, CostSnapshot, CostTracker, ModelUsageStats, UsageStats,
 };
+pub use routing::model_alias::{ALIAS_TABLE, AliasRow, ModelAlias, ModelChoice, compiled_alias};
 pub use routing::model_registry::{
-    DiscoveredModel, ModelEntry, ModelInfo, ModelRegistry, PricingInfo, ProviderDiscovery,
+    CacheRates, DiscoveredModel, LongPromptRate, ModelEntry, ModelInfo, ModelRegistry, PricingInfo,
+    ProviderDiscovery, RequestContract,
 };
 pub use routing::provider_usage::{ExternalUsage, ProviderUsageSummary, ProviderUsageTracker};
 pub use routing::rate_limiter::{
     CircuitState, RateLimitConfig, RateLimiterRegistry, backoff_with_jitter,
 };
 pub use routing::router::{
-    LlmCapacityInfo, LlmRouter, LlmRouterError, ProviderEntry, RateHeadroom, RequestContext,
+    AliasResolution, LlmRouter, LlmRouterError, ProviderEntry, RateHeadroom, RequestContext,
     RoutedStream, RouterRequest,
 };
-pub use streaming::collect_stream;
+pub use streaming::{collect_stream, collect_stream_idle};
 pub use tool_arguments::UnreadableArguments;
 pub use types::*;
 
-use async_trait::async_trait;
-
-#[async_trait]
+#[dynosaur::dynosaur(pub DynLlmProvider = dyn(box) LlmProvider)]
 pub trait LlmProvider: Send + Sync {
     fn name(&self) -> &str;
     fn supports_tools(&self) -> bool;
-    async fn chat(&self, request: ChatRequest) -> Result<ChatResponse, LlmError>;
+    fn chat(
+        &self,
+        request: ChatRequest,
+    ) -> impl Future<Output = Result<ChatResponse, LlmError>> + Send;
 
     /// Whether a call to this provider needs an API key at all.
     ///
@@ -78,20 +81,60 @@ pub trait LlmProvider: Send + Sync {
         true
     }
 
+    /// The deadline one non-streaming call to this provider is given — the
+    /// figure its client was built with, which is also a streamed call's read
+    /// gap (`providers::build_http_client`) — or `None` when it sets none.
+    ///
+    /// The router reads it to tell a call that used up its whole timeout
+    /// from one cut short (LOCAL-HOUR-NO-RETRY); `None` keeps today's
+    /// retries.
+    fn request_timeout(&self) -> Option<std::time::Duration> {
+        None
+    }
+
+    /// The address this provider sends its requests to, as it was built;
+    /// `None` for one that does not say.
+    ///
+    /// The router exempts a keyed provider's discovered models from the
+    /// unpriced fallback only when both this address and the runtime
+    /// config's `base_url` are local (`is_local_url`: loopback or the home
+    /// network, item 17): a hot reload rebuilds no provider, and an arm that
+    /// ignores `base_url` keeps calling its own.
+    fn base_url(&self) -> Option<&str> {
+        None
+    }
+
+    /// Whether this provider calls its vendor's own API, so that the rows
+    /// this build compiles for its provider type — its `ALIAS_TABLE` row
+    /// and its catalogue rows — name models it serves (COMPAT-SERVER, the
+    /// owner's answer of 2026-11-15). True but for the OpenAI arm built to
+    /// call another server than OpenAI's own API (`is_openai_api`): a
+    /// llama.cpp, LM Studio or vLLM server, or a gateway, behind
+    /// `[providers.openai]`. There an alias collapses to the parent's model
+    /// and a compiled row the server did not list is not routable. Read
+    /// from the address the provider was built to call, which a hot reload
+    /// does not change.
+    fn serves_compiled_rows(&self) -> bool {
+        true
+    }
+
     /// Chat using a specific API key. Default delegates to `chat()`.
     /// Providers override this to inject the key into their HTTP requests.
-    async fn chat_with_key(
+    fn chat_with_key(
         &self,
         _key: &str,
         request: ChatRequest,
-    ) -> Result<ChatResponse, LlmError> {
-        self.chat(request).await
+    ) -> impl Future<Output = Result<ChatResponse, LlmError>> + Send {
+        async move { self.chat(request).await }
     }
 
     /// List models available from this provider using the given API key.
     /// Default returns empty. Providers override with real API calls.
-    async fn list_models_with_key(&self, _key: &str) -> Result<Vec<String>, LlmError> {
-        Ok(vec![])
+    fn list_models_with_key(
+        &self,
+        _key: &str,
+    ) -> impl Future<Output = Result<Vec<String>, LlmError>> + Send {
+        async move { Ok(vec![]) }
     }
 
     /// The provider's models, with whatever metadata its API volunteers.
@@ -100,16 +143,19 @@ pub trait LlmProvider: Send + Sync {
     /// A provider that can say more — context length, image and tool support —
     /// overrides this so the registry does not have to guess (L2). `key` is
     /// empty for a provider that [needs none](Self::requires_key).
-    async fn discover_models(
+    fn discover_models(
         &self,
         key: &str,
-    ) -> Result<Vec<crate::routing::model_registry::DiscoveredModel>, LlmError> {
-        Ok(self
-            .list_models_with_key(key)
-            .await?
-            .into_iter()
-            .map(crate::routing::model_registry::DiscoveredModel::bare)
-            .collect())
+    ) -> impl Future<Output = Result<Vec<crate::routing::model_registry::DiscoveredModel>, LlmError>>
+    + Send {
+        async move {
+            Ok(self
+                .list_models_with_key(key)
+                .await?
+                .into_iter()
+                .map(crate::routing::model_registry::DiscoveredModel::bare)
+                .collect())
+        }
     }
 
     /// Whether this provider supports streaming responses.
@@ -118,20 +164,25 @@ pub trait LlmProvider: Send + Sync {
     }
 
     /// Streaming chat completion. Default falls back to non-streaming.
-    async fn chat_streaming(&self, request: ChatRequest) -> Result<ChatStream, LlmError> {
-        let response = self.chat(request).await?;
-        Ok(Box::pin(futures_util::stream::iter(
-            response_to_events(response).into_iter().map(Ok),
-        )))
+    fn chat_streaming(
+        &self,
+        request: ChatRequest,
+    ) -> impl Future<Output = Result<ChatStream, LlmError>> + Send {
+        async move {
+            let response = self.chat(request).await?;
+            Ok(Box::pin(futures_util::stream::iter(
+                response_to_events(response).into_iter().map(Ok),
+            )) as ChatStream)
+        }
     }
 
     /// Streaming chat with specific key. Default delegates to `chat_streaming`.
-    async fn chat_streaming_with_key(
+    fn chat_streaming_with_key(
         &self,
         _key: &str,
         request: ChatRequest,
-    ) -> Result<ChatStream, LlmError> {
-        self.chat_streaming(request).await
+    ) -> impl Future<Output = Result<ChatStream, LlmError>> + Send {
+        async move { self.chat_streaming(request).await }
     }
 }
 
@@ -159,6 +210,9 @@ pub fn response_to_events(response: ChatResponse) -> Vec<StreamEvent> {
             partial_json: tc.arguments.to_string(),
         });
     }
+    if let Some(turn) = response.echo {
+        events.push(StreamEvent::Turn(turn));
+    }
     events.push(StreamEvent::Usage(response.usage));
     events.push(StreamEvent::Done {
         finish_reason: response.finish_reason,
@@ -169,6 +223,30 @@ pub fn response_to_events(response: ChatResponse) -> Vec<StreamEvent> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A type-erased provider is held in the router's `ProviderEntry` and
+    /// its CLI backends, and every call through it runs in spawned work.
+    ///
+    /// The supertraits alone make the held form `Send + Sync`, so the test
+    /// also holds each async method's declared `+ Send`: the generic body
+    /// sees only the trait's declaration, and naming it at the Dyn compiles
+    /// it.
+    #[test]
+    fn a_held_llm_provider_is_send_and_sync() {
+        fn send_and_sync<T: Send + Sync + ?Sized>() {}
+        send_and_sync::<std::sync::Arc<DynLlmProvider<'static>>>();
+
+        fn is_send<T: Send>(_: &T) {}
+        fn futures_are_send<P: LlmProvider + ?Sized>(p: &P, request: ChatRequest) {
+            is_send(&p.chat(request.clone()));
+            is_send(&p.chat_with_key("k", request.clone()));
+            is_send(&p.list_models_with_key("k"));
+            is_send(&p.discover_models("k"));
+            is_send(&p.chat_streaming(request.clone()));
+            is_send(&p.chat_streaming_with_key("k", request));
+        }
+        let _ = futures_are_send::<DynLlmProvider<'static>>;
+    }
 
     #[test]
     fn test_role_serialization() {
@@ -195,6 +273,8 @@ mod tests {
             }]),
             tool_call_id: None,
             is_error: false,
+            echo: None,
+            notice: false,
         };
         let json = serde_json::to_string(&msg).unwrap();
         assert!(json.contains("tool_calls"));
@@ -240,44 +320,46 @@ mod tests {
         assert!(LlmError::Stream("broken pipe".to_string()).is_transient());
     }
 
+    /// The retry table's rows by kind (M57, (a)). Each kind is produced from a
+    /// real reqwest error in `providers::transport_tests`; here, only what the
+    /// router and the loop read from it.
     #[test]
-    fn test_http_timeout_is_transient() {
-        assert!(LlmError::Http("error sending request: operation timed out".into()).is_transient());
+    fn transport_kinds_are_retried_as_the_retry_table_says() {
+        use crate::error::TransportKind;
+        for (kind, transient, retried_on_key) in [
+            (TransportKind::ConnectTimeout, true, true),
+            (TransportKind::RequestTimeout, true, false),
+            (TransportKind::ResetOrClosed, true, true),
+            (TransportKind::ConnectRefused, false, false),
+            (TransportKind::Dns, false, false),
+            (TransportKind::TlsOrOther, false, false),
+        ] {
+            let err = LlmError::Transport {
+                kind,
+                message: "error sending request for url (http://127.0.0.1:1/)".to_string(),
+            };
+            assert_eq!(err.is_transient(), transient, "{kind:?}");
+            assert_eq!(err.is_retryable_on_key(), retried_on_key, "{kind:?}");
+        }
     }
 
+    /// The key layer's predicate is `is_transient` but for a request timeout.
     #[test]
-    fn test_http_connection_reset_is_transient() {
-        assert!(LlmError::Http("connection reset by peer".into()).is_transient());
-    }
-
-    #[test]
-    fn test_http_broken_pipe_is_transient() {
-        assert!(LlmError::Http("error sending request: broken pipe".into()).is_transient());
-    }
-
-    #[test]
-    fn test_http_dns_error_not_transient() {
-        assert!(!LlmError::Http("dns error: failed to lookup address".into()).is_transient());
-    }
-
-    #[test]
-    fn test_http_tls_error_not_transient() {
-        assert!(!LlmError::Http("error trying to connect: ssl connect error: certificate verify failed".into()).is_transient());
-    }
-
-    #[test]
-    fn test_http_connection_refused_not_transient() {
-        assert!(!LlmError::Http("tcp connect error: Connection refused (os error 61)".into()).is_transient());
-    }
-
-    #[test]
-    fn test_http_connection_closed_is_transient() {
-        assert!(LlmError::Http("connection closed before message completed".into()).is_transient());
-    }
-
-    #[test]
-    fn test_http_incomplete_message_is_transient() {
-        assert!(LlmError::Http("error reading response: incomplete message".into()).is_transient());
+    fn the_key_layer_retries_every_other_transient_error() {
+        for err in [
+            LlmError::Stream("broken pipe".to_string()),
+            LlmError::RateLimited { retry_after_ms: 1 },
+            LlmError::Api {
+                status: 500,
+                message: "boom".to_string(),
+            },
+            LlmError::Transport {
+                kind: crate::error::TransportKind::ConnectTimeout,
+                message: "operation timed out".to_string(),
+            },
+        ] {
+            assert!(err.is_transient() && err.is_retryable_on_key(), "{err}");
+        }
     }
 
     #[tokio::test]
@@ -297,6 +379,7 @@ mod tests {
             },
             finish_reason: FinishReason::ToolUse,
             thinking: Some("Let me think...".to_string()),
+            echo: None,
             parts: None,
         };
 
@@ -316,6 +399,39 @@ mod tests {
         assert_eq!(collected.finish_reason, FinishReason::ToolUse);
     }
 
+    /// A whole response's kept turn (C7a) survives the trait's default
+    /// `chat_streaming`, which streams a whole response as events:
+    /// `response_to_events` carries it as one `Turn` before the usage and
+    /// the end, and `collect_stream` puts it back on the response.
+    #[tokio::test]
+    async fn test_response_to_events_carries_the_kept_turn() {
+        let turn = EchoedTurn::from_blocks(vec![
+            serde_json::json!({"type": "thinking", "thinking": "", "signature": "sig-A"}),
+            serde_json::json!({"type": "text", "text": "Hello"}),
+        ])
+        .expect("a signed thinking turn is kept");
+        let response = ChatResponse {
+            content: "Hello".to_string(),
+            tool_calls: vec![],
+            model: "m".to_string(),
+            usage: Usage::default(),
+            finish_reason: FinishReason::Stop,
+            thinking: None,
+            echo: Some(turn.clone()),
+            parts: None,
+        };
+
+        let events = response_to_events(response);
+        let n = events.len();
+        std::assert_matches!(&events[n - 3], StreamEvent::Turn(t) if *t == turn);
+        std::assert_matches!(&events[n - 2], StreamEvent::Usage(_));
+        std::assert_matches!(&events[n - 1], StreamEvent::Done { .. });
+
+        let stream = Box::pin(futures_util::stream::iter(events.into_iter().map(Ok)));
+        let collected = collect_stream(stream, "m".to_string()).await.unwrap();
+        assert_eq!(collected.echo, Some(turn));
+    }
+
     #[test]
     fn test_response_to_events_text_only() {
         let response = ChatResponse {
@@ -325,18 +441,19 @@ mod tests {
             usage: Usage::default(),
             finish_reason: FinishReason::Stop,
             thinking: None,
+            echo: None,
             parts: None,
         };
         let events = response_to_events(response);
         // TextDelta + Usage + Done = 3 events
         assert_eq!(events.len(), 3);
-        assert!(matches!(&events[0], StreamEvent::TextDelta { text } if text == "Hello"));
-        assert!(matches!(&events[1], StreamEvent::Usage(_)));
-        assert!(matches!(
+        std::assert_matches!(&events[0], StreamEvent::TextDelta { text } if text == "Hello");
+        std::assert_matches!(&events[1], StreamEvent::Usage(_));
+        std::assert_matches!(
             &events[2],
             StreamEvent::Done {
                 finish_reason: FinishReason::Stop
             }
-        ));
+        );
     }
 }

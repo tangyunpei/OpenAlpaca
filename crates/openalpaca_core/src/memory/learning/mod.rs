@@ -110,9 +110,9 @@ pub const RESUME_QUIET: std::time::Duration = std::time::Duration::from_secs(20)
 /// How often the sweeper looks for idle and switched-away sessions.
 pub const SWEEP_INTERVAL: std::time::Duration = std::time::Duration::from_secs(15);
 /// The first retry delay after a held window; it doubles to [`BACKOFF_CAP`].
-pub const BACKOFF_BASE: std::time::Duration = std::time::Duration::from_secs(60);
+pub const BACKOFF_BASE: std::time::Duration = std::time::Duration::from_mins(1);
 /// The longest retry delay.
-pub const BACKOFF_CAP: std::time::Duration = std::time::Duration::from_secs(3600);
+pub const BACKOFF_CAP: std::time::Duration = std::time::Duration::from_hours(1);
 
 // Conversation summaries (design 09 §13.3, owner decision MD-16): the
 // quiet period and the four turns are the design's numbers, not keys. A
@@ -123,7 +123,7 @@ pub const BACKOFF_CAP: std::time::Duration = std::time::Duration::from_secs(3600
 /// A conversation whose last turn is this old is closed — its working state
 /// refreshed and its summary written: MD-10's idle trigger stretched for a
 /// summary, which two minutes would cut too often.
-pub const EPISODE_QUIET: std::time::Duration = std::time::Duration::from_secs(30 * 60);
+pub const EPISODE_QUIET: std::time::Duration = std::time::Duration::from_mins(30);
 /// A summary is written only once at least this many of the user's turns
 /// have accumulated since the session's last one.
 pub const EPISODE_MIN_USER_TURNS: u32 = 4;

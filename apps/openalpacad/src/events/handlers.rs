@@ -2,11 +2,14 @@
 
 use super::EventBroadcaster;
 use chrono::Utc;
-use openalpaca_api::events::{ConfirmationOutcome, ServerEvent};
+use openalpaca_api::events::{ConfirmationOutcome, ServerEvent, ToolFailureReason};
 
 impl EventBroadcaster {
     /// Broadcast a task status event and persist it
-    #[allow(clippy::too_many_arguments)]
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "the task_status frame's fields; ts and instance stamped here"
+    )]
     pub fn task_status(
         &self,
         task_id: &str,
@@ -42,7 +45,10 @@ impl EventBroadcaster {
     /// `ts`/`instance_id` are stamped here, exactly as `task_status` stamps
     /// them, so an artifact row in the event log is orderable against the run
     /// rows around it.
-    #[allow(clippy::too_many_arguments)]
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "the artifact_written frame's fields; ts and instance stamped here"
+    )]
     pub fn artifact_written(
         &self,
         artifact_id: &str,
@@ -78,7 +84,10 @@ impl EventBroadcaster {
     /// `started_at` / `ended_at` are passed through as the row's own strings;
     /// only `ts` (the moment of the announcement) and `instance_id` are
     /// stamped here, exactly as `task_status` stamps them.
-    #[allow(clippy::too_many_arguments)]
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "the subagent_span frame's fields; ts and instance stamped here"
+    )]
     pub fn subagent_span(
         &self,
         task_id: &str,
@@ -287,7 +296,15 @@ impl EventBroadcaster {
     /// insert itself is unconditional — the writer's copy is best-effort (a
     /// full channel drops it, a cancelled round loses it) and an audit row
     /// `invocations_today` counts is not.
-    #[allow(clippy::too_many_arguments)]
+    ///
+    /// `reason` is why a failed run failed, where the sandbox named it
+    /// (`timeout`, TIMEOUT-ONE-CLOCK): broadcast, and written into the
+    /// `event_log` row's detail. The `tool_execution_log` row's
+    /// `error_message` stays the session writer's: the error's own text.
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "the tool_executed frame's fields and its log row's session keys"
+    )]
     pub fn tool_executed(
         &self,
         agent_id: &str,
@@ -297,6 +314,7 @@ impl EventBroadcaster {
         task_id: Option<&str>,
         session_id: Option<&str>,
         tool_use_id: Option<&str>,
+        reason: Option<ToolFailureReason>,
     ) {
         let event = ServerEvent::ToolExecuted {
             agent_id: agent_id.to_string(),
@@ -304,6 +322,7 @@ impl EventBroadcaster {
             success,
             duration_ms,
             task_id: task_id.map(|t| t.to_string()),
+            reason,
             ts: Utc::now(),
             instance_id: self.instance_id.clone(),
         };
@@ -322,7 +341,6 @@ impl EventBroadcaster {
     }
 
     /// Broadcast an LLM call completed event and persist it
-    #[allow(clippy::too_many_arguments)]
     pub fn llm_call_completed(
         &self,
         agent_id: &str,
@@ -415,7 +433,10 @@ impl EventBroadcaster {
     }
 
     /// Broadcast a tool confirmation requested event and persist it
-    #[allow(clippy::too_many_arguments)]
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "the confirmation request frame's fields; ts and instance stamped"
+    )]
     pub fn tool_confirmation_requested(
         &self,
         request_id: &str,
@@ -451,7 +472,10 @@ impl EventBroadcaster {
     /// The twin of [`tool_confirmation_requested`](Self::tool_confirmation_requested),
     /// sent for every way a prompt stops being pending — including the two
     /// nobody answered.
-    #[allow(clippy::too_many_arguments)]
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "the confirmation resolved frame's fields; ts and instance stamped"
+    )]
     pub fn tool_confirmation_resolved(
         &self,
         request_id: &str,
@@ -597,7 +621,10 @@ impl EventBroadcaster {
 
     /// Broadcast an S4 withholding and persist it (extension design §7.1,
     /// §7.2, §6.2 #13). Already deduped by the ledger.
-    #[allow(clippy::too_many_arguments)]
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "the withholding frame's fields; ts and instance stamped here"
+    )]
     pub fn extension_capability_withheld(
         &self,
         kind: &str,
@@ -626,7 +653,10 @@ impl EventBroadcaster {
 
     /// Broadcast T1 step 3's dependent scan and persist it (extension design
     /// §3.2 T1, §7.3). One per transition, never deduped.
-    #[allow(clippy::too_many_arguments)]
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "the withdrawal frame's fields; ts and instance stamped here"
+    )]
     pub fn extension_capability_withdrawn(
         &self,
         kind: &str,

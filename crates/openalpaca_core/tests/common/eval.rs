@@ -1,9 +1,12 @@
 //! The memory evaluation's data files and their types (design 09 §7),
 //! shared by the live harness (`tests/memory_eval.rs`, `--features
 //! live-eval`) and the corpus validation (`tests/memory_eval_corpus.rs`,
-//! default CI). Each test crate includes this file with
+//! a plain `cargo test`). Each test crate includes this file with
 //! `#[path = "common/eval.rs"] mod eval;` and uses what it needs.
-#![allow(dead_code)]
+#![expect(
+    dead_code,
+    reason = "each test crate including this file uses only part of it"
+)]
 
 use openalpaca_storage::hash::sha256_hex;
 use serde::{Deserialize, Serialize};
@@ -445,6 +448,106 @@ pub fn load_json<T: serde::de::DeserializeOwned>(path: &Path) -> (T, String) {
     let parsed = serde_json::from_slice(&bytes)
         .unwrap_or_else(|e| panic!("cannot parse {}: {e}", path.display()));
     (parsed, sha256_hex(&bytes))
+}
+
+/// Why the live run may not use `home_store`, or `None` (EVAL-HOME,
+/// pending-decisions *Rev 127* item 2, (b), taken *Rev 128*; GUARD-REACH,
+/// *Rev 133* item 2, (b), taken *Rev 134*). `home` is the user's home as
+/// `openalpaca_app_support::paths::user_home` reports it — the one lookup
+/// the store itself resolves by, absolute or none. The real store is
+/// `<home>/.openalpaca`, and a store that is it **or any folder under it**
+/// is refused, as `openalpaca_storage`'s test-home guard refuses one
+/// (`starts_with`): judged as written, then resolved — the store through
+/// `store::projects::canonical_root` (its deepest existing ancestor, so a
+/// folder not yet made under a link is still seen), against the home
+/// resolved with `.openalpaca` appended and against the real store
+/// resolved. With no usable home the real store cannot be told apart, so
+/// the run is refused rather than let through. Here, not in the live
+/// harness, so a plain `cargo test` (`tests/memory_eval_corpus.rs`) runs
+/// its test; the live harness's call is compile-checked only.
+pub fn real_store_refusal(home_store: &Path, home: Option<PathBuf>) -> Option<String> {
+    let Some(home) = home else {
+        return Some(
+            "no usable home (an absolute home directory) to tell the real store \
+             from OPENALPACA_HOME_STORE; refusing the run"
+                .to_string(),
+        );
+    };
+    let resolved = |path: &Path| {
+        openalpaca_storage::store::projects::canonical_root(path)
+            .unwrap_or_else(|_| path.to_path_buf())
+    };
+    let real = home.join(".openalpaca");
+    let store = resolved(home_store);
+    let inside = home_store.starts_with(&real)
+        || store.starts_with(resolved(&home).join(".openalpaca"))
+        || real
+            .canonicalize()
+            .is_ok_and(|real| store.starts_with(real));
+    inside.then(|| {
+        format!(
+            "OPENALPACA_HOME_STORE points at or into the real store {}; use a scratch \
+             directory outside it",
+            real.display()
+        )
+    })
+}
+
+/// EVAL-HOME and GUARD-REACH: no usable home refuses the run; the real
+/// store and any folder under it — as written, missing, through a link or
+/// a `..` — are refused; a sibling of it and a scratch store pass. Pure, no
+/// model: a plain `cargo test` runs it through `tests/memory_eval_corpus.rs`.
+#[test]
+fn the_store_guard_refuses_a_missing_home_and_the_real_store_and_under_it() {
+    let scratch = tempfile::tempdir().unwrap();
+    let home = tempfile::tempdir().unwrap();
+    let home_of = || Some(home.path().to_path_buf());
+    let real = home.path().join(".openalpaca");
+    std::fs::create_dir_all(real.join("sub")).unwrap();
+    std::fs::create_dir(home.path().join("x")).unwrap();
+    let store = scratch.path().join("store");
+    std::fs::create_dir(&store).unwrap();
+
+    assert!(real_store_refusal(&store, None).is_some());
+    for refused in [
+        real.clone(),
+        real.join("sub"),
+        real.join("scratch"),
+        real.join("sub/not-yet-made"),
+        home.path().join("x/../.openalpaca/scratch"),
+    ] {
+        assert!(
+            real_store_refusal(&refused, home_of()).is_some(),
+            "{}",
+            refused.display()
+        );
+    }
+    #[cfg(unix)]
+    {
+        let link = scratch.path().join("link");
+        std::os::unix::fs::symlink(&real, &link).unwrap();
+        let link_sub = scratch.path().join("link-sub");
+        std::os::unix::fs::symlink(real.join("sub"), &link_sub).unwrap();
+        for refused in [link.clone(), link.join("scratch"), link_sub] {
+            assert!(
+                real_store_refusal(&refused, home_of()).is_some(),
+                "{}",
+                refused.display()
+            );
+        }
+    }
+    for passes in [
+        store,
+        home.path().join(".openalpaca-x"),
+        home.path().join("x"),
+    ] {
+        assert_eq!(
+            real_store_refusal(&passes, home_of()),
+            None,
+            "{}",
+            passes.display()
+        );
+    }
 }
 
 pub fn is_uuid(s: &str) -> bool {

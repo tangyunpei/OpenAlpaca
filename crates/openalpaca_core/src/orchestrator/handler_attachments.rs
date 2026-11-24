@@ -130,6 +130,38 @@ impl Orchestrator {
     }
 }
 
+/// The note beside a document that carries no text: failed when its
+/// extraction failed, else pending (the row's own error text never).
+fn extraction_note(att: &ResolvedAttachment) -> &'static str {
+    if att.extraction_failed {
+        attachment_adapt::NOTE_EXTRACTION_FAILED
+    } else {
+        attachment_adapt::NOTE_EXTRACTION_PENDING
+    }
+}
+
+/// One attachment's block in the text-only augmented string the intent
+/// parser reads: its text when there is some, its name alone for an image or
+/// an audio clip, else its name and [`extraction_note`].
+fn attachment_context_block(att: &ResolvedAttachment) -> String {
+    if let Some(ref text) = att.extracted_text {
+        let truncated = text.chars().take(4000).collect::<String>();
+        format!(
+            "[File: {} ({})]\n{}",
+            att.filename, att.mime_type, truncated
+        )
+    } else if att.mime_type.starts_with("image/") || att.mime_type.starts_with("audio/") {
+        format!("[File: {} ({})]", att.filename, att.mime_type)
+    } else {
+        format!(
+            "[File: {} ({})]\n{}",
+            att.filename,
+            att.mime_type,
+            extraction_note(att)
+        )
+    }
+}
+
 impl Orchestrator {
     /// Handle a user message with file attachments.
     ///
@@ -264,7 +296,7 @@ impl Orchestrator {
                     });
                     if att.extracted_text.is_none() && !att.mime_type.starts_with("audio/") {
                         parts.push(ContentPart::Text {
-                            text: "[document attached — text extraction pending]".to_string(),
+                            text: extraction_note(att).to_string(),
                         });
                     }
                 }
@@ -282,20 +314,7 @@ impl Orchestrator {
         //    (the intent parser only understands text)
         let mut augmented = String::new();
         for att in &attachments {
-            let ctx_block = if let Some(ref text) = att.extracted_text {
-                let truncated = text.chars().take(4000).collect::<String>();
-                format!(
-                    "[File: {} ({})]\n{}",
-                    att.filename, att.mime_type, truncated
-                )
-            } else if att.mime_type.starts_with("image/") || att.mime_type.starts_with("audio/") {
-                format!("[File: {} ({})]", att.filename, att.mime_type)
-            } else {
-                format!(
-                    "[File: {} ({})]\n[document attached — text extraction pending]",
-                    att.filename, att.mime_type
-                )
-            };
+            let ctx_block = attachment_context_block(att);
             let wrapped = wrap_untrusted_context(&ctx_block, "file_attachment", "user_derived");
             augmented.push_str(&wrapped);
             augmented.push('\n');
@@ -319,5 +338,82 @@ impl Orchestrator {
             }),
         )
         .await
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn att(mime_type: &str, extracted_text: Option<&str>, failed: bool) -> ResolvedAttachment {
+        ResolvedAttachment {
+            file_id: "f-1".to_string(),
+            filename: "report.pdf".to_string(),
+            mime_type: mime_type.to_string(),
+            size_bytes: 10,
+            extracted_text: extracted_text.map(ToString::to_string),
+            storage_path: "/nonexistent/report.pdf".to_string(),
+            extraction_failed: failed,
+        }
+    }
+
+    /// ATTACH-PLACEHOLDER: the failed note, pinned whole. It says the
+    /// extraction failed and no text is available; it says nothing of
+    /// pending, a retry, or that the text can never arrive.
+    #[test]
+    fn the_failed_note_is_pinned_whole() {
+        assert_eq!(
+            attachment_adapt::NOTE_EXTRACTION_FAILED,
+            "[document attached — text extraction failed; no extracted text is available]"
+        );
+        let lower = attachment_adapt::NOTE_EXTRACTION_FAILED.to_lowercase();
+        for word in ["pending", "retr", "never", "again", "later", "attempt"] {
+            assert!(!lower.contains(word), "{word}");
+        }
+    }
+
+    /// Regression guard (green with the status mapping and wording taken
+    /// out): the pending note's bytes.
+    #[test]
+    fn the_pending_note_is_unchanged_byte_for_byte() {
+        assert_eq!(
+            attachment_adapt::NOTE_EXTRACTION_PENDING,
+            "[document attached — text extraction pending]"
+        );
+    }
+
+    /// ATTACH-PLACEHOLDER: a document whose extraction failed reads as
+    /// failed in the intent parser's text; a pending one reads exactly as
+    /// before (a regression guard).
+    #[test]
+    fn the_context_block_names_a_failed_document_failed_and_a_pending_one_pending() {
+        assert_eq!(
+            attachment_context_block(&att("application/pdf", None, true)),
+            "[File: report.pdf (application/pdf)]\n[document attached — text extraction \
+             failed; no extracted text is available]"
+        );
+        assert_eq!(
+            attachment_context_block(&att("application/pdf", None, false)),
+            "[File: report.pdf (application/pdf)]\n[document attached — text extraction pending]"
+        );
+    }
+
+    /// An image or an audio clip is read by the model itself (or withheld),
+    /// so a failed extraction adds no note to its block; a row with text
+    /// carries its text, whatever the flag says.
+    #[test]
+    fn a_failed_image_or_clip_gets_no_note_and_text_wins() {
+        assert_eq!(
+            attachment_context_block(&att("image/png", None, true)),
+            "[File: report.pdf (image/png)]"
+        );
+        assert_eq!(
+            attachment_context_block(&att("audio/mpeg", None, true)),
+            "[File: report.pdf (audio/mpeg)]"
+        );
+        assert_eq!(
+            attachment_context_block(&att("application/pdf", Some("body"), true)),
+            "[File: report.pdf (application/pdf)]\nbody"
+        );
     }
 }

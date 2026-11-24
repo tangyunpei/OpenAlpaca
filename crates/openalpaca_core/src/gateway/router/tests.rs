@@ -3,7 +3,6 @@ use super::*;
 /// A stub handler that echoes the content.
 struct StubHandler;
 
-#[async_trait]
 impl MessageHandler for StubHandler {
     async fn handle(&self, request: HandleRequest) -> Result<HandleResult, String> {
         Ok(HandleResult::text(format!("Echo: {}", request.content)))
@@ -13,7 +12,6 @@ impl MessageHandler for StubHandler {
 /// A handler that reports a delegated task.
 struct DelegatingHandler;
 
-#[async_trait]
 impl MessageHandler for DelegatingHandler {
     async fn handle(&self, _request: HandleRequest) -> Result<HandleResult, String> {
         let mut result = HandleResult::text("ack".to_string());
@@ -28,7 +26,6 @@ impl MessageHandler for DelegatingHandler {
 /// A handler that always fails.
 struct FailHandler;
 
-#[async_trait]
 impl MessageHandler for FailHandler {
     async fn handle(&self, _request: HandleRequest) -> Result<HandleResult, String> {
         Err("Access denied".to_string())
@@ -617,7 +614,6 @@ struct NewChatMidTurnHandler {
     carried: std::sync::Mutex<Option<Option<String>>>,
 }
 
-#[async_trait]
 impl MessageHandler for NewChatMidTurnHandler {
     async fn handle(&self, request: HandleRequest) -> Result<HandleResult, String> {
         *self.carried.lock().unwrap() = Some(request.session_id.clone());
@@ -728,7 +724,6 @@ struct CountingHandler {
     calls: std::sync::atomic::AtomicUsize,
 }
 
-#[async_trait]
 impl MessageHandler for CountingHandler {
     async fn handle(&self, request: HandleRequest) -> Result<HandleResult, String> {
         self.calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
@@ -902,7 +897,6 @@ async fn test_changing_project_opens_a_new_session() {
 #[derive(Default)]
 struct WorkspaceRecordingHandler(std::sync::Mutex<Vec<Option<String>>>);
 
-#[async_trait]
 impl MessageHandler for WorkspaceRecordingHandler {
     async fn handle(&self, request: HandleRequest) -> Result<HandleResult, String> {
         self.0.lock().unwrap().push(request.workspace_path.clone());
@@ -1085,7 +1079,6 @@ struct RecordingHandler {
     seen: Arc<std::sync::Mutex<Vec<HandleRequest>>>,
 }
 
-#[async_trait]
 impl MessageHandler for RecordingHandler {
     async fn handle(&self, request: HandleRequest) -> Result<HandleResult, String> {
         self.seen.lock().unwrap().push(request);
@@ -1175,6 +1168,7 @@ async fn the_attachment_path_carries_the_override_as_well() {
             size_bytes: 4,
             extracted_text: Some("note".to_string()),
             storage_path: "/tmp/note.txt".to_string(),
+            extraction_failed: false,
         }],
         ..turn(Some("gpt-5.2".to_string()))
     })
@@ -1194,7 +1188,6 @@ async fn the_attachment_path_carries_the_override_as_well() {
 async fn the_answering_model_is_stored_on_the_assistant_row() {
     struct ModelNamingHandler;
 
-    #[async_trait]
     impl MessageHandler for ModelNamingHandler {
         async fn handle(&self, request: HandleRequest) -> Result<HandleResult, String> {
             let mut result = HandleResult::text("answer".to_string());
@@ -1363,7 +1356,6 @@ struct InFlightProbe {
     seen: std::sync::Mutex<Vec<(bool, Option<String>)>>,
 }
 
-#[async_trait]
 impl MessageHandler for InFlightProbe {
     async fn handle(&self, request: HandleRequest) -> Result<HandleResult, String> {
         self.seen.lock().unwrap().push((
@@ -1462,4 +1454,30 @@ async fn a_failed_turn_leaves_the_in_flight_set() {
         1,
         "its question is still in the window"
     );
+}
+
+/// The gateway holds its handler type-erased, and every turn it handles
+/// runs in spawned work (a connector's task, the chat stream's, the
+/// follow-up and scheduled-skill runners).
+///
+/// The supertraits alone make the held form `Send + Sync`, so the test
+/// also holds each async method's declared `+ Send`: the generic body
+/// sees only the trait's declaration, and naming it at the Dyn compiles
+/// it.
+#[test]
+fn a_held_message_handler_is_send_and_sync() {
+    fn send_and_sync<T: Send + Sync + ?Sized>() {}
+    send_and_sync::<Arc<DynMessageHandler<'static>>>();
+
+    fn is_send<T: Send>(_: &T) {}
+    fn futures_are_send<H: MessageHandler + ?Sized>(
+        handler: &H,
+        request: HandleRequest,
+        with_attachments: HandleRequest,
+        attachments: Vec<ResolvedAttachment>,
+    ) {
+        is_send(&handler.handle(request));
+        is_send(&handler.handle_with_attachments(with_attachments, attachments));
+    }
+    let _ = futures_are_send::<DynMessageHandler<'static>>;
 }

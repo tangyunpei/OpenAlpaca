@@ -1,18 +1,17 @@
-#!/usr/bin/env python3
+#!/usr/bin/env python3.11
 """Tests for `scripts/repo_policy.py`, the repository-policy guard (B-23).
 
 Run with either:
-  python3 -I scripts/tests/test_repo_policy.py
-  python3 -m pytest scripts/tests/test_repo_policy.py
+  python3.11 -I scripts/tests/test_repo_policy.py
+  python3.11 -m pytest scripts/tests/test_repo_policy.py
 
-Each planted-violation test starts from a small tree the guard passes, plants one
-violation, and asserts the guard fails on it and names its rule; the last test runs the
-guard on this repository, which must pass. The planted toolchain literal and the
-planted unpaired target directory are spelled in two pieces, so that this file — a gate
-script the guard reads — is no violation itself.
+Each planted-violation test starts from a small tree the guard passes — its workflow's
+setup-python step reading a `.python-version` of `3.11` — plants one violation, and
+asserts the guard fails on it and names its rule; the last test runs the guard on this
+repository, which must pass. The planted toolchain literal and the planted unpaired
+target directory are spelled in two pieces, so that this file — a gate script the guard
+reads — is no violation itself.
 """
-
-from __future__ import annotations
 
 import importlib.util
 import pathlib
@@ -24,6 +23,8 @@ SCRIPTS = pathlib.Path(__file__).resolve().parents[1]
 GUARD = SCRIPTS / "repo_policy.py"
 
 CHECKOUT = "actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1"
+SETUP_PYTHON = "actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7.1.0"
+READS_PIN = "        with:\n          python-version-file: .python-version\n"
 GOOD_WORKFLOW = """\
 name: CI
 on:
@@ -46,7 +47,13 @@ jobs:
         run: |
           cargo clippy --locked --workspace \\
             --exclude openalpaca_gui --all-targets
-""".format(checkout=CHECKOUT)
+  tooling:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: {setup_python}
+{reads_pin}      - name: Guard
+        run: python3 -I scripts/repo_policy.py
+""".format(checkout=CHECKOUT, setup_python=SETUP_PYTHON, reads_pin=READS_PIN)
 
 GOOD_SCRIPT = """\
 #!/bin/sh
@@ -93,14 +100,21 @@ def _load_guard():
 guard = _load_guard()
 
 
-def _tree(root: pathlib.Path, workflow: str = GOOD_WORKFLOW, script: str = GOOD_SCRIPT,
-          lock: str = LOCK_WITH_ZIP8, deny: str = DENY) -> pathlib.Path:
-    (root / ".github" / "workflows").mkdir(parents=True)
-    (root / ".github" / "workflows" / "ci.yml").write_text(workflow, encoding="utf-8")
+def _tree(root: pathlib.Path, workflow: str | None = GOOD_WORKFLOW, script: str = GOOD_SCRIPT,
+          lock: str = LOCK_WITH_ZIP8, deny: str = DENY, pin: str | None = "3.11\n",
+          files: dict[str, str] | None = None) -> pathlib.Path:
+    if workflow is not None:  # None: no .github at all
+        (root / ".github" / "workflows").mkdir(parents=True)
+        (root / ".github" / "workflows" / "ci.yml").write_text(workflow, encoding="utf-8")
     (root / "scripts").mkdir()
     (root / "scripts" / "gate.sh").write_text(script, encoding="utf-8")
     (root / "Cargo.lock").write_text(lock, encoding="utf-8")
     (root / "deny.toml").write_text(deny, encoding="utf-8")
+    if pin is not None:  # None: no .python-version at all
+        (root / ".python-version").write_bytes(pin.encode("utf-8"))
+    for rel, text in (files or {}).items():  # any further file, by its path under the root
+        (root / rel).parent.mkdir(parents=True, exist_ok=True)
+        (root / rel).write_text(text, encoding="utf-8")
     return root
 
 
@@ -109,12 +123,13 @@ def _run(root: pathlib.Path) -> tuple[int, str]:
     return proc.returncode, proc.stdout + proc.stderr
 
 
-def _planted(rule: str, **kw) -> None:
+def _planted(rule: str, **kw) -> str:
     with tempfile.TemporaryDirectory() as d:
         rc, out = _run(_tree(pathlib.Path(d), **kw))
         assert rc == 1, "rc=%d, expected the guard to fail on a planted %s violation:\n%s" % (rc, rule, out)
         assert (": %s: " % rule) in out, "the failure does not name %s:\n%s" % (rule, out)
         assert out.count(": %s: " % rule) == 1, "one violation planted, more reported:\n%s" % out
+        return out
 
 
 def test_the_fixture_tree_passes() -> None:
@@ -170,6 +185,17 @@ def test_a_checkout_step_written_with_before_uses_is_read_whole() -> None:
     _planted("checkout", workflow=reordered.replace("persist-credentials: false", "persist-credentials: true"))
 
 
+def test_a_comment_line_does_not_end_a_checkout_step() -> None:
+    # a `#` line at the step's `-` or at column 0 is no YAML: the step reads on past it
+    for note in ("      # the token\n", "# the token\n"):
+        commented = GOOD_WORKFLOW.replace("        with:\n          persist-credentials: false\n",
+                                          "        with:\n" + note + "          persist-credentials: false\n")
+        assert commented != GOOD_WORKFLOW
+        with tempfile.TemporaryDirectory() as d:
+            rc, out = _run(_tree(pathlib.Path(d), workflow=commented))
+            assert rc == 0, (note, out)
+
+
 def test_a_toolchain_literal_in_a_gate_script_fails() -> None:
     _planted("toolchain", script=GOOD_SCRIPT + "cargo " + "+" + "1.99.0 test --workspace\n")
 
@@ -186,6 +212,113 @@ def test_an_unpaired_target_dir_in_a_workflow_env_fails() -> None:
     _planted("build-dir", workflow=GOOD_WORKFLOW.replace("      CARGO_BUILD_BUILD_DIR: /tmp/t\n", ""))
 
 
+def test_a_python_version_in_place_of_the_pin_file_fails() -> None:
+    # block, quoted-key and flow forms, a literal or a matrix value: the input is the one violation
+    for literal in ('python-version: "3.11"', "python-version: 3.11.18", "'python-version': '3.11'",
+                    "python-version: ${{ matrix.python }}"):
+        out = _planted("python-pin", workflow=GOOD_WORKFLOW.replace("python-version-file: .python-version", literal))
+        assert "names a Python" in out, out
+    out = _planted("python-pin", workflow=GOOD_WORKFLOW.replace(READS_PIN, '        with: {python-version: "3.11"}\n'))
+    assert "names a Python" in out, out
+
+
+def test_a_setup_python_step_with_both_inputs_fails() -> None:
+    # setup-python takes the literal over the file, with only a warning: the literal is refused, by its line
+    for both in (READS_PIN + '          python-version: "3.11"\n',
+                 '        with:\n          python-version: "3.11"\n          python-version-file: .python-version\n'):
+        workflow = GOOD_WORKFLOW.replace(READS_PIN, both)
+        out = _planted("python-pin", workflow=workflow)
+        n = workflow.splitlines().index('          python-version: "3.11"') + 1
+        assert ("ci.yml:%d: python-pin: " % n) in out, out
+
+
+def test_a_setup_python_step_not_reading_the_pin_file_fails() -> None:
+    # no input at all (setup-python's own fallback, with a warning), another file, another path
+    for reads in ("", "        with:\n          python-version-file: pyproject.toml\n",
+                  "        with:\n          python-version-file: tools/.python-version\n"):
+        out = _planted("python-pin", workflow=GOOD_WORKFLOW.replace(READS_PIN, reads))
+        assert "does not read the pin" in out, out
+
+
+def test_a_missing_python_version_file_fails() -> None:
+    out = _planted("python-pin", pin=None)
+    want = ".python-version:1: python-pin: there is no .python-version; the pin is one line, `X.Y`"
+    assert want in out.splitlines(), out
+
+
+def test_an_empty_python_version_file_fails() -> None:
+    for pin in ("", "\n"):
+        out = _planted("python-pin", pin=pin)
+        assert ".python-version:1: python-pin: .python-version is empty" in out, (pin, out)
+
+
+def test_a_python_version_file_of_two_lines_fails() -> None:
+    for pin in ("3.11\n3.12\n", "3.11\n\n", "# the scripts' Python\n3.11\n", "3.11\n3.11"):
+        out = _planted("python-pin", pin=pin)
+        assert ".python-version holds 2 lines" in out, (pin, out)
+
+
+def test_a_malformed_python_version_file_fails() -> None:
+    for pin in ("3.11.x\n", "python3.11\n", "3\n", "3.11.18.1\n", " 3.11\n", "3.11 # the line\n",
+                "pypy3.10\n", "3.11\r\n", "3.11.\n"):
+        out = _planted("python-pin", pin=pin)
+        assert ".python-version:1: python-pin: .python-version reads " in out, (pin, out)
+
+
+def test_a_python_version_file_that_is_not_utf8_is_no_verdict() -> None:
+    with tempfile.TemporaryDirectory() as d:
+        root = _tree(pathlib.Path(d), pin=None)
+        (root / ".python-version").write_bytes(b"3.11\xff\n")
+        rc, out = _run(root)
+        assert rc == 2, out
+        want = "repo_policy: cannot read %s: " % (root.resolve() / ".python-version")
+        assert out.startswith(want) and len(out.splitlines()) == 1, out
+
+
+def test_a_patch_pin_fails() -> None:
+    # the pin is `X.Y` only (PYPIN-XY): a patch pin is refused, named by the python-pin rule
+    for pin in ("3.11.15\n", "3.11.18"):
+        out = _planted("python-pin", pin=pin)
+        want = ".python-version:1: python-pin: .python-version reads `%s`; the pin is one line, `X.Y`" % pin.strip()
+        assert want in out.splitlines(), (pin, out)
+
+
+def test_a_minor_pin_read_by_setup_python_passes() -> None:
+    quoted = GOOD_WORKFLOW.replace("python-version-file: .python-version", 'python-version-file: ".python-version"')
+    flow = GOOD_WORKFLOW.replace(READS_PIN, "        with: {python-version-file: .python-version}\n")
+    commented = GOOD_WORKFLOW.replace(READS_PIN, READS_PIN + '          # python-version: "3.9.25" before the pin\n')
+    assert GOOD_WORKFLOW not in (quoted, flow, commented)
+    for workflow, pin in ((GOOD_WORKFLOW, "3.11\n"), (GOOD_WORKFLOW, "3.11"), (quoted, "3.11\n"),
+                          (flow, "3.11\n"), (commented, "3.11\n")):
+        with tempfile.TemporaryDirectory() as d:
+            rc, out = _run(_tree(pathlib.Path(d), workflow=workflow, pin=pin))
+            assert rc == 0, (pin, out)
+
+
+def test_a_comment_line_does_not_end_a_setup_python_step() -> None:
+    # a `#` line at the step's `-` or at column 0 is no YAML: a literal below it is still the step's input
+    for note in ("      # the pin\n", "# the pin\n"):
+        workflow = GOOD_WORKFLOW.replace(READS_PIN, READS_PIN + note + '          python-version: "3.12"\n')
+        out = _planted("python-pin", workflow=workflow)
+        n = workflow.splitlines().index('          python-version: "3.12"') + 1
+        assert ("ci.yml:%d: python-pin: " % n) in out, (note, out)
+
+
+def test_input_names_and_the_action_are_read_in_any_case() -> None:
+    # the runner reads an input's name in any case (`Python-Version` is `python-version`)
+    out = _planted("python-pin", workflow=GOOD_WORKFLOW.replace(READS_PIN, READS_PIN + "          Python-Version: '3.12'\n"))
+    assert "names a Python" in out, out
+    upper = GOOD_WORKFLOW.replace("python-version-file: .python-version", "Python-Version-File: .python-version")
+    with tempfile.TemporaryDirectory() as d:
+        rc, out = _run(_tree(pathlib.Path(d), workflow=upper))
+        assert rc == 0, out
+    # the action's ref is compared in lower case
+    ref = SETUP_PYTHON.replace("actions/setup-python@", "Actions/Setup-Python@")
+    out = _planted("python-pin", workflow=GOOD_WORKFLOW.replace(SETUP_PYTHON, ref).replace(
+        READS_PIN, "        with:\n          python-version: '3.12'\n"))
+    assert "names a Python" in out, out
+
+
 def test_a_lock_without_zip_8_beside_a_live_zip_ignore_fails() -> None:
     _planted("zip8", lock=LOCK_WITH_ZIP8.split("[[package]]\nname = \"zip\"\nversion = \"9.0.3\"")[0].replace(
         'version = "8.6.0"', 'version = "9.0.3"'))
@@ -198,10 +331,512 @@ def test_the_zip_ignores_lifted_with_zip_8_gone_pass() -> None:
         assert rc == 0, out
 
 
-def test_a_repository_without_workflows_is_no_verdict() -> None:
+def test_a_lock_that_is_not_toml_beside_a_live_zip_ignore_is_no_verdict() -> None:
     with tempfile.TemporaryDirectory() as d:
-        rc, out = _run(pathlib.Path(d))
+        root = _tree(pathlib.Path(d), lock='[[package]\nname = "zip"\nversion = "8.6.0"\n')
+        rc, out = _run(root)
         assert rc == 2, out
+        want = "repo_policy: cannot read %s: not TOML: " % (root.resolve() / "Cargo.lock")
+        assert out.startswith(want) and len(out.splitlines()) == 1, out
+
+
+def test_a_lock_whose_packages_are_not_tables_beside_a_live_zip_ignore_is_no_verdict() -> None:
+    for lock in ("package = 1\n", "package = [1]\n"):
+        with tempfile.TemporaryDirectory() as d:
+            root = _tree(pathlib.Path(d), lock=lock)
+            rc, out = _run(root)
+            assert rc == 2, (lock, out)
+            want = ("repo_policy: cannot read %s: not a Cargo.lock: [[package]] is not an array of tables"
+                    % (root.resolve() / "Cargo.lock"))
+            assert out.strip() == want and len(out.splitlines()) == 1, (lock, out)
+
+
+def test_the_zip_majors_are_read_from_the_lock_and_none_without_one() -> None:
+    with tempfile.TemporaryDirectory() as d:
+        lock = pathlib.Path(d) / "Cargo.lock"
+        assert guard.locked_zip_majors(lock) == [], "a missing Cargo.lock reads as no zip"
+        lock.write_text(LOCK_WITH_ZIP8, encoding="utf-8")
+        majors = guard.locked_zip_majors(lock)
+        assert majors == ["8", "9"], majors
+
+
+DENY_CHRONO = DENY.replace("ignore = [\n", "ignore = [\n    { id = \"RUSTSEC-2026-0543\", reason = \"chrono 0.4.45, unmaintained\" },\n")
+AUDIT_CHRONO = '[advisories]\nignore = ["RUSTSEC-2026-0543"]\n'
+WORKSPACE = '[workspace]\nmembers = ["crates/a", "crates/b"]\n'
+MEMBER_A = '[package]\nname = "a"\n\n[dependencies]\nserde = "1"\n'
+MEMBER_B = '[package]\nname = "b"\n'
+
+
+def _members(a: str = MEMBER_A, b: str = MEMBER_B, workspace: str = WORKSPACE) -> dict[str, str]:
+    return {"Cargo.toml": workspace, "crates/a/Cargo.toml": a, "crates/b/Cargo.toml": b}
+
+
+def test_a_chrono_ignore_with_no_manifest_naming_chrono_fails() -> None:
+    out = _planted("chrono", deny=DENY_CHRONO, files=_members())
+    assert "deny.toml:" in out and "lift the chrono ignore" in out, out
+    out = _planted("chrono", files={**_members(), ".cargo/audit.toml": AUDIT_CHRONO})
+    assert ".cargo/audit.toml:2: chrono: RUSTSEC-2026-0543" in out, out
+
+
+def test_a_chrono_ignore_in_both_files_with_chrono_gone_names_both() -> None:
+    with tempfile.TemporaryDirectory() as d:
+        rc, out = _run(_tree(pathlib.Path(d), deny=DENY_CHRONO,
+                             files={**_members(), ".cargo/audit.toml": AUDIT_CHRONO}))
+        assert rc == 1 and out.count(": chrono: ") == 2, out
+
+
+def test_a_chrono_ignore_beside_a_member_naming_chrono_passes() -> None:
+    named = {
+        "a workspace dependency": MEMBER_A + "chrono.workspace = true\n",
+        "a version": MEMBER_A + 'chrono = { version = "0.4", features = ["serde"] }\n',
+        "a dev-dependency": MEMBER_A + '\n[dev-dependencies]\nchrono = "0.4"\n',
+        "a build-dependency": MEMBER_A + '\n[build-dependencies]\nchrono = "0.4"\n',
+        "a target's dependency": MEMBER_A + "\n[target.'cfg(unix)'.dependencies]\nchrono = \"0.4\"\n",
+        "a renamed package": MEMBER_A + 'time04 = { package = "chrono", version = "0.4" }\n',
+    }
+    for what, a in named.items():
+        with tempfile.TemporaryDirectory() as d:
+            rc, out = _run(_tree(pathlib.Path(d), deny=DENY_CHRONO,
+                                 files={**_members(a=a), ".cargo/audit.toml": AUDIT_CHRONO}))
+            assert rc == 0, (what, out)
+    # [workspace.dependencies] naming chrono counts too (the entry's words)
+    ws = WORKSPACE + '\n[workspace.dependencies]\nchrono = "0.4"\n'
+    with tempfile.TemporaryDirectory() as d:
+        rc, out = _run(_tree(pathlib.Path(d), deny=DENY_CHRONO, files=_members(workspace=ws)))
+        assert rc == 0, out
+
+
+def test_chrono_named_only_where_it_is_no_dependency_does_not_count() -> None:
+    # a comment, a feature's name, or a crate outside the members is no direct dependency
+    a = MEMBER_A + '# chrono = "0.4"\n\n[features]\nchrono = []\n'
+    files = {**_members(a=a), "tools/x/Cargo.toml": '[package]\nname = "x"\n[dependencies]\nchrono = "0.4"\n'}
+    _planted("chrono", deny=DENY_CHRONO, files=files)
+
+
+def test_no_chrono_ignore_needs_no_chrono() -> None:
+    lifted = DENY + "# RUSTSEC-2026-0543 lifted when the workspace moved off chrono\n"
+    with tempfile.TemporaryDirectory() as d:
+        rc, out = _run(_tree(pathlib.Path(d), deny=lifted, files=_members()))
+        assert rc == 0, out
+
+
+def test_an_unreadable_manifest_beside_a_live_chrono_ignore_is_no_verdict() -> None:
+    for files, bad in ((_members(workspace="[workspace\n"), "Cargo.toml"),
+                       (_members(a="[package\n"), "crates/a/Cargo.toml"),
+                       ({"Cargo.toml": WORKSPACE, "crates/a/Cargo.toml": MEMBER_A}, "crates/b/Cargo.toml")):
+        with tempfile.TemporaryDirectory() as d:
+            root = _tree(pathlib.Path(d), deny=DENY_CHRONO, files=files)
+            rc, out = _run(root)
+            assert rc == 2, (bad, out)
+            want = "repo_policy: cannot read %s" % (root.resolve() / bad)
+            assert out.startswith(want) and len(out.splitlines()) == 1, (bad, out)
+
+
+def test_the_chrono_manifests_are_read_from_the_members() -> None:
+    with tempfile.TemporaryDirectory() as d:
+        root = pathlib.Path(d)
+        assert guard.chrono_manifests(root) == [], "no Cargo.toml reads as no manifest naming chrono"
+        root = _tree(root, files=_members(b=MEMBER_B + '[dependencies]\nchrono = "0.4"\n'))
+        assert guard.chrono_manifests(root) == ["crates/b/Cargo.toml"], guard.chrono_manifests(root)
+
+
+PACKAGE_IGNORING = """\
+{
+  "name": "x",
+  "private": true,
+  "scripts": {
+    "audit": "bun audit --ignore=GHSA-fc5q-39xc-vjpf"
+  }
+}"""
+PICO_LOCK = """\
+{
+  "lockfileVersion": 2,
+  "packages": {
+    "fdir": ["fdir@6.5.0", "", { "peerDependencies": { "picomatch": "^3 || ^4" } }, "sha512-x"],
+    "picomatch": ["picomatch@{version}", "", {}, "sha512-y"],
+  }
+}
+"""
+
+
+def _bun(version: str | None, package: str = PACKAGE_IGNORING) -> dict[str, str]:
+    lock = PICO_LOCK.replace("{version}", version) if version else PICO_LOCK.replace(
+        '    "picomatch": ["picomatch@{version}", "", {}, "sha512-y"],\n', "")
+    return {"package.json": package, "bun.lock": lock}
+
+
+def test_the_picomatch_ignore_beside_an_affected_picomatch_passes() -> None:
+    for version in ("4.0.7", "4.0.6", "2.3.1"):
+        with tempfile.TemporaryDirectory() as d:
+            rc, out = _run(_tree(pathlib.Path(d), files=_bun(version)))
+            assert rc == 0, (version, out)
+    # one affected picomatch among others is enough
+    files = _bun("4.0.8")
+    files["bun.lock"] = files["bun.lock"].replace(
+        '  }\n}', '    "x/picomatch": ["picomatch@4.0.7", "", {}, "sha512-z"],\n  }\n}')
+    with tempfile.TemporaryDirectory() as d:
+        rc, out = _run(_tree(pathlib.Path(d), files=files))
+        assert rc == 0, out
+
+
+def test_the_picomatch_ignore_with_only_a_fixed_picomatch_fails() -> None:
+    for version in ("4.0.8", "4.1.0", "5.0.0"):
+        out = _planted("picomatch", files=_bun(version))
+        assert "package.json:5: picomatch: GHSA-fc5q-39xc-vjpf is ignored" in out, (version, out)
+        assert "lift the ignore" in out, out
+
+
+def test_the_picomatch_ignore_with_no_picomatch_fails() -> None:
+    _planted("picomatch", files=_bun(None))
+    files = _bun("4.0.7")
+    del files["bun.lock"]
+    _planted("picomatch", files=files)
+
+
+def test_the_picomatch_ignore_is_read_in_either_flag_form() -> None:
+    spaced = PACKAGE_IGNORING.replace("--ignore=GHSA", "--ignore GHSA")
+    _planted("picomatch", files=_bun("4.0.8", package=spaced))
+
+
+def test_no_picomatch_ignore_needs_no_picomatch() -> None:
+    plain = PACKAGE_IGNORING.replace(" --ignore=GHSA-fc5q-39xc-vjpf", "")
+    # the whole flag, outside the scripts table, is no ignore
+    named = '{\n  "name": "x",\n  "description": "run bun audit --ignore=GHSA-fc5q-39xc-vjpf"\n}'
+    # nor is the flag in a script that does not run bun audit
+    echoed = PACKAGE_IGNORING.replace('"audit": "bun audit --ignore', '"note": "echo --ignore')
+    for package in (plain, named, echoed):
+        with tempfile.TemporaryDirectory() as d:
+            rc, out = _run(_tree(pathlib.Path(d), files=_bun("4.0.8", package=package)))
+            assert rc == 0, out
+
+
+def test_the_picomatch_ignore_is_reported_at_its_script_line() -> None:
+    # a description carrying the flag above the scripts table is not the ignore's line
+    # (the same text as the script's own command, so only the `"name": "command"` pair tells them apart)
+    described = PACKAGE_IGNORING.replace(
+        '"private": true,', '"private": true,\n  "description": "bun audit --ignore=GHSA-fc5q-39xc-vjpf",')
+    out = _planted("picomatch", files=_bun("4.0.8", package=described))
+    assert "package.json:6: picomatch: GHSA-fc5q-39xc-vjpf is ignored" in out, out
+
+
+def test_a_package_json_that_is_not_json_beside_the_lock_is_no_verdict() -> None:
+    with tempfile.TemporaryDirectory() as d:
+        root = _tree(pathlib.Path(d), files=_bun("4.0.7", package='{"scripts": {'))
+        rc, out = _run(root)
+        assert rc == 2, out
+        want = "repo_policy: cannot read %s: not JSON: " % (root.resolve() / "package.json")
+        assert out.startswith(want) and len(out.splitlines()) == 1, out
+
+
+def test_the_picomatch_versions_are_read_from_the_lock() -> None:
+    with tempfile.TemporaryDirectory() as d:
+        lock = pathlib.Path(d) / "bun.lock"
+        assert guard.locked_picomatch_versions(lock) == [], "a missing bun.lock reads as no picomatch"
+        lock.write_text(PICO_LOCK.replace("{version}", "4.0.7"), encoding="utf-8")
+        assert guard.locked_picomatch_versions(lock) == [(4, 0, 7)], guard.locked_picomatch_versions(lock)
+
+
+LOCK_BOS = LOCK_WITH_ZIP8 + """
+[[package]]
+name = "borrow-or-share"
+version = "0.2.4"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+"""
+EXC_LINE = '    { crate = "borrow-or-share", allow = ["MIT-0"] },'
+DENY_LICENSES = DENY + '\n[licenses]\nallow = ["MIT"]\n'
+DENY_EXC = DENY_LICENSES + "exceptions = [\n" + EXC_LINE + "\n]\n"
+ABOUT_PLAIN = 'accepted = ["MIT"]\n\n[private]\nignore = true\n'
+ABOUT_EXC = ABOUT_PLAIN + '\n[borrow-or-share]\naccepted = ["MIT-0"]\n'
+NAMES_JSONSCHEMA = MEMBER_A + 'jsonschema = { version = "0.62.0", default-features = false }\n'
+ABOUT_REL = "scripts/release/about.toml"
+MIRROR_TAIL = " — the two files name the same crates and licences"
+EQUAL_TAIL = " — make them equal: the two files name the same licences for borrow-or-share"
+NO_CRATE = "names no crate (or names it with something that is not a string)"
+# the exception as built, with a bracket in a quoted string that a bracket count must skip
+QUOTED_OPEN = '    { crate = "borrow-or-share", allow = ["MIT-0"], reason = "opens [ here" },'
+QUOTED_CLOSE = "    { crate = 'borrow-or-share', allow = ['MIT-0'], reason = 'closes ] here' },"
+CLARIFY_AFTER = '\n[[licenses.clarify]]\ncrate = "borrow-or-share"\nexpression = "MIT-0"\nlicense-files = []\n'
+
+
+def _exc(deny: str = DENY_EXC, about: str | None = ABOUT_EXC, a: str = NAMES_JSONSCHEMA,
+         lock: str = LOCK_BOS, workspace: str = WORKSPACE, extra: dict[str, str] | None = None) -> dict:
+    """A tree holding the MIT-0 exception as built: deny.toml's entry, about.toml's table,
+    borrow-or-share in Cargo.lock and a member naming jsonschema; each argument plants one change."""
+    files = {**_members(a=a, workspace=workspace), **(extra or {})}
+    if about is not None:  # None: no about.toml at all
+        files[ABOUT_REL] = about
+    return {"deny": deny, "lock": lock, "files": files}
+
+
+def _line(text: str, line: str) -> int:
+    return text.splitlines().index(line) + 1
+
+
+def _passes(**kw) -> None:
+    with tempfile.TemporaryDirectory() as d:
+        rc, out = _run(_tree(pathlib.Path(d), **kw))
+        assert rc == 0, out
+
+
+def test_a_matched_licence_exception_passes_however_a_member_names_its_crate() -> None:
+    named = {
+        "a workspace dependency": MEMBER_A + "jsonschema.workspace = true\n",
+        "a version": NAMES_JSONSCHEMA,
+        "a dev-dependency": MEMBER_A + '\n[dev-dependencies]\njsonschema = "0.62"\n',
+        "a build-dependency": MEMBER_A + '\n[build-dependencies]\njsonschema = "0.62"\n',
+        "a target's dependency": MEMBER_A + "\n[target.'cfg(unix)'.dependencies]\njsonschema = \"0.62\"\n",
+        "a renamed package": MEMBER_A + 'js = { package = "jsonschema", version = "0.62" }\n',
+    }
+    for what, a in named.items():
+        with tempfile.TemporaryDirectory() as d:
+            rc, out = _run(_tree(pathlib.Path(d), **_exc(a=a)))
+            assert rc == 0, (what, out)
+    ws = WORKSPACE + '\n[workspace.dependencies]\njsonschema = { version = "0.62.0", default-features = false }\n'
+    _passes(**_exc(a=MEMBER_A, workspace=ws))
+    # the same tree with about.toml's table taken away is read, not passed over
+    _planted("licence-exception", **_exc(about=ABOUT_PLAIN))
+
+
+def test_an_exception_only_in_deny_toml_fails() -> None:
+    want = ("deny.toml:%d: licence-exception: borrow-or-share is allowed MIT-0 here but %s has no "
+            "[borrow-or-share] table accepting it%s" % (_line(DENY_EXC, EXC_LINE), ABOUT_REL, MIRROR_TAIL))
+    for about in (ABOUT_PLAIN, None):
+        out = _planted("licence-exception", **_exc(about=about))
+        assert want in out.splitlines(), (about, out)
+
+
+def test_a_table_only_in_about_toml_fails() -> None:
+    out = _planted("licence-exception", **_exc(deny=DENY_LICENSES))
+    want = ("%s:%d: licence-exception: [borrow-or-share] accepts MIT-0 but deny.toml's [licenses] "
+            "exceptions do not%s" % (ABOUT_REL, _line(ABOUT_EXC, "[borrow-or-share]"), MIRROR_TAIL))
+    assert want in out.splitlines(), out
+
+
+def test_unequal_licence_sets_in_the_two_files_fail() -> None:
+    n = _line(DENY_EXC, EXC_LINE)
+    wider_about = ABOUT_EXC.replace('accepted = ["MIT-0"]', 'accepted = ["MIT-0", "Unlicense"]')
+    out = _planted("licence-exception", **_exc(about=wider_about))
+    want = ("deny.toml:%d: licence-exception: borrow-or-share: deny.toml allows [MIT-0] but %s "
+            "accepts [MIT-0, Unlicense]%s" % (n, ABOUT_REL, EQUAL_TAIL))
+    assert want in out.splitlines(), out
+    wider_deny = DENY_EXC.replace('allow = ["MIT-0"]', 'allow = ["MIT-0", "Unlicense"]')
+    out = _planted("licence-exception", **_exc(deny=wider_deny))
+    want = ("deny.toml:%d: licence-exception: borrow-or-share: deny.toml allows [MIT-0, Unlicense] but %s "
+            "accepts [MIT-0]%s" % (n, ABOUT_REL, EQUAL_TAIL))
+    assert want in out.splitlines(), out
+
+
+def test_unequal_licence_sets_say_what_to_do() -> None:
+    other_about = ABOUT_EXC.replace('accepted = ["MIT-0"]', 'accepted = ["Unlicense"]')
+    out = _planted("licence-exception", **_exc(about=other_about))
+    want = ("deny.toml:%d: licence-exception: borrow-or-share: deny.toml allows [MIT-0] but %s accepts "
+            "[Unlicense] — make them equal: the two files name the same licences for borrow-or-share"
+            % (_line(DENY_EXC, EXC_LINE), ABOUT_REL))
+    assert out.splitlines()[0] == want, out
+
+
+def test_a_licence_exception_is_reported_at_its_own_line() -> None:
+    gpl = '    { crate = "borrow-or-share", allow = ["GPL-3.0"] },'
+    clarify = 'clarify = [{ crate = "borrow-or-share", expression = "MIT-0", license-files = [] }]'
+    cases = {
+        # a [licenses] clarify entry naming the same crate, inline, above the exception
+        "inline clarify": (DENY_LICENSES + clarify + "\nexceptions = [\n" + gpl + "\n]\n", gpl),
+        # the same as [[licenses.clarify]] above [[licenses.exceptions]]
+        "clarify table": (DENY_LICENSES + '\n[[licenses.clarify]]\ncrate = "borrow-or-share"\n'
+                          'expression = "MIT-0"\nlicense-files = []\n\n[[licenses.exceptions]]\n'
+                          'crate = "borrow-or-share"\nallow = ["GPL-3.0"]\n', None),
+        # a second exception for the same crate: its own line, not the first's
+        "the second of two": (DENY_EXC.replace(EXC_LINE, EXC_LINE + "\n" + gpl), gpl),
+        # a `]` in a quoted string does not close the exceptions array before the second
+        "a quoted ] before it": (DENY_EXC.replace(EXC_LINE, QUOTED_CLOSE + "\n" + gpl), gpl),
+        # nor does a `[` in one keep it open into a [[licenses.clarify]] naming the crate
+        "a quoted [ before it": (DENY_EXC.replace(EXC_LINE, QUOTED_OPEN + "\n" + gpl) + CLARIFY_AFTER, gpl),
+    }
+    for what, (deny, line) in cases.items():
+        n = _line(deny, line) if line else len(deny.splitlines()) - 1  # the table's `crate =` line
+        out = _planted("licence-exception", **_exc(deny=deny))
+        want = ("deny.toml:%d: licence-exception: borrow-or-share: deny.toml allows [GPL-3.0] but %s "
+                "accepts [MIT-0]%s" % (n, ABOUT_REL, EQUAL_TAIL))
+        assert out.splitlines()[0] == want, (what, out)
+    # an exception naming the crate twice (crate = and name =; itself misspelled, reported
+    # first): the next exception for the crate is still at its own line
+    both = '    { crate = "borrow-or-share", name = "borrow-or-share", allow = ["MIT-0"] },'
+    deny = DENY_EXC.replace(EXC_LINE, both + "\n" + gpl)
+    with tempfile.TemporaryDirectory() as d:
+        rc, out = _run(_tree(pathlib.Path(d), **_exc(deny=deny)))
+    want = ("deny.toml:%d: licence-exception: borrow-or-share: deny.toml allows [GPL-3.0] but %s "
+            "accepts [MIT-0]%s" % (_line(deny, gpl), ABOUT_REL, EQUAL_TAIL))
+    assert rc == 1 and out.count(": licence-exception: ") == 2, out
+    assert want in out.splitlines(), out
+
+
+def test_a_quoted_bracket_does_not_move_the_exceptions_end() -> None:
+    # the exceptions end at the array's own `]`: a bracket inside a quoted string is text
+    for entry, after in ((QUOTED_OPEN, CLARIFY_AFTER), (QUOTED_CLOSE + "\n" + EXC_LINE, "")):
+        deny = DENY_EXC.replace(EXC_LINE, entry) + after
+        lines = deny.splitlines()
+        start, dotted, region = guard.exceptions_region(lines)
+        first = _line(deny, "exceptions = [")
+        assert (start, dotted) == (first, False), (entry, start, dotted)
+        assert [n for n, _ in region] == list(range(first, lines.index("]", first) + 2)), (entry, region)
+
+
+def test_a_dotted_exception_is_at_its_key_and_an_unread_form_at_line_1() -> None:
+    gpl = '[{ crate = "borrow-or-share", allow = ["GPL-3.0"] }]'
+    want = ("deny.toml:%d: licence-exception: borrow-or-share: deny.toml allows [GPL-3.0] but %s "
+            "accepts [MIT-0]%s")
+    # top-level dotted keys: the `licenses.exceptions` line
+    dotted = 'licenses.allow = ["MIT"]\nlicenses.exceptions = ' + gpl + "\n\n" + DENY
+    out = _planted("licence-exception", **_exc(deny=dotted))
+    assert out.splitlines()[0] == want % (2, ABOUT_REL, EQUAL_TAIL), out
+    # an inline [licenses] table is a form not located: line 1, though it sits on line 3
+    inline = '# licences\n\nlicenses = { allow = ["MIT"], exceptions = ' + gpl + " }\n\n" + DENY
+    out = _planted("licence-exception", **_exc(deny=inline))
+    assert out.splitlines()[0] == want % (1, ABOUT_REL, EQUAL_TAIL), out
+
+
+def test_an_exception_naming_no_crate_says_so() -> None:
+    for entry in ('    { crate = 5, allow = ["MIT-0"] },', '    { allow = ["MIT-0"] },'):
+        deny = DENY_EXC.replace(EXC_LINE, entry)
+        out = _planted("licence-exception", **_exc(deny=deny, about=ABOUT_PLAIN))
+        want = ('deny.toml:%d: licence-exception: an exception names no crate (or names it with something '
+                'that is not a string) — spell it { crate = "<name>", allow = [...] }'
+                % _line(deny, "exceptions = ["))
+        assert out.splitlines()[0] == want, (entry, out)
+    # in the array-of-tables form: at its [[licenses.exceptions]] header
+    deny = DENY_LICENSES + '\n[[licenses.exceptions]]\nallow = ["MIT-0"]\n'
+    out = _planted("licence-exception", **_exc(deny=deny, about=ABOUT_PLAIN))
+    want = ('deny.toml:%d: licence-exception: an exception %s — spell it { crate = "<name>", allow = [...] }'
+            % (_line(deny, "[[licenses.exceptions]]"), NO_CRATE))
+    assert out.splitlines()[0] == want, out
+
+
+def test_an_exception_whose_crate_left_the_lock_fails() -> None:
+    out = _planted("licence-exception", **_exc(lock=LOCK_WITH_ZIP8))
+    want = ("deny.toml:%d: licence-exception: borrow-or-share is excepted but Cargo.lock holds no "
+            "borrow-or-share — lift the exception and its [borrow-or-share] table in %s"
+            % (_line(DENY_EXC, EXC_LINE), ABOUT_REL))
+    assert want in out.splitlines(), out
+
+
+def test_an_exception_whose_dependency_no_manifest_names_fails() -> None:
+    out = _planted("licence-exception", **_exc(a=MEMBER_A))
+    want = ("deny.toml:%d: licence-exception: borrow-or-share is excepted for jsonschema but no workspace "
+            "manifest names jsonschema — lift the exception and its about.toml table (or record a new ruling)"
+            % _line(DENY_EXC, EXC_LINE))
+    assert want in out.splitlines(), out
+
+
+def test_both_stale_conditions_give_one_violation() -> None:
+    out = _planted("licence-exception", **_exc(lock=LOCK_WITH_ZIP8, a=MEMBER_A))
+    assert "Cargo.lock holds no borrow-or-share" in out and "no workspace manifest" not in out, out
+
+
+def test_an_exception_with_no_recorded_ruling_fails() -> None:
+    deny = DENY_LICENSES + 'exceptions = [\n    { crate = "foo", allow = ["MIT-0"] },\n]\n'
+    about = ABOUT_PLAIN + '\n[foo]\naccepted = ["MIT-0"]\n'
+    lock = LOCK_WITH_ZIP8 + '\n[[package]]\nname = "foo"\nversion = "1.0.0"\n'
+    out = _planted("licence-exception", **_exc(deny=deny, about=about, lock=lock))
+    want = ("deny.toml:%d: licence-exception: foo is excepted but repo_policy.py records no dependency it "
+            "is admitted for — record the owner's ruling in EXCEPTION_BROUGHT_BY"
+            % _line(deny, '    { crate = "foo", allow = ["MIT-0"] },'))
+    assert want in out.splitlines(), out
+
+
+def test_an_exception_spelled_another_way_fails_once() -> None:
+    # the about.toml table beside it is no second violation: the entry names its crate
+    spellings = {
+        '    { name = "borrow-or-share", allow = ["MIT-0"] },': "names its crate as name = (or with a version)",
+        '    { crate = "borrow-or-share@0.2.4", allow = ["MIT-0"] },': "names its crate as name = (or with a version)",
+        '    { crate = "borrow-or-share", version = "0.2.4", allow = ["MIT-0"] },':
+            "names its crate as name = (or with a version)",
+        '    { crate = "borrow-or-share", allow = "MIT-0" },': "has an allow that is not a list of licence names",
+    }
+    for entry, what in spellings.items():
+        deny = DENY_EXC.replace(EXC_LINE, entry)
+        out = _planted("licence-exception", **_exc(deny=deny))
+        want = ('deny.toml:%d: licence-exception: an exception %s — spell it { crate = "<name>", allow = [...] }'
+                % (_line(deny, entry), what))
+        assert want in out.splitlines(), (entry, out)
+    # an entry naming no crate at all is reported at the `exceptions =` line
+    deny = DENY_EXC.replace(EXC_LINE, '    { allow = ["MIT-0"] },')
+    out = _planted("licence-exception", **_exc(deny=deny, about=ABOUT_PLAIN))
+    assert out.startswith("deny.toml:%d: licence-exception: an exception %s — "
+                          % (_line(deny, "exceptions = ["), NO_CRATE)), out
+
+
+def test_the_array_of_tables_form_is_read() -> None:
+    deny = DENY_LICENSES + '\n[[licenses.exceptions]]\ncrate = "borrow-or-share"\nallow = ["MIT-0"]\n'
+    _passes(**_exc(deny=deny))
+    out = _planted("licence-exception", **_exc(deny=deny, about=ABOUT_PLAIN))
+    assert out.startswith("deny.toml:%d: licence-exception: borrow-or-share is allowed MIT-0 here"
+                          % _line(deny, 'crate = "borrow-or-share"')), out
+
+
+def test_no_exception_needs_nothing_and_comments_are_not_read() -> None:
+    commented_deny = DENY_LICENSES + '# exceptions = [{ crate = "borrow-or-share", allow = ["MIT-0"] }]\n'
+    commented_about = ABOUT_PLAIN + '# [borrow-or-share]\n# accepted = ["MIT-0"]\n'
+    clarified = ABOUT_PLAIN + '\n[ring.clarify]\nlicense = "MIT AND ISC"\n'  # a clarification is no exception
+    for about in (ABOUT_PLAIN, commented_about, clarified, None):
+        _passes(**_exc(deny=commented_deny, about=about, lock=LOCK_WITH_ZIP8, a=MEMBER_A))
+    # a commented-out table does not answer a live exception
+    _planted("licence-exception", **_exc(about=commented_about))
+
+
+def test_jsonschema_named_only_where_it_is_no_dependency_does_not_count() -> None:
+    a = MEMBER_A + '# jsonschema = "0.62"\n\n[features]\njsonschema = []\n'
+    outside = {"tools/x/Cargo.toml": '[package]\nname = "x"\n[dependencies]\njsonschema = "0.62"\n'}
+    out = _planted("licence-exception", **_exc(a=a, extra=outside))
+    assert "no workspace manifest names jsonschema" in out, out
+
+
+def test_an_unreadable_licence_file_is_no_verdict() -> None:
+    cases = (
+        ({"deny": "[licenses\n"}, "deny.toml", "not TOML: "),
+        ({"about": "[borrow-or-share\n"}, ABOUT_REL, "not TOML: "),
+        ({"deny": DENY_LICENSES + 'exceptions = ["borrow-or-share"]\n'}, "deny.toml",
+         "[licenses] exceptions is not a list of tables"),
+        ({"deny": DENY_LICENSES + "exceptions = 1\n"}, "deny.toml", "[licenses] exceptions is not a list of tables"),
+        ({"about": ABOUT_PLAIN + '\n[borrow-or-share]\naccepted = "MIT-0"\n'}, ABOUT_REL,
+         "[borrow-or-share] accepted is not a list of licence names"),
+    )
+    for kw, bad, what in cases:
+        with tempfile.TemporaryDirectory() as d:
+            root = _tree(pathlib.Path(d), **_exc(**kw))
+            rc, out = _run(root)
+            assert rc == 2, (kw, out)
+            want = "repo_policy: cannot read %s: %s" % (root.resolve() / bad, what)
+            assert out.startswith(want) and len(out.splitlines()) == 1, (kw, out)
+
+
+def test_the_licence_readers_read_a_missing_file_as_empty() -> None:
+    with tempfile.TemporaryDirectory() as d:
+        root = pathlib.Path(d)
+        assert guard.deny_exceptions(root / "deny.toml") == []
+        assert guard.about_exceptions(root / ABOUT_REL) == {}
+        assert guard.locked_names(root / "Cargo.lock") == []
+        assert guard.manifests_naming(root, "jsonschema") == []
+        root = _tree(root, **_exc())
+        assert guard.deny_exceptions(root / "deny.toml") == [{"crate": "borrow-or-share", "allow": ["MIT-0"]}]
+        assert guard.about_exceptions(root / ABOUT_REL) == {"borrow-or-share": ["MIT-0"]}
+        assert ("borrow-or-share", "0.2.4") in guard.locked_names(root / "Cargo.lock")
+        assert guard.manifests_naming(root, "jsonschema") == ["crates/a/Cargo.toml"]
+        assert guard.manifests_naming(root, "chrono") == guard.chrono_manifests(root) == []
+
+
+def test_a_repository_without_workflows_checks_its_gate_scripts() -> None:
+    # no remote CI (the owner, 2026-11-06): zero workflows is a tree to check, not a usage error
+    with tempfile.TemporaryDirectory() as d:
+        rc, out = _run(_tree(pathlib.Path(d), workflow=None))
+        assert rc == 0, out
+        assert "0 workflow(s), 1 gate script(s), 0 violation(s)" in out, out
+    _planted("toolchain", workflow=None, script=GOOD_SCRIPT + "cargo " + "+" + "1.99.0 test --workspace\n")
+
+
+def test_a_root_that_is_not_a_directory_is_no_verdict() -> None:
+    with tempfile.TemporaryDirectory() as d:
+        rc, out = _run(pathlib.Path(d) / "missing")
+        assert rc == 2 and "is not a directory" in out, out
 
 
 def test_this_repository_passes() -> None:

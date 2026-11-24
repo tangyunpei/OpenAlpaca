@@ -99,14 +99,22 @@ export function pendingResolutionNote(
     : `${toolName} denied · the agent was told to skip it.`;
 }
 
-/** The note once `tool_executed` reports how the approved call went. */
+/**
+ * The note once `tool_executed` reports how the approved call went. A run
+ * the sandbox's clock cut (`reason: "timeout"`, TIMEOUT-ONE-CLOCK) says it
+ * timed out.
+ */
 export function executedResolutionNote(
   toolName: string,
   success: boolean,
   duration: string,
+  timedOut = false,
 ): string {
-  return success
-    ? `${toolName} approved · returned in ${duration}, the agent resumed.`
+  if (success) {
+    return `${toolName} approved · returned in ${duration}, the agent resumed.`;
+  }
+  return timedOut
+    ? `${toolName} approved · timed out after ${duration}, the agent continued without it.`
     : `${toolName} approved · failed after ${duration}, the agent continued without it.`;
 }
 
@@ -134,6 +142,8 @@ export interface ToolRun {
   success: boolean;
   /** Already formatted — `1.4s`. */
   duration: string;
+  /** The frame's `reason` was `timeout`: the sandbox's clock cut the run. */
+  timedOut?: boolean;
   /** When this client saw the frame, in epoch ms. */
   atMs: number;
   /** Straight off the frame — who ran it, and in which run. */
@@ -194,7 +204,12 @@ export function resolutionNote(
   settled: ToolRun | null,
 ): string {
   if (resolution === "approved" && settled !== null) {
-    return executedResolutionNote(toolName, settled.success, settled.duration);
+    return executedResolutionNote(
+      toolName,
+      settled.success,
+      settled.duration,
+      settled.timedOut,
+    );
   }
   return pendingResolutionNote(resolution, toolName);
 }

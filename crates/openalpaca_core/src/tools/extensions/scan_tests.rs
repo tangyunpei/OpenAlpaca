@@ -20,7 +20,6 @@ use crate::tools::registry::{BuiltInTool, RegisteredTool, ToolBackend};
 
 struct Ok200;
 
-#[async_trait::async_trait]
 impl BuiltInTool for Ok200 {
     async fn execute(&self, _arguments: &serde_json::Value) -> Result<String, String> {
         Ok("ok".into())
@@ -36,7 +35,7 @@ fn tool(name: &str, caps: &[&str], author: &str) -> RegisteredTool {
             strict: None,
             input_examples: None,
         },
-        backend: ToolBackend::BuiltIn(Arc::new(Ok200)),
+        backend: ToolBackend::built_in(Ok200),
         provides_capabilities: caps.iter().map(|c| c.to_string()).collect(),
         exempt_from_timeout: false,
         annotations: None,
@@ -53,6 +52,7 @@ fn mcp_tool(name: &str, caps: &[&str], server: &str) -> RegisteredTool {
         remote_name: "echo".into(),
         server_name: server.into(),
         generation: 1,
+        output_schema: None,
     };
     t
 }
@@ -67,7 +67,7 @@ fn template(id: &str, caps: &[&str]) -> AgentTemplate {
             singleton: false,
             capabilities: caps.iter().map(|c| c.to_string()).collect(),
             denied_capabilities: vec![],
-            temperature: 0.5,
+            temperature: None,
             verbosity: "normal".into(),
             model: None,
             fallback_models: vec![],

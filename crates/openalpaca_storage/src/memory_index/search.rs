@@ -971,7 +971,10 @@ struct NoteScore {
     best: Option<(f64, i64, usize)>,
 }
 
-#[allow(clippy::too_many_arguments)]
+#[expect(
+    clippy::too_many_arguments,
+    reason = "the query, its parsed parts and the candidate rows it ranks"
+)]
 pub(super) fn rank(
     q: &SearchQuery,
     parsed: &ParsedQuery,

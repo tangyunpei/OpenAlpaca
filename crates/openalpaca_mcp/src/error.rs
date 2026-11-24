@@ -87,6 +87,17 @@ pub enum McpError {
     #[error("reconnect attempts exhausted (tried {0})")]
     ReconnectExhausted(u32),
 
+    /// A `tools/call` the server still answered `input_required` on its
+    /// last allowed round (SEP-2322's multi round-trip request): the client
+    /// sent the call that many times, each round a request of its own the
+    /// server asked for, and sends no more. The cap is rmcp's
+    /// `DEFAULT_MRTR_MAX_ROUNDS` (10); no key sets it.
+    ///
+    /// Not in [`McpError::is_retriable`]'s set: the server answered, and a
+    /// reconnect would only start the same exchange over.
+    #[error("the server still asked for input after {0} rounds; the call was ended there")]
+    InputRoundsExceeded(usize),
+
     #[error("rmcp SDK error: {0}")]
     Sdk(String),
 }
@@ -109,6 +120,7 @@ impl McpError {
     /// retried, or the retry loop would respawn the child the owner just
     /// disabled. So are [`Self::Unauthorized`] and [`Self::RedirectRefused`]: a
     /// retry cannot succeed until the owner fixes the credential or the `url`.
+    /// And [`Self::InputRoundsExceeded`]: the server answered every round.
     pub fn is_retriable(&self) -> bool {
         matches!(
             self,
@@ -142,6 +154,8 @@ impl McpError {
                 ErrorCategory::Protocol
             }
             Self::ServerInternal(_) | Self::Timeout(_) => ErrorCategory::Server,
+            // The server answered — it kept asking for input.
+            Self::InputRoundsExceeded(_) => ErrorCategory::Server,
             Self::Cancelled => ErrorCategory::Cancelled,
             Self::Sdk(_) => ErrorCategory::Internal,
         }
@@ -150,17 +164,24 @@ impl McpError {
 
 // rmcp::service::ServiceError → McpError translation.
 //
-// rmcp 3.7 `ServiceError` variants (see rmcp/src/service.rs):
-//   - McpError(ErrorData)           : JSON-RPC error from the peer.
+// rmcp 3.9.0 `ServiceError` variants (see rmcp/src/service.rs):
+//   - McpError(ErrorData)           : JSON-RPC error from the peer, or from
+//                                     our own handler answering an input
+//                                     request (`client.rs`, the MRTR rounds).
 //   - TransportSend(DynamicTransportError) : local transport send failure.
 //   - TransportClosed               : the transport reports EOF / closure.
-//   - UnexpectedResponse            : protocol-level mismatch.
+//   - UnexpectedResponse            : protocol-level mismatch (a `tools/call`
+//                                     answered with a task, M83, among them).
 //   - SubscriptionLagged { capacity } : a `subscriptions/listen` consumer fell
-//                                     behind (we open no subscription).
+//                                     behind (`client.rs`'s `ChangeListener`
+//                                     reads the stream; it warns, unmapped).
 //   - Cancelled { reason }          : the operation was cancelled.
 //   - Timeout { timeout }           : the operation timed out.
-//   - InputRequiredRoundsExceeded { max_rounds } : an MRTR `input_required`
-//                                     loop did not finish (we answer no input).
+//   - InputRequiredRoundsExceeded { max_rounds } : rmcp's own MRTR loop gave
+//                                     up. The client drives the rounds itself
+//                                     (`McpClient::call_tool_under`) and ends
+//                                     with `InputRoundsExceeded`; mapped to it
+//                                     here too, so both read the same.
 //
 // Best-effort classification; unknown (`#[non_exhaustive]`) variants fall
 // through to `Sdk(...)` with a warn log so we notice rmcp additions.
@@ -192,19 +213,12 @@ pub(crate) fn unauthorized_status(
 /// What the streamable-HTTP client's redirect rule hands reqwest for a hop it
 /// refuses (`transport/http.rs`). reqwest keeps it as the source of the
 /// redirect error it returns, which is how [`typed_http_failure`] finds it.
-#[derive(Debug)]
+#[derive(Debug, thiserror::Error)]
+#[error("redirect to {origin} refused")]
 pub(crate) struct RefusedRedirect {
     /// The target's origin — scheme, host and port, never a path or query.
     pub(crate) origin: String,
 }
-
-impl std::fmt::Display for RefusedRedirect {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "redirect to {} refused", self.origin)
-    }
-}
-
-impl std::error::Error for RefusedRedirect {}
 
 /// The typed failure a streamable-HTTP transport error carries, if any: a
 /// credential the server rejected ([`McpError::Unauthorized`]) or a redirect
@@ -278,6 +292,7 @@ impl From<rmcp::service::ServiceError> for McpError {
             }
             S::Timeout { timeout } => Self::Timeout(timeout),
             S::Cancelled { .. } => Self::Cancelled,
+            S::InputRequiredRoundsExceeded { max_rounds } => Self::InputRoundsExceeded(max_rounds),
             other => {
                 tracing::warn!(error = ?other, "unmapped rmcp ServiceError");
                 Self::Sdk(format!("{other:?}"))
@@ -319,6 +334,8 @@ mod tests {
             (McpError::InvalidArguments("x".into()), false),
             (McpError::Cancelled, false),
             (McpError::ReconnectExhausted(3), false),
+            // The server answered every round (M15).
+            (McpError::InputRoundsExceeded(10), false),
             (
                 McpError::JsonRpc {
                     code: -32700,
@@ -406,8 +423,25 @@ mod tests {
             McpError::Timeout(Duration::from_secs(1)).category(),
             ErrorCategory::Server
         );
+        assert_eq!(
+            McpError::InputRoundsExceeded(10).category(),
+            ErrorCategory::Server
+        );
         assert_eq!(McpError::Cancelled.category(), ErrorCategory::Cancelled);
         assert_eq!(McpError::Sdk("x".into()).category(), ErrorCategory::Internal);
+    }
+
+    /// rmcp's own round cap and the client's read the same (M15).
+    #[test]
+    fn rmcps_round_cap_maps_to_the_clients() {
+        let mapped = McpError::from(rmcp::service::ServiceError::InputRequiredRoundsExceeded {
+            max_rounds: 10,
+        });
+        std::assert_matches!(mapped, McpError::InputRoundsExceeded(10), "{mapped:?}");
+        assert_eq!(
+            mapped.to_string(),
+            "the server still asked for input after 10 rounds; the call was ended there"
+        );
     }
 
     #[test]
@@ -432,5 +466,19 @@ mod tests {
             .to_string(),
             "server redirected to https://other.example:8443; set `url` to the canonical endpoint"
         );
+    }
+
+    /// Step 9's golden (E1 (b)): `RefusedRedirect`'s text byte for byte,
+    /// under `{}` and `{:#}`, with no `source()` — written against the
+    /// hand-written `Display` and kept on the derive.
+    #[test]
+    fn a_refused_redirect_names_its_origin_and_has_no_source() {
+        let refused = RefusedRedirect {
+            origin: "https://other\u{202e}.example\u{200b}:8443".to_string(),
+        };
+        let want = "redirect to https://other\u{202e}.example\u{200b}:8443 refused";
+        assert_eq!(refused.to_string(), want);
+        assert_eq!(format!("{refused:#}"), want);
+        assert!(std::error::Error::source(&refused).is_none());
     }
 }

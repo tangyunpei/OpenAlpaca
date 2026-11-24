@@ -2,7 +2,8 @@
 //!
 //! Every prompt budget in the lead-agent path used to read the window of the
 //! model the agent *template pins*, or a hard-coded 200 000 — and a shipped
-//! template pins a Claude id (`config/agents/lead_agent.md`). On an
+//! template then pinned a Claude id (`config/agents/lead_agent.md`; since C8
+//! the shipped ones name `inherit` or an alias). On an
 //! Ollama-only install that pin is not routable: L3 substitutes, the call is
 //! answered by an 8 192-token local model, and the budget said 200 000. The
 //! loop then never compacted, and the provider refused the overflowing
@@ -73,8 +74,9 @@ mod tests {
     use openalpaca_llm::{ProviderType, routing::model_registry::ModelRegistry};
 
     /// A router holding one local model, with the recording provider behind
-    /// it: `default_model` is the Claude id every shipped template pins, and
-    /// Anthropic is *not* loaded.
+    /// it: `default_model` is a compiled Claude row with its own window
+    /// (`claude-sonnet-5-5`, 1 000 000), and Anthropic is *not* loaded — so
+    /// a window read off the pin would be a wrong number, not a missing one.
     fn ollama_only_router() -> LlmRouter {
         let provider = crate::test_util::RecordingProvider::new("hi");
         let router = LlmRouter::new(
@@ -84,7 +86,7 @@ mod tests {
             std::sync::Arc::new(openalpaca_llm::routing::cost_tracker::CostTracker::new(
                 ModelRegistry::with_defaults(),
             )),
-            "claude-sonnet-4-6".to_string(),
+            "claude-sonnet-5-5".to_string(),
         );
         router.model_registry().register(
             "qwen3:8b".to_string(),
@@ -100,11 +102,14 @@ mod tests {
                 supports_reasoning: false,
                 supports_tools: true,
                 declared: false,
+                long_prompt: None,
+                cache_rates: None,
+                request_contract: openalpaca_llm::RequestContract::NONE,
             },
         );
         router.register_provider(
             ProviderType::Ollama,
-            provider,
+            openalpaca_llm::DynLlmProvider::from_arc(provider),
             openalpaca_llm::keys::key_pool::KeyPool::new(
                 Vec::new(),
                 openalpaca_llm::keys::key_pool::SelectionStrategy::RoundRobin,
@@ -113,19 +118,19 @@ mod tests {
         router
     }
 
-    /// **M5.** The lead's template pins Claude (200 000) and the only loaded
-    /// provider is a local Ollama: the budget is the local model's 8 192, not
-    /// the pin's, or the loop never compacts and the provider refuses the
-    /// request.
+    /// **M5.** A lead's template pins Claude (a compiled row, 1 000 000)
+    /// and the only loaded provider is a local Ollama: the budget is the
+    /// local model's 8 192, not the pin's, or the loop never compacts and the
+    /// provider refuses the request.
     #[test]
     fn an_unroutable_pin_is_budgeted_against_the_model_that_answers() {
         let router = ollama_only_router();
         assert_eq!(
-            routed_context_window(&router, Some("claude-sonnet-4-6")),
+            routed_context_window(&router, Some("claude-sonnet-5-5")),
             Some(8192)
         );
         assert_eq!(
-            routed_model(&router, Some("claude-sonnet-4-6")).as_deref(),
+            routed_model(&router, Some("claude-sonnet-5-5")).as_deref(),
             Some("qwen3:8b")
         );
     }
@@ -148,9 +153,9 @@ mod tests {
             std::sync::Arc::new(openalpaca_llm::routing::cost_tracker::CostTracker::new(
                 ModelRegistry::with_defaults(),
             )),
-            "claude-sonnet-4-6".to_string(),
+            "claude-sonnet-5-5".to_string(),
         );
-        assert_eq!(routed_context_window(&router, Some("claude-sonnet-4-6")), None);
+        assert_eq!(routed_context_window(&router, Some("claude-sonnet-5-5")), None);
     }
 
     /// A registered model whose window is `0` — a discovery that could not
@@ -173,6 +178,9 @@ mod tests {
                 supports_reasoning: false,
                 supports_tools: true,
                 declared: false,
+                long_prompt: None,
+                cache_rates: None,
+                request_contract: openalpaca_llm::RequestContract::NONE,
             },
         );
         assert_eq!(routed_context_window(&router, Some("broken:0")), None);

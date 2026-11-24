@@ -1,9 +1,10 @@
 use crate::commands::{status, tail};
 use crate::manager;
+use crate::reuse;
 use anyhow::Result;
 use clap::{Args, Subcommand};
-use openalpaca_storage::daemon_lifecycle::{self, StopOutcome};
-use openalpaca_storage::store;
+use openalpaca_app_support::daemon_lifecycle::{self, StopOutcome};
+use openalpaca_app_support::paths;
 use std::path::Path;
 
 #[derive(Args)]
@@ -13,6 +14,7 @@ pub struct DaemonArgs {
 }
 
 #[derive(Subcommand)]
+#[command(defer = true)]
 pub enum DaemonAction {
     /// Show daemon status
     Status,
@@ -39,13 +41,13 @@ pub async fn run(args: DaemonArgs) -> Result<()> {
         DaemonAction::Status => status::run().await,
         DaemonAction::Tail { count } => tail::run(count).await,
         DaemonAction::Start { daemon_only } => {
-            manager::start_daemon()?;
-            if !daemon_only {
-                // Brief wait for daemon to initialize resources if needed
-                std::thread::sleep(std::time::Duration::from_secs(2));
-                manager::start_gui()?;
-            }
-            Ok(())
+            start_with(
+                &mut reuse::RealWorld,
+                &reuse::THIS_CLI,
+                manager::start_daemon,
+                (!daemon_only).then_some(manager::start_gui),
+            )
+            .await
         }
         DaemonAction::Stop => {
             // The daemon only: an open app window stays open, keeps its
@@ -66,9 +68,108 @@ pub async fn run(args: DaemonArgs) -> Result<()> {
             if !stop_and_wait(true)? {
                 std::process::exit(2);
             }
-            manager::start_daemon()
+            restart_start_with(
+                &mut reuse::RealWorld,
+                &reuse::THIS_CLI,
+                manager::start_daemon,
+            )
+            .await
         }
     }
+}
+
+/// `openalpaca daemon start` over `world`, judged as `cli`: the first look
+/// refuses a live daemon this CLI cannot use before `start` rotates a log
+/// or spawns anything (123-8 (b), [`reuse::judge_before_start`]). With the
+/// app, the refusal is said on stderr and the app is started all the same,
+/// as a wait that ends on such a daemon has it (Rev 123's first item, (a));
+/// with `--daemon-only` (`start_app` `None`) it is the command's error.
+/// Otherwise the app is started once the daemon serves
+/// ([`start_gui_after_the_daemon`]), or, with `--daemon-only`, the command
+/// waits for the daemon the same way and fails on what the wait reports
+/// (123-2 (b), [`wait_for_the_daemon`]). `start` is `manager::start_daemon`
+/// and `start_app` `manager::start_gui` but in a test.
+pub(crate) async fn start_with<W: reuse::World, S: reuse::Spawned>(
+    world: &mut W,
+    cli: &openalpaca_app_support::protocol::ClientBuild,
+    start: impl FnOnce() -> Result<Option<S>>,
+    start_app: Option<impl FnOnce() -> Result<()>>,
+) -> Result<()> {
+    let mut spawned = match reuse::judge_before_start(world, cli, start).await? {
+        reuse::BeforeStart::Started(spawned) => spawned,
+        reuse::BeforeStart::Refused(sentence) => {
+            return match start_app {
+                Some(start_app) => {
+                    world.say(format!("⚠️  {sentence} Starting the app all the same."));
+                    start_app()
+                }
+                None => anyhow::bail!("{sentence}"),
+            };
+        }
+    };
+    let spawned = spawned.as_mut().map(|s| s as &mut dyn reuse::Spawned);
+    match start_app {
+        Some(start_app) => start_gui_after_the_daemon(world, cli, spawned, start_app).await,
+        None => wait_for_the_daemon(world, cli, spawned).await,
+    }
+}
+
+/// `openalpaca daemon restart`'s start, once the old daemon is gone: `start`
+/// (`manager::start_daemon` but in a test), then [`wait_for_the_daemon`] on
+/// the process it spawned (123-2 (b)), where the child was dropped and the
+/// command reported a daemon that died at boot as started.
+pub(crate) async fn restart_start_with<W: reuse::World, S: reuse::Spawned>(
+    world: &mut W,
+    cli: &openalpaca_app_support::protocol::ClientBuild,
+    start: impl FnOnce() -> Result<Option<S>>,
+) -> Result<()> {
+    let mut spawned = start()?;
+    wait_for_the_daemon(
+        world,
+        cli,
+        spawned.as_mut().map(|s| s as &mut dyn reuse::Spawned),
+    )
+    .await
+}
+
+/// The wait after `daemon start --daemon-only` and `daemon restart` started
+/// a daemon (123-2 (b)): [`reuse::wait_after_start`], the wait before the
+/// app — up to `protocol::STARTING_BUDGET`, a spawned daemon's exit ending
+/// it at once with the lines it wrote to its log said on stderr — whose
+/// failure is the command's: its reason is the error, and the command exits
+/// non-zero, where a daemon that died at boot was reported started.
+pub(crate) async fn wait_for_the_daemon<W: reuse::World>(
+    world: &mut W,
+    cli: &openalpaca_app_support::protocol::ClientBuild,
+    spawned: Option<&mut dyn reuse::Spawned>,
+) -> Result<()> {
+    match reuse::wait_after_start(world, cli, spawned).await {
+        reuse::StartWait::Ready => Ok(()),
+        reuse::StartWait::NotReady(why) => anyhow::bail!("{why}"),
+    }
+}
+
+/// The app started once the daemon serves (CLI-PROTOCOL; the owner's rule:
+/// the CLI and the app always use one daemon). [`reuse::wait_after_start`]
+/// replaces a fixed two-second sleep: the app's own check finds the daemon
+/// answering and uses it, where a daemon still booting after two seconds
+/// had the app find no discovery file and spawn a second one, which lost
+/// the store's lock to the first after rotating its log. A wait that ends
+/// otherwise — a daemon this CLI cannot use, one still starting, none at
+/// all — is said on stderr and the app is started all the same, as before:
+/// its own check then shows the same verdict in its window. `spawned` is
+/// the daemon this start spawned, whose exit ends the wait; `start_app` is
+/// `manager::start_gui` but in a test.
+pub(crate) async fn start_gui_after_the_daemon<W: reuse::World>(
+    world: &mut W,
+    cli: &openalpaca_app_support::protocol::ClientBuild,
+    spawned: Option<&mut dyn reuse::Spawned>,
+    start_app: impl FnOnce() -> Result<()>,
+) -> Result<()> {
+    if let reuse::StartWait::NotReady(why) = reuse::wait_after_start(world, cli, spawned).await {
+        world.say(format!("⚠️  {why} Starting the app all the same."));
+    }
+    start_app()
 }
 
 /// Ask the daemon to stop, then wait until its process has exited and the
@@ -90,11 +191,11 @@ fn stop_and_wait(restarting: bool) -> Result<bool> {
 }
 
 /// [`stop_failure_message`] with the daemon log resolved through
-/// `store::daemon_log_path()` — never a literal `~/.openalpaca`, because
+/// `paths::daemon_log_path()` — never a literal `~/.openalpaca`, because
 /// `OPENALPACA_HOME_STORE` moves the root. A log that is not there is not
 /// offered: telling the user to `tail` a missing file is no help.
 fn stop_failure_report(pid: u32, outcome: &StopOutcome, restarting: bool) -> Option<String> {
-    let log = store::daemon_log_path().ok().filter(|path| path.is_file());
+    let log = paths::daemon_log_path().ok().filter(|path| path.is_file());
     stop_failure_message(pid, outcome, restarting, log.as_deref())
 }
 
@@ -186,7 +287,7 @@ mod tests {
     fn a_restart_that_outlives_the_budget_names_the_pid_the_budget_the_fallback_and_the_log() {
         let tmp = tempfile::tempdir().unwrap();
         let _env = EnvSandbox::enter(tmp.path());
-        let log = store::daemon_log_path().unwrap();
+        let log = paths::daemon_log_path().unwrap();
         assert!(
             log.starts_with(tmp.path()),
             "the log path escaped the sandbox ({}); refusing to write",
@@ -215,7 +316,7 @@ mod tests {
     fn a_missing_daemon_log_is_not_offered() {
         let tmp = tempfile::tempdir().unwrap();
         let _env = EnvSandbox::enter(tmp.path());
-        assert!(store::daemon_log_path().unwrap().starts_with(tmp.path()));
+        assert!(paths::daemon_log_path().unwrap().starts_with(tmp.path()));
 
         let report = stop_failure_report(PID, &still_alive(), true).expect("a failure is reported");
 

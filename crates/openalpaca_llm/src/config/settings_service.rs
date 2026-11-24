@@ -33,8 +33,9 @@ pub use super::settings_types::{
 /// default is the plain write this service always did, which is what a test or
 /// a caller with no core dependency gets.
 ///
-/// Called with `<config_path>.lock` already held — `file_lock` locks per
-/// descriptor, so a writer that took the lock again would deadlock.
+/// Called with `<config_path>.lock` already held — the lock is a `flock` lock,
+/// which belongs to the open file description, so a writer that took the lock
+/// again would block for ever behind its own caller.
 pub type ConfigWriter = Arc<dyn Fn(&Path, &str) -> Result<(), String> + Send + Sync>;
 
 fn default_config_writer() -> ConfigWriter {
@@ -681,7 +682,7 @@ impl LlmSettingsService {
                 config
                     .orchestrator
                     .get_or_insert_with(|| crate::config::OrchestratorLlmConfig {
-                        model: "claude-sonnet-4-5-20250929".to_string(),
+                        model: crate::config::DEFAULT_ORCHESTRATOR_MODEL.to_string(),
                         fallback_models: None,
                     });
             orch.model = req.model;
@@ -1046,7 +1047,13 @@ impl LlmSettingsService {
     }
 
     /// Build and register a provider that wasn't in the router at startup.
-    #[allow(unused_variables)]
+    #[cfg_attr(
+        not(feature = "openai"),
+        expect(
+            unused_variables,
+            reason = "without the openai feature no arm reads base_url"
+        )
+    )]
     fn register_provider_from_config(
         &self,
         config: &LlmRouterConfig,
@@ -1081,7 +1088,7 @@ impl LlmSettingsService {
         let request_timeout = rt.request_timeout_for(&provider_name);
         #[cfg(any(feature = "anthropic", feature = "openai", feature = "ollama"))]
         let client = crate::providers::build_http_client(request_timeout);
-        let provider: Option<Arc<dyn crate::LlmProvider>> = match &provider_type {
+        let provider: Option<Arc<crate::DynLlmProvider<'static>>> = match &provider_type {
             #[cfg(feature = "anthropic")]
             ProviderType::Anthropic => {
                 let model = rt
@@ -1092,7 +1099,7 @@ impl LlmSettingsService {
                     .provider_defaults
                     .get("anthropic")
                     .map(|d| d.default_max_tokens);
-                Some(Arc::new(
+                Some(crate::DynLlmProvider::new_arc(
                     crate::providers::anthropic::AnthropicProvider::with_client(
                         client,
                         require_key()?,
@@ -1112,7 +1119,7 @@ impl LlmSettingsService {
                     .provider_defaults
                     .get("openai")
                     .map(|d| d.default_max_tokens);
-                Some(Arc::new(
+                Some(crate::DynLlmProvider::new_arc(
                     crate::providers::openai::OpenAiProvider::with_client(
                         client,
                         require_key()?,
@@ -1140,14 +1147,20 @@ impl LlmSettingsService {
                     .provider_defaults
                     .get("ollama")
                     .map(|d| d.default_max_tokens);
-                Some(Arc::new(
+                Some(crate::DynLlmProvider::new_arc(
                     crate::providers::ollama::OllamaProvider::with_client(
                         client, model, base_url, max_tokens,
                     )
                     .with_request_timeout(request_timeout),
                 ))
             }
-            #[allow(unreachable_patterns)]
+            #[cfg_attr(
+                all(feature = "anthropic", feature = "openai", feature = "ollama"),
+                expect(
+                    unreachable_patterns,
+                    reason = "with every provider feature on, each provider has its arm"
+                )
+            )]
             _ => None,
         };
 
@@ -1279,9 +1292,6 @@ fn parse_provider_type(name: &str) -> Option<ProviderType> {
         "anthropic" => Some(ProviderType::Anthropic),
         "openai" => Some(ProviderType::OpenAI),
         "ollama" => Some(ProviderType::Ollama),
-        other if other.starts_with("plugin:") => {
-            Some(ProviderType::Plugin(other.strip_prefix("plugin:").unwrap().to_string()))
-        }
         _ => None,
     }
 }

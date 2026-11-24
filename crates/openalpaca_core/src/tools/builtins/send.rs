@@ -1,9 +1,9 @@
 use super::ConnectorSendLock;
 use super::annotations_for_builtin;
 use super::helpers::{acting_folder, named_folder, resolve_workspace_path};
+use crate::orchestrator::{ConnectorSendProvider, DynConnectorSendProvider};
 use crate::tools::registry::{BuiltInTool, RegisteredTool, ToolBackend, ToolContext};
 use crate::utils::text::{escape_hidden_line, hidden_notice};
-use async_trait::async_trait;
 use openalpaca_llm::ToolDefinition;
 use openalpaca_storage::repository::TaskRepository;
 use openalpaca_storage::{ArtifactRecord, ArtifactStore, Database};
@@ -145,9 +145,7 @@ fn file_card(file: &SendFile, channel: &str, recipient: &str, filename: &str) ->
 }
 
 impl SendTool {
-    fn acquire_provider(
-        &self,
-    ) -> Result<Arc<dyn crate::orchestrator::ConnectorSendProvider>, String> {
+    fn acquire_provider(&self) -> Result<Arc<DynConnectorSendProvider<'static>>, String> {
         let guard = self
             .provider
             .read()
@@ -279,7 +277,6 @@ impl SendTool {
     }
 }
 
-#[async_trait]
 impl BuiltInTool for SendTool {
     async fn execute(&self, arguments: &serde_json::Value) -> Result<String, String> {
         self.execute_with_context(arguments, &ToolContext::default())
@@ -444,7 +441,7 @@ pub(super) fn send_tool(provider: ConnectorSendLock, db: Option<Database>) -> Re
                 }),
             ]),
         },
-        backend: ToolBackend::BuiltIn(Arc::new(SendTool { provider, db })),
+        backend: ToolBackend::built_in(SendTool { provider, db }),
         provides_capabilities: vec!["messaging".into()],
         exempt_from_timeout: false,
         annotations: annotations_for_builtin("send"),
@@ -457,7 +454,6 @@ pub(super) fn send_tool(provider: ConnectorSendLock, db: Option<Database>) -> Re
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::orchestrator::ConnectorSendProvider;
     use openalpaca_storage::store::StoreScope;
     use openalpaca_storage::{ArtifactKind, ArtifactRecord, NewArtifact};
     use std::sync::{Mutex, RwLock};
@@ -478,7 +474,6 @@ mod tests {
         files: Mutex<Vec<(String, String, String)>>,
     }
 
-    #[async_trait]
     impl ConnectorSendProvider for RecordingSender {
         async fn send_message(&self, _: &str, _: &str, _: &str) -> Result<String, String> {
             Ok("sent".to_string())
@@ -510,9 +505,10 @@ mod tests {
     /// `send` with `sender` as its connector. It acts in the call's working
     /// folder (storage design §10, R26).
     fn tool_with(sender: &Arc<RecordingSender>) -> SendTool {
-        let provider: Arc<dyn ConnectorSendProvider> = sender.clone();
         SendTool {
-            provider: Arc::new(RwLock::new(Some(provider))),
+            provider: Arc::new(RwLock::new(Some(DynConnectorSendProvider::from_arc(
+                sender.clone(),
+            )))),
             db: None,
         }
     }
@@ -821,9 +817,10 @@ mod tests {
     }
 
     fn artifact_tool(saved: &Saved, sender: &Arc<RecordingSender>) -> SendTool {
-        let provider: Arc<dyn ConnectorSendProvider> = sender.clone();
         SendTool {
-            provider: Arc::new(RwLock::new(Some(provider))),
+            provider: Arc::new(RwLock::new(Some(DynConnectorSendProvider::from_arc(
+                sender.clone(),
+            )))),
             db: Some(saved.db.clone()),
         }
     }
@@ -861,6 +858,55 @@ mod tests {
                 saved.record.mime_type.clone()
             )],
             "the stored file, with the artifact's own type when the call names none"
+        );
+    }
+
+    /// M85: an image an MCP tool returned, kept as a by-product, is sent by
+    /// the id its line names, with the type the server gave it.
+    #[tokio::test]
+    async fn an_image_an_mcp_tool_returned_is_sent_by_its_id() {
+        use base64::Engine as _;
+        let saved = saved();
+        let sink = super::super::ByProductSink::new(saved.db.clone(), None);
+        let png = [0x89u8, b'P', b'N', b'G', 0x0d, 0x0a, 0x1a, 0x0a];
+        let encoded = base64::engine::general_purpose::STANDARD.encode(png);
+        let line = super::super::save_tool_by_product(
+            Some(&sink),
+            Some(&owner_ctx(OWNER)),
+            super::super::ToolBlob {
+                tool: "srv__shoot",
+                what: "image",
+                title: "srv shoot image a 1",
+                base64: &encoded,
+                mime_type: Some("image/png"),
+            },
+        );
+        let id = line
+            .split_once("artifact \"")
+            .and_then(|(_, rest)| rest.split_once('"'))
+            .unwrap_or_else(|| panic!("not kept: {line}"))
+            .0
+            .to_string();
+        let record = ArtifactStore::new(&saved.db)
+            .get(&id, OWNER)
+            .unwrap()
+            .unwrap();
+        assert_eq!(record.kind, Some(ArtifactKind::Image));
+
+        let sender = Arc::new(RecordingSender::default());
+        let mut args = artifact_args(&id);
+        args["filename"] = serde_json::json!("shot.png");
+        let out = artifact_tool(&saved, &sender)
+            .execute_with_context(&args, &owner_ctx(OWNER))
+            .await;
+        assert_eq!(out.as_deref(), Ok("Sent file 'shot.png'"));
+        assert_eq!(
+            *sender.files.lock().unwrap(),
+            vec![(
+                record.storage_path.clone(),
+                "shot.png".to_string(),
+                "image/png".to_string()
+            )]
         );
     }
 
@@ -1364,9 +1410,9 @@ mod tests {
             .unwrap();
         let sender = Arc::new(RecordingSender::default());
         let tool = SendTool {
-            provider: Arc::new(RwLock::new(Some(
-                sender.clone() as Arc<dyn crate::orchestrator::ConnectorSendProvider>
-            ))),
+            provider: Arc::new(RwLock::new(Some(DynConnectorSendProvider::from_arc(
+                sender.clone(),
+            )))),
             db: Some(db.clone()),
         };
 
@@ -1467,9 +1513,9 @@ mod tests {
             .unwrap();
         let sender = Arc::new(RecordingSender::default());
         let tool = SendTool {
-            provider: Arc::new(RwLock::new(Some(
-                sender.clone() as Arc<dyn crate::orchestrator::ConnectorSendProvider>
-            ))),
+            provider: Arc::new(RwLock::new(Some(DynConnectorSendProvider::from_arc(
+                sender.clone(),
+            )))),
             db: Some(db.clone()),
         };
         let refused = format!(
@@ -1538,9 +1584,9 @@ mod tests {
             .unwrap();
         let sender = Arc::new(RecordingSender::default());
         let tool = SendTool {
-            provider: Arc::new(RwLock::new(Some(
-                sender.clone() as Arc<dyn crate::orchestrator::ConnectorSendProvider>
-            ))),
+            provider: Arc::new(RwLock::new(Some(DynConnectorSendProvider::from_arc(
+                sender.clone(),
+            )))),
             db: Some(db.clone()),
         };
         let ctx = ToolContext {

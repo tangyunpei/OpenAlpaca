@@ -1,16 +1,19 @@
 pub(crate) mod request;
 mod response;
+mod responses;
 mod streaming;
 
 use crate::LlmProvider;
+use crate::config::llm_config::runtime::DEFAULT_MAX_TOKENS;
 use crate::error::LlmError;
 use crate::types::*;
-use async_trait::async_trait;
 use reqwest::header::HeaderMap;
 
-const DEFAULT_MODEL: &str = "gpt-4o";
+/// The model for a request that names none: GPT-6 Luna, a compiled row,
+/// named GPT-4o's replacement (MODELS-LATEST, the subagent design's §4.9.5;
+/// developers.openai.com/api/docs/deprecations, read 2026-11-14).
+const DEFAULT_MODEL: &str = "gpt-6-luna";
 const DEFAULT_BASE_URL: &str = "https://api.openai.com/v1";
-const DEFAULT_MAX_TOKENS: u32 = 4096;
 
 /// Which OpenAI-compatible server is on the other end.
 ///
@@ -49,6 +52,29 @@ pub struct OpenAiProvider {
     request_timeout: Option<std::time::Duration>,
     /// Whose OpenAI-compatible wire this is — see [`OpenAiFlavour`].
     flavour: OpenAiFlavour,
+    /// Whether `base_url` is OpenAI's own API ([`is_openai_api`]), never
+    /// set for a keyless or Ollama provider. There a request with tools goes
+    /// to the Responses API (C7b, [`Self::uses_responses`]) and a Chat
+    /// Completions body says `store: false` (STORE-FALSE,
+    /// [`Self::build_request_body`]).
+    openai_api: bool,
+}
+
+// The hosts of OpenAI's own API: the one list, which the guard and the
+// usage fetch read too.
+use super::OPENAI_API_HOSTS;
+
+/// Whether `base_url` is OpenAI's own API: `https` to one of
+/// [`OPENAI_API_HOSTS`], whatever the path. Every other OpenAI-compatible
+/// server — Ollama, llama.cpp, LM Studio, a gateway — keeps Chat
+/// Completions (C7b).
+pub(crate) fn is_openai_api(base_url: &str) -> bool {
+    reqwest::Url::parse(base_url).is_ok_and(|url| {
+        url.scheme() == "https"
+            && url
+                .host_str()
+                .is_some_and(|host| OPENAI_API_HOSTS.contains(&host))
+    })
 }
 
 impl OpenAiProvider {
@@ -69,11 +95,13 @@ impl OpenAiProvider {
         base_url: Option<String>,
         max_tokens: Option<u32>,
     ) -> Self {
+        let base_url = base_url.unwrap_or_else(|| DEFAULT_BASE_URL.to_string());
         Self {
             client,
             api_key: Some(api_key),
             model: model.unwrap_or_else(|| DEFAULT_MODEL.to_string()),
-            base_url: base_url.unwrap_or_else(|| DEFAULT_BASE_URL.to_string()),
+            openai_api: is_openai_api(&base_url),
+            base_url,
             max_tokens: max_tokens.unwrap_or(DEFAULT_MAX_TOKENS),
             request_timeout: None,
             flavour: OpenAiFlavour::OpenAi,
@@ -88,8 +116,9 @@ impl OpenAiProvider {
     /// Create a provider without auth, using a shared client.
     ///
     /// `max_tokens` is the output ceiling the caller's config asked for; `None`
-    /// keeps the 4096 default. It used to be hard-coded here, which is how
-    /// `[providers.ollama] default_max_tokens` came to be silently ignored (L6).
+    /// keeps the default, [`DEFAULT_MAX_TOKENS`] (16,000). It used to be
+    /// hard-coded here, which is how `[providers.ollama] default_max_tokens`
+    /// came to be silently ignored (L6).
     pub fn new_without_auth_with_client(
         client: reqwest::Client,
         model: String,
@@ -104,7 +133,17 @@ impl OpenAiProvider {
             max_tokens: max_tokens.unwrap_or(DEFAULT_MAX_TOKENS),
             request_timeout: None,
             flavour: OpenAiFlavour::OpenAi,
+            openai_api: false,
         }
+    }
+
+    /// Treat the `base_url` as OpenAI's own API, or not, whatever it is
+    /// (C7b, STORE-FALSE). Only tests call it: they point the provider at a
+    /// loopback mock that stands in for OpenAI's own API.
+    #[cfg(test)]
+    pub(crate) fn with_openai_api(mut self, on: bool) -> Self {
+        self.openai_api = on;
+        self
     }
 
     /// Declare whose OpenAI-compatible wire this is (M2).
@@ -141,8 +180,41 @@ impl OpenAiProvider {
         &self.client
     }
 
+    /// A guarded test build never sends to OpenAI's real hosts
+    /// (LLM-TEST-GUARD, pending-decisions *Rev 127* item 9 (b), taken
+    /// *Rev 128*): a provider whose base has one of [`OPENAI_API_HOSTS`] —
+    /// [`DEFAULT_BASE_URL`]'s host among them — refuses each call before any
+    /// lookup ([`super::refuse_real_host`]). Read from the base's host, not
+    /// from [`Self::with_openai_api`], so a loopback mock standing in for
+    /// OpenAI's API still answers, as does every LAN or other compatible
+    /// server. A release build has no such check.
+    fn refuse_real_endpoint(&self) -> Result<(), LlmError> {
+        super::refuse_real_host("OpenAI", &self.base_url, OPENAI_API_HOSTS)
+    }
+
+    /// Whether this provider talks to OpenAI's own API (C7b, STORE-FALSE).
+    fn own_api(&self) -> bool {
+        self.openai_api && self.flavour == OpenAiFlavour::OpenAi
+    }
+
+    /// The Chat Completions body for `request`. On OpenAI's own API it says
+    /// `store: false`, as the Responses body does (STORE-FALSE): "Chat
+    /// completions are stored by default for new accounts. To disable
+    /// storage when using either API, set `store: false`" (the migration
+    /// guide, developers.openai.com/api/docs/guides/migrate-to-responses,
+    /// read 2026-11-14), though the Chat Completions reference
+    /// (developers.openai.com/api/reference/resources/chat/subresources/
+    /// completions/methods/create, read the same day) gives the field's
+    /// default as `false`; the body says it either way. Every other
+    /// OpenAI-compatible server, Ollama included, is sent no `store`, a
+    /// field it may refuse.
     pub(crate) fn build_request_body(&self, request: &ChatRequest) -> serde_json::Value {
-        request::build_request_body(&self.model, self.max_tokens, self.flavour, request)
+        let mut body =
+            request::build_request_body(&self.model, self.max_tokens, self.flavour, request);
+        if self.own_api() {
+            body["store"] = serde_json::json!(false);
+        }
+        body
     }
 
     pub(crate) fn parse_response(
@@ -151,12 +223,72 @@ impl OpenAiProvider {
     ) -> Result<ChatResponse, LlmError> {
         response::parse_response(&self.model, body)
     }
+
+    /// Whether `request` goes to `/responses` rather than
+    /// `/chat/completions` (C7b): on OpenAI's own API, a request that calls
+    /// functions — it offers tools, or its history holds a tool call or a
+    /// tool result. OpenAI's current reasoning models take tool calls with
+    /// reasoning only there: "Tool calling requires the Responses API"
+    /// (gpt-6.1-sol's page), and "Starting with GPT-5.4, Chat Completions
+    /// does not support tool calling with `reasoning_effort` values other
+    /// than `none`" (the migration guide); "GPT-6 Sol
+    /// and GPT-6 Luna support function calling in Chat Completions only with
+    /// `reasoning_effort: "none"`" (the GPT-6 guide; all three read
+    /// 2026-11-12). Every other request
+    /// keeps Chat Completions, which every catalogued OpenAI model supports
+    /// (their pages, the same day), as does every other OpenAI-compatible
+    /// server.
+    pub(crate) fn uses_responses(&self, request: &ChatRequest) -> bool {
+        self.own_api()
+            && (!request.tools.is_empty()
+                || request
+                    .messages
+                    .iter()
+                    .any(|m| m.tool_calls.is_some() || m.tool_call_id.is_some()))
+    }
+
+    /// The route and body for `request`, on whichever wire it takes.
+    fn route(&self, request: &ChatRequest) -> (String, serde_json::Value) {
+        if self.uses_responses(request) {
+            (
+                format!("{}/responses", self.base_url),
+                self.build_responses_body(request),
+            )
+        } else {
+            (
+                format!("{}/chat/completions", self.base_url),
+                self.build_request_body(request),
+            )
+        }
+    }
+
+    /// The Responses API body for `request` (C7b).
+    pub(crate) fn build_responses_body(&self, request: &ChatRequest) -> serde_json::Value {
+        responses::build_request_body(&self.model, self.max_tokens, request)
+    }
+
+    /// A whole Responses API answer, read (C7b).
+    pub(crate) fn parse_responses_response(
+        &self,
+        body: serde_json::Value,
+    ) -> Result<ChatResponse, LlmError> {
+        responses::parse_response(&self.model, body)
+    }
 }
 
-#[async_trait]
 impl LlmProvider for OpenAiProvider {
     fn name(&self) -> &str {
         "openai"
+    }
+
+    fn base_url(&self) -> Option<&str> {
+        Some(&self.base_url)
+    }
+
+    /// OpenAI's own API only (COMPAT-SERVER): the rule C7b's Responses API
+    /// and STORE-FALSE read.
+    fn serves_compiled_rows(&self) -> bool {
+        self.own_api()
     }
 
     fn supports_tools(&self) -> bool {
@@ -171,6 +303,7 @@ impl LlmProvider for OpenAiProvider {
     }
 
     async fn list_models_with_key(&self, key: &str) -> Result<Vec<String>, LlmError> {
+        self.refuse_real_endpoint()?;
         let url = format!("{}/models", self.base_url);
         let mut req_builder = self.deadline(self.client.get(&url));
 
@@ -181,7 +314,7 @@ impl LlmProvider for OpenAiProvider {
         let response = req_builder
             .send()
             .await
-            .map_err(|e| LlmError::Http(e.to_string()))?;
+            .map_err(crate::providers::reqwest_error)?;
 
         if !response.status().is_success() {
             return Ok(vec![]);
@@ -190,7 +323,7 @@ impl LlmProvider for OpenAiProvider {
         let body: serde_json::Value = response
             .json()
             .await
-            .map_err(|e| LlmError::Serialization(e.to_string()))?;
+            .map_err(crate::providers::reqwest_error)?;
 
         let models = body["data"]
             .as_array()
@@ -209,8 +342,9 @@ impl LlmProvider for OpenAiProvider {
         key: &str,
         request: ChatRequest,
     ) -> Result<ChatResponse, LlmError> {
-        let body = self.build_request_body(&request);
-        let url = format!("{}/chat/completions", self.base_url);
+        self.refuse_real_endpoint()?;
+        let responses = self.uses_responses(&request);
+        let (url, body) = self.route(&request);
         let model_id = request.model.as_deref().unwrap_or(&self.model);
 
         let mut req_builder = self.deadline(
@@ -229,7 +363,7 @@ impl LlmProvider for OpenAiProvider {
             .json(&body)
             .send()
             .await
-            .map_err(|e| LlmError::Http(e.to_string()))?;
+            .map_err(crate::providers::reqwest_error)?;
 
         let status = response.status().as_u16();
 
@@ -265,7 +399,7 @@ impl LlmProvider for OpenAiProvider {
         let response_body: serde_json::Value = response
             .json()
             .await
-            .map_err(|e| LlmError::Serialization(e.to_string()))?;
+            .map_err(crate::providers::reqwest_error)?;
 
         if status >= 400 {
             let message = response_body["error"]["message"]
@@ -275,7 +409,11 @@ impl LlmProvider for OpenAiProvider {
             return Err(LlmError::Api { status, message });
         }
 
-        self.parse_response(response_body)
+        if responses {
+            self.parse_responses_response(response_body)
+        } else {
+            self.parse_response(response_body)
+        }
     }
 
     fn supports_streaming(&self) -> bool {
@@ -287,14 +425,20 @@ impl LlmProvider for OpenAiProvider {
         key: &str,
         request: ChatRequest,
     ) -> Result<ChatStream, LlmError> {
-        let mut body = self.build_request_body(&request);
+        self.refuse_real_endpoint()?;
+        let responses = self.uses_responses(&request);
+        let (url, mut body) = self.route(&request);
         body["stream"] = serde_json::json!(true);
-        // Asked of every OpenAI-compatible base, not just api.openai.com: a
-        // streamed turn that reports no usage is booked at zero tokens and zero
-        // cost, so the caps and the usage screen see nothing (L5). Ollama
-        // honours the flag; a base that does not simply ignores it.
-        body["stream_options"] = serde_json::json!({"include_usage": true});
-        let url = format!("{}/chat/completions", self.base_url);
+        if !responses {
+            // Asked of every OpenAI-compatible base, not just api.openai.com:
+            // a streamed turn that reports no usage is booked at zero tokens
+            // and zero cost, so the caps and the usage screen see nothing
+            // (L5). Ollama honours the flag; a base that does not simply
+            // ignores it. The Responses API's `stream_options` is another
+            // object, and its `response.completed` event always carries the
+            // usage (the reference, read 2026-11-12).
+            body["stream_options"] = serde_json::json!({"include_usage": true});
+        }
 
         let mut req_builder = self
             .client
@@ -311,7 +455,7 @@ impl LlmProvider for OpenAiProvider {
             .json(&body)
             .send()
             .await
-            .map_err(|e| LlmError::Http(e.to_string()))?;
+            .map_err(crate::providers::reqwest_error)?;
 
         let status = response.status().as_u16();
 
@@ -332,7 +476,7 @@ impl LlmProvider for OpenAiProvider {
             let error_body: serde_json::Value = response
                 .json()
                 .await
-                .map_err(|e| LlmError::Serialization(e.to_string()))?;
+                .map_err(crate::providers::reqwest_error)?;
             let message = error_body["error"]["message"]
                 .as_str()
                 .unwrap_or("Unknown error")
@@ -341,10 +485,16 @@ impl LlmProvider for OpenAiProvider {
         }
 
         let byte_stream = response.bytes_stream();
-        Ok(Box::pin(streaming::parse_openai_sse(byte_stream)))
+        if responses {
+            Ok(Box::pin(responses::parse_responses_sse(byte_stream)))
+        } else {
+            Ok(Box::pin(streaming::parse_openai_sse(byte_stream)))
+        }
     }
 }
 
+#[cfg(test)]
+use responses::parse_responses_sse;
 #[cfg(test)]
 use streaming::parse_openai_sse;
 

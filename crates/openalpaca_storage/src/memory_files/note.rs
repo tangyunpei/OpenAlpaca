@@ -240,18 +240,11 @@ pub struct Note {
 
 /// Why a file is not a note. Malformed files stay on disk, excluded, never
 /// rewritten (design §4).
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
+#[error("{reason}")]
 pub struct NoteParseError {
     pub reason: String,
 }
-
-impl fmt::Display for NoteParseError {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.write_str(&self.reason)
-    }
-}
-
-impl std::error::Error for NoteParseError {}
 
 fn err<T>(reason: impl Into<String>) -> Result<T, NoteParseError> {
     Err(NoteParseError {

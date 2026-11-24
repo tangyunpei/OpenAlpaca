@@ -8,13 +8,12 @@ use tempfile::TempDir;
 
 struct StubExecutor;
 
-#[async_trait::async_trait]
 impl openalpaca_api::plugin_traits::PluginSkillExecutor for StubExecutor {
     async fn invoke(
         &self,
         _query: &str,
         _context: &serde_json::Value,
-        _tool_executor: &dyn openalpaca_api::plugin_traits::ToolCallbackExecutor,
+        _tool_executor: &openalpaca_api::plugin_traits::DynToolCallbackExecutor<'_>,
     ) -> Result<String, String> {
         Ok(String::new())
     }
@@ -117,10 +116,10 @@ fn a_plugin_removal_leaves_another_plugins_skill() {
     let entry = catalog
         .get("triage")
         .expect("q's skill survives p's unload");
-    assert!(matches!(
+    std::assert_matches!(
         entry.source,
         SkillSource::Plugin { ref plugin_id, .. } if plugin_id == "q"
-    ));
+    );
     assert!(catalog.get_by_command("triage").is_some());
     assert!(catalog.tombstone("triage").is_none());
 }

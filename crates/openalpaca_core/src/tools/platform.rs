@@ -44,13 +44,39 @@ pub fn shown_output(kept: &[u8], stream: &str) -> String {
     text
 }
 
-/// What a command stopped at its time limit is told — by the shell's own
-/// bound and by the sandbox's cut alike (N-TOOL-4, Z1-13: the hint belongs to
-/// whoever enforced the limit, not to a guess the loop makes from the words).
-/// The message it follows names the limit; no tool takes a parameter that
-/// raises it (N-TOOL-1, Z1-05).
-pub const COMMAND_TIMED_OUT_HINT: &str = "Hint: that is the most a command may run here; split \
-    the work into smaller commands that each finish sooner.";
+/// What a tool call stopped at the most it may run is told — a command by
+/// the shell's own bound, and any call that may ask for its own figure by
+/// the sandbox's cut at that most (N-TOOL-4, Z1-13: the hint belongs to
+/// whoever enforced the limit, not to a guess the loop makes from the
+/// words). The message it follows names the limit. Worded for any tool that
+/// may ask, a command or a plugin's tool (PLUGIN-WAIT-2).
+pub const TIMED_OUT_HINT: &str = "Hint: that is the most this tool may run here; split the \
+    work into smaller calls that each finish sooner.";
+
+/// What a call the sandbox cut after `secs` is told, where it may run up to
+/// `most_secs` (N-TOOL-1b, B-11) — the ceiling a call's `timeout_secs` is
+/// clamped to, for `shell_execute`, a `Command`-backend tool (CMD-TIMEOUT)
+/// and a plugin's tool (PLUGIN-WAIT-2) alike. Below that most it advises a
+/// larger `timeout_secs` only where the tool's parameters take one
+/// (`takes_timeout_secs`, TIMEOUT-ONE-CLOCK item 19): never advice its
+/// schema may refuse. Otherwise it names the tool's limit and the ceiling as
+/// facts and says to split the work, neither advising nor denying a
+/// `timeout_secs`. At it, [`TIMED_OUT_HINT`] (item 21, kept).
+pub fn timed_out_hint(secs: u64, most_secs: u64, takes_timeout_secs: bool) -> String {
+    if secs >= most_secs {
+        TIMED_OUT_HINT.to_string()
+    } else if takes_timeout_secs {
+        format!(
+            "Hint: this tool may run up to {most_secs} seconds here — call it again with a \
+             larger timeout_secs, or split the work into smaller calls that each finish sooner."
+        )
+    } else {
+        format!(
+            "Hint: this tool's limit here is {secs} seconds (the most any call may run is \
+             {most_secs} seconds). Split the work into smaller calls that each finish sooner."
+        )
+    }
+}
 
 /// Why [`run_bounded`] produced no output.
 #[derive(Debug)]
@@ -215,7 +241,7 @@ mod tests {
         let mut cmd = Command::new(dir.path().join("no-such-program"));
         cmd.current_dir(dir.path());
         let outcome = run_bounded(cmd, Duration::from_secs(5)).await;
-        assert!(matches!(outcome, Err(RunFailure::Spawn(_))), "{outcome:?}");
+        std::assert_matches!(outcome, Err(RunFailure::Spawn(_)), "{outcome:?}");
     }
 
     /// `sleep 30` started in the background, its pid written to `pidfile`,
@@ -252,7 +278,7 @@ mod tests {
             run_bounded(starts_a_sleep(dir.path(), &pidfile), Duration::from_secs(1)).await;
         let pid = pid_from_file(&pidfile, Duration::from_secs(1)).await;
         let _kill = KillOnFail(pid);
-        assert!(matches!(outcome, Err(RunFailure::TimedOut)), "{outcome:?}");
+        std::assert_matches!(outcome, Err(RunFailure::TimedOut), "{outcome:?}");
         assert!(
             wait_until_gone(pid, GONE_WITHIN).await,
             "the background sleep {pid} outlived the timeout"
@@ -269,7 +295,7 @@ mod tests {
         let pidfile = dir.path().join("pid");
         let run = tokio::spawn(run_bounded(
             starts_a_sleep(dir.path(), &pidfile),
-            Duration::from_secs(60),
+            Duration::from_mins(1),
         ));
         let pid = pid_from_file(&pidfile, Duration::from_secs(5)).await;
         let _kill = KillOnFail(pid);
@@ -301,7 +327,7 @@ mod tests {
             detached_file.display()
         ));
         cmd.current_dir(dir.path());
-        let run = tokio::spawn(run_bounded(cmd, Duration::from_secs(60)));
+        let run = tokio::spawn(run_bounded(cmd, Duration::from_mins(1)));
         // The detached process is out of the run's reach, so it is guarded
         // the moment its pid is known, before anything else can fail.
         let detached = pid_from_file(&detached_file, Duration::from_secs(5)).await;
@@ -343,7 +369,7 @@ mod tests {
             pidfile.display()
         ));
         cmd.current_dir(&gp.root);
-        let outcome = run_bounded(cmd, Duration::from_secs(60)).await;
+        let outcome = run_bounded(cmd, Duration::from_mins(1)).await;
         let shell = pid_from_file(&pidfile, Duration::from_secs(1)).await;
         let output = outcome.expect("the command runs to its end");
         assert!(output.status.success(), "{:?}", output.status);

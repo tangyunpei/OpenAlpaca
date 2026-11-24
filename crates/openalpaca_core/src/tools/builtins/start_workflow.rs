@@ -13,7 +13,6 @@ use crate::daemon_config::RoutingConfig;
 use crate::events::SystemEvent;
 use crate::orchestrator::dispatcher::{generate_title, DispatchOutcome, TaskDispatcher};
 use crate::tools::registry::{BuiltInTool, ToolContext};
-use async_trait::async_trait;
 use chrono::Utc;
 use openalpaca_llm::ToolDefinition;
 use std::sync::{Arc, Mutex};
@@ -69,7 +68,6 @@ impl StartWorkflowTool {
     }
 }
 
-#[async_trait]
 impl BuiltInTool for StartWorkflowTool {
     async fn execute(&self, _arguments: &serde_json::Value) -> Result<String, String> {
         Err("start_workflow requires execution context — use execute_with_context".to_string())
@@ -386,14 +384,15 @@ false,
 
     #[tokio::test]
     async fn test_start_workflow_records_decision_unconditionally() {
-        // Routing V2: the tool path records its DispatchDecision
+        // Routing V2: the tool path records its dispatch decision
         // UNCONDITIONALLY — the model's `start_workflow` call IS the
-        // routing decision (the planner-era analysis gate is gone).
+        // routing decision (the planner-era analysis gate is gone). The
+        // record is the `dispatch_decisions` row; no event carries it
+        // (N-EVENT-1).
         let dir = tempfile::tempdir().unwrap();
         let db = openalpaca_storage::Database::open(&dir.path().join("test.db")).unwrap();
         let config = crate::daemon_config::DaemonConfig::default();
         let (shared, dispatcher, bus) = setup_with(Some(db.clone()), config);
-        let mut rx = bus.subscribe();
         let request_id = Uuid::new_v4();
         let tool = StartWorkflowTool::new(
             dispatcher,
@@ -410,26 +409,6 @@ false,
         .await
         .expect("dispatch should succeed");
         let task_id = tool.outcome().unwrap().task_id;
-
-        // Event published with the REAL task id and the new reason.
-        let mut saw_decision = false;
-        while let Ok(event) = rx.try_recv() {
-            if let SystemEvent::DispatchDecision {
-                request_id: rid,
-                task_id: tid,
-                mode,
-                reason,
-                ..
-            } = event
-            {
-                assert_eq!(rid, request_id.to_string());
-                assert_eq!(tid.as_deref(), Some(task_id.as_str()));
-                assert_eq!(mode, "lead_agent");
-                assert_eq!(reason, "model_tool_call");
-                saw_decision = true;
-            }
-        }
-        assert!(saw_decision, "DispatchDecision was not published");
 
         // Row persisted with the real task id (never ack prose).
         let rows = openalpaca_storage::repository::dispatch_decision::DispatchDecisionRepository::new(&db)

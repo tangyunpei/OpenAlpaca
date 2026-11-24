@@ -396,7 +396,7 @@ pub async fn cancel_followup_handler(
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
     use axum::body::to_bytes;
     use openalpaca_storage::FOLLOWUP_KIND_UNPROCESSED_STEERING;
@@ -861,5 +861,31 @@ mod tests {
 
         // The other lane's row is untouched.
         assert_eq!(status_of(&db, foreign), "queued");
+    }
+
+    // ── The API contract's samples (API-CONTRACT) ─────────────────────
+
+    /// `/v1/lanes/{lane_key}/followups*`' JSON bodies for the API contract's
+    /// folder: one item queued, the lane's queue, and one taken back.
+    pub(crate) async fn contract_samples(out: &mut crate::contract::Samples) {
+        use crate::contract::ok_body;
+        let (_dir, db) = db();
+        let bus = EventBus::default();
+        seed(&db, LANE, FOLLOWUP_KIND_UNPROCESSED_STEERING, "left over");
+        let queued = ok_body(queue_followup(
+            &db,
+            &bus,
+            OWNER,
+            LANE,
+            None,
+            request("then the tests"),
+        ))
+        .await;
+        out.response("post-lanes-key-followups", queued.clone());
+        let body = ok_body(list_followups(&db, LANE)).await;
+        out.response("get-lanes-key-followups", body);
+        let id = queued["id"].to_string();
+        let body = ok_body(cancel_followup(&db, &bus, OWNER, LANE, &id)).await;
+        out.response("delete-lanes-key-followups-id", body);
     }
 }

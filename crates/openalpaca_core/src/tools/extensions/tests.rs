@@ -148,13 +148,13 @@ fn mark_failed_is_a_no_op_for_a_stale_generation() {
     assert_eq!(ledger.state(&ext), Some(ExtensionState::Enabled));
 
     assert!(ledger.mark_failed(&ext, 2, FailureReason::Crashed, "real crash"));
-    assert!(matches!(
+    std::assert_matches!(
         ledger.state(&ext),
         Some(ExtensionState::Failed {
             reason: FailureReason::Crashed,
             ..
         })
-    ));
+    );
 }
 
 #[test]
@@ -197,11 +197,11 @@ fn an_exit_reads_failed_queues_no_reap_and_the_gate_still_admits_the_call() {
     let (ledger, mut reaper) = enabled_with_reaper(&ext);
 
     assert!(ledger.mark_exited(&ext, 1, "exit status: 3"));
-    assert!(matches!(
+    std::assert_matches!(
         ledger.state(&ext),
         Some(ExtensionState::Failed { reason: FailureReason::Crashed, ref detail, .. })
             if detail == "exit status: 3"
-    ));
+    );
     assert!(reaper.try_recv().is_err(), "an exit is not the reaper's");
     assert_eq!(ledger.admits_calls(&ext), Some(true));
     assert!(
@@ -253,14 +253,14 @@ fn every_other_transition_out_of_an_exit_ends_its_admission() {
     let ext = mcp("github");
     let (ledger, _reaper) = enabled_with_reaper(&ext);
     assert!(ledger.mark_exited(&ext, 1, "exit status: 0"));
-    assert!(matches!(
+    std::assert_matches!(
         ledger.begin(
             &ext,
             ExtensionState::Disabling,
             Some(WithdrawalCause::Disable)
         ),
         Transition::Took(1)
-    ));
+    );
     assert_eq!(ledger.admits_calls(&ext), Some(false));
     assert!(
         !ledger.mark_recovered(&ext, 1),
@@ -784,5 +784,91 @@ fn attempted_use_and_surface_assembly_are_separate_moments() {
         ledger.warned_count(),
         2,
         "the moment is the third component of the dedup key"
+    );
+}
+
+// ── The supervisor trait (M55 (d)) ───────────────────────────────────────
+
+/// M55 (d): `ExtensionSupervisor` is a native async trait in M13's form. A
+/// supervisor writes plain `async fn` with no attribute, and the trait's own
+/// `+ Send` bound makes every verb's future spawnable: `drive_through_the_trait`
+/// sees only `S: ExtensionSupervisor` (a generic parameter, never a `dyn`), so
+/// it compiles only while each method declares its future `Send`.
+struct PlainAsyncSupervisor {
+    calls: std::sync::atomic::AtomicUsize,
+}
+
+impl PlainAsyncSupervisor {
+    fn bump(&self) {
+        self.calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+    }
+}
+
+impl ExtensionSupervisor for PlainAsyncSupervisor {
+    async fn enable(&self, id: &ExtensionId) -> Result<ExtensionRecord, ExtensionError> {
+        self.bump();
+        Err(ExtensionError::NotFound(id.clone()))
+    }
+
+    async fn disable(&self, id: &ExtensionId) -> Result<ExtensionRecord, ExtensionError> {
+        self.bump();
+        Err(ExtensionError::NotFound(id.clone()))
+    }
+
+    async fn reload(&self, id: &ExtensionId) -> Result<ExtensionRecord, ExtensionError> {
+        self.bump();
+        Err(ExtensionError::NotFound(id.clone()))
+    }
+
+    async fn reconcile(&self, id: &ExtensionId) -> Result<ExtensionRecord, ExtensionError> {
+        self.bump();
+        Err(ExtensionError::NotFound(id.clone()))
+    }
+
+    async fn reconcile_all(&self) {
+        self.bump();
+    }
+
+    async fn list(&self) -> Vec<ExtensionRecord> {
+        self.bump();
+        Vec::new()
+    }
+
+    async fn shutdown_all(&self) {
+        self.bump();
+    }
+}
+
+fn drive_through_the_trait<S: ExtensionSupervisor + 'static>(
+    supervisor: std::sync::Arc<S>,
+) -> tokio::task::JoinHandle<usize> {
+    tokio::spawn(async move {
+        let id = ExtensionId::mcp("stub");
+        let refused = [
+            supervisor.enable(&id).await.is_err(),
+            supervisor.disable(&id).await.is_err(),
+            supervisor.reload(&id).await.is_err(),
+            supervisor.reconcile(&id).await.is_err(),
+        ];
+        supervisor.reconcile_all().await;
+        let rows = supervisor.list().await;
+        supervisor.shutdown_all().await;
+        refused.iter().filter(|r| **r).count() + rows.len()
+    })
+}
+
+#[tokio::test]
+async fn a_plain_async_fn_impl_is_a_supervisor_with_send_futures() {
+    let supervisor = std::sync::Arc::new(PlainAsyncSupervisor {
+        calls: std::sync::atomic::AtomicUsize::new(0),
+    });
+    let refused = drive_through_the_trait(std::sync::Arc::clone(&supervisor))
+        .await
+        .expect("the supervisor's task joins");
+    assert_eq!(refused, 4, "the four id verbs answer through the trait");
+    assert_eq!(
+        supervisor.calls.load(std::sync::atomic::Ordering::SeqCst),
+        7,
+        "every one of the seven verbs reached the impl"
     );
 }

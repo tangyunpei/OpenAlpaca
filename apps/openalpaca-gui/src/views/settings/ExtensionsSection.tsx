@@ -27,8 +27,10 @@
  *
  * A row that asks for consent draws the plugin's id and what it asks for with
  * each hidden character as a highlighted `<U+XXXX>`, and the count under them
- * (`extension-row`'s `consent`, `lib/hidden-chars`): Approve grants exactly
- * those strings. Approve and Deny send the id as the daemon listed it.
+ * (`extension-row`'s `consent`, `lib/hidden-chars`), and under them our own
+ * line on what approving grants (`APPROVE_GRANTS`, N-PLUG-3): the program
+ * runs as you, unconfined, which those strings do not limit. Approve and
+ * Deny send the id as the daemon listed it.
  */
 
 import { useState } from "react";
@@ -48,6 +50,7 @@ import { useUiStore } from "@/stores/ui";
 
 import { AddExtensionForm, pickDirectory } from "./AddExtensionForm";
 import {
+  APPROVE_GRANTS,
   extensionErrorCopy,
   orderExtensions,
   type ExtensionMenuItem,
@@ -338,9 +341,10 @@ export function ExtensionsSection() {
 
 /**
  * What a consent row asks for, escaped, the manifest's standing warnings
- * (N-PLUG-2) and — when anything was escaped — the line that counts it, in
- * the words every approval surface uses. It wraps anywhere, so a capability
- * with no break in it cannot run past the row.
+ * (N-PLUG-2), the line that counts what was escaped (when anything was),
+ * in the words every approval surface uses, and last what approving grants
+ * (N-PLUG-3), our own words, shown as they are. It wraps anywhere, so a
+ * capability with no break in it cannot run past the row.
  */
 function ConsentAsks({ consent }: { consent: RowConsent }) {
   return (
@@ -354,6 +358,7 @@ function ConsentAsks({ consent }: { consent: RowConsent }) {
       {consent.notice !== null && (
         <span className="mt-[2px] block text-red-ink">{consent.notice}</span>
       )}
+      <span className="mt-[2px] block">{APPROVE_GRANTS}</span>
     </span>
   );
 }

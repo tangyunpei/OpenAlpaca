@@ -33,7 +33,7 @@ use crate::orchestrator::dispatcher::TaskDispatcher;
 use crate::orchestrator::skill_catalog::SkillCatalog;
 use crate::runner::lead_agent::{QueueFollowupTool, queue_followup_tool_definition};
 use crate::tools::ToolRegistry;
-use crate::tools::registry::{BuiltInTool, ToolContext};
+use crate::tools::registry::{DynBuiltInTool, ToolContext};
 use arc_swap::ArcSwap;
 use openalpaca_llm::{LlmRouter, ToolDefinition};
 use std::sync::Arc;
@@ -57,7 +57,7 @@ pub struct MainLoopToolSet {
     /// Per-request instances to inject into the per-request registry,
     /// paired with their definitions. Excludes the memory read tools, whose
     /// backends are already globally registered.
-    pub instances: Vec<(ToolDefinition, Arc<dyn BuiltInTool>)>,
+    pub instances: Vec<(ToolDefinition, Arc<DynBuiltInTool<'static>>)>,
     /// Kept for result-cell readback after the loop (structured delegation).
     pub start_workflow: Arc<StartWorkflowTool>,
     /// Present only when the workflow-aware tools were included; kept for
@@ -84,7 +84,7 @@ impl MainLoopToolSet {
                 definition: definition.clone(),
                 backend: crate::tools::registry::ToolBackend::BuiltIn(backend.clone()),
                 provides_capabilities: vec![],
-                exempt_from_timeout: false,
+                exempt_from_timeout: super::builtin_is_exempt_from_timeout(&definition.name),
                 annotations: super::annotations_for_builtin(&definition.name),
                 version: env!("CARGO_PKG_VERSION").to_string(),
                 author: "builtin".to_string(),
@@ -150,7 +150,10 @@ pub fn main_loop_memory_guidance() -> &'static str {
 /// (skipped when no router is configured — the echo-stub path executes no
 /// tools); `max_cost` is the caller's loop budget, threaded as the nested
 /// skill invocation's budget ceiling.
-#[allow(clippy::too_many_arguments)]
+#[expect(
+    clippy::too_many_arguments,
+    reason = "the handles the per-request tools are built from"
+)]
 pub fn main_loop_tool_set(
     task_dispatcher: Arc<TaskDispatcher>,
     shared_context: Arc<SharedContext>,
@@ -171,7 +174,7 @@ pub fn main_loop_tool_set(
     unattended: bool,
 ) -> MainLoopToolSet {
     let mut definitions: Vec<ToolDefinition> = Vec::new();
-    let mut instances: Vec<(ToolDefinition, Arc<dyn BuiltInTool>)> = Vec::new();
+    let mut instances: Vec<(ToolDefinition, Arc<DynBuiltInTool<'static>>)> = Vec::new();
     let mut memory_confirm_offered = false;
 
     // ── Always-core set ─────────────────────────────────────────────────
@@ -184,14 +187,13 @@ pub fn main_loop_tool_set(
     ));
     let start_def = start_workflow_tool_definition();
     definitions.push(start_def.clone());
-    instances.push((start_def, start_workflow.clone() as Arc<dyn BuiltInTool>));
+    instances.push((start_def, DynBuiltInTool::from_arc(start_workflow.clone())));
 
     let status_def = task_status_tool_definition();
     definitions.push(status_def.clone());
     instances.push((
         status_def,
-        Arc::new(TaskStatusTool::new(db.clone(), shared_context.clone()))
-            as Arc<dyn BuiltInTool>,
+        DynBuiltInTool::new_arc(TaskStatusTool::new(db.clone(), shared_context.clone())),
     ));
 
     // The memory writers need the service; without one (tests, a daemon
@@ -202,21 +204,21 @@ pub fn main_loop_tool_set(
         definitions.push(store_def.clone());
         instances.push((
             store_def,
-            Arc::new(MemoryStoreTool::new(service.clone())) as Arc<dyn BuiltInTool>,
+            DynBuiltInTool::new_arc(MemoryStoreTool::new(service.clone())),
         ));
 
         let update_def = memory_update_tool_definition();
         definitions.push(update_def.clone());
         instances.push((
             update_def,
-            Arc::new(MemoryUpdateTool::new(service.clone())) as Arc<dyn BuiltInTool>,
+            DynBuiltInTool::new_arc(MemoryUpdateTool::new(service.clone())),
         ));
 
         let forget_def = memory_forget_tool_definition();
         definitions.push(forget_def.clone());
         instances.push((
             forget_def,
-            Arc::new(MemoryForgetTool::new(service.clone())) as Arc<dyn BuiltInTool>,
+            DynBuiltInTool::new_arc(MemoryForgetTool::new(service.clone())),
         ));
 
         // Design 09 §4.1 (ruling LR13): `memory_confirm` only where a person
@@ -229,7 +231,7 @@ pub fn main_loop_tool_set(
             definitions.push(confirm_def.clone());
             instances.push((
                 confirm_def,
-                Arc::new(MemoryConfirmTool::new(service)) as Arc<dyn BuiltInTool>,
+                DynBuiltInTool::new_arc(MemoryConfirmTool::new(service)),
             ));
             memory_confirm_offered = true;
         }
@@ -295,7 +297,7 @@ pub fn main_loop_tool_set(
         definitions.push(invoke_def.clone());
         instances.push((
             invoke_def,
-            Arc::new(InvokeSkillTool::new(
+            DynBuiltInTool::new_arc(InvokeSkillTool::new(
                 skill_catalog,
                 global_registry.clone(),
                 router,
@@ -303,7 +305,7 @@ pub fn main_loop_tool_set(
                 db.clone(),
                 daemon_config,
                 max_cost,
-            )) as Arc<dyn BuiltInTool>,
+            )),
         ));
     }
 
@@ -317,7 +319,7 @@ pub fn main_loop_tool_set(
         ));
         let steer_def = steer_workflow_tool_definition();
         definitions.push(steer_def.clone());
-        instances.push((steer_def, steer.clone() as Arc<dyn BuiltInTool>));
+        instances.push((steer_def, DynBuiltInTool::from_arc(steer.clone())));
 
         // Main-loop queue_followup: identity and the turn's resolved project
         // root (`request_workspace_root`, F4) come from the invocation's
@@ -330,7 +332,7 @@ pub fn main_loop_tool_set(
         definitions.push(followup_def.clone());
         instances.push((
             followup_def,
-            Arc::new(QueueFollowupTool::for_main_loop(
+            DynBuiltInTool::new_arc(QueueFollowupTool::for_main_loop(
                 db,
                 bus,
                 lane_key.to_string(),
@@ -338,7 +340,7 @@ pub fn main_loop_tool_set(
                 // S5: the promise is kept by a later turn the runner starts,
                 // by which time this client may be long gone.
                 unattended,
-            )) as Arc<dyn BuiltInTool>,
+            )),
         ));
         Some(steer)
     } else {
@@ -358,6 +360,7 @@ pub fn main_loop_tool_set(
 mod tests {
     use super::*;
     use crate::test_util::{make_agent, template_from_agent};
+    use crate::tools::registry::BuiltInTool;
 
     fn routing(steering_enabled: bool) -> RoutingConfig {
         RoutingConfig {
@@ -429,7 +432,10 @@ mod tests {
         )
     }
 
-    #[allow(clippy::too_many_arguments)]
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "the tests' builder for main_loop_tool_set's inputs"
+    )]
     fn build_with(
         shared: Arc<SharedContext>,
         dispatcher: Arc<TaskDispatcher>,
@@ -766,7 +772,6 @@ mod tests {
 
     struct FakePluginExec;
 
-    #[async_trait::async_trait]
     impl openalpaca_api::plugin_traits::PluginToolExecutor for FakePluginExec {
         async fn execute(
             &self,
@@ -812,17 +817,19 @@ mod tests {
             remote_name: "echo".to_string(),
             server_name: "srv".to_string(),
             generation: 0,
+            output_schema: None,
         }
     }
 
     fn plugin_backend() -> crate::tools::registry::ToolBackend {
-        crate::tools::registry::ToolBackend::Plugin(Arc::new(FakePluginExec))
+        crate::tools::registry::ToolBackend::Plugin(
+            openalpaca_api::plugin_traits::DynPluginToolExecutor::new_arc(FakePluginExec),
+        )
     }
 
     /// Minimal provider so a real `LlmRouter` can be constructed; never called.
     struct StubProvider;
 
-    #[async_trait::async_trait]
     impl openalpaca_llm::LlmProvider for StubProvider {
         fn name(&self) -> &str {
             "stub"
@@ -836,9 +843,10 @@ mod tests {
             &self,
             _request: openalpaca_llm::ChatRequest,
         ) -> Result<openalpaca_llm::ChatResponse, openalpaca_llm::LlmError> {
-            Err(openalpaca_llm::LlmError::Http(
-                "stub provider is never called".to_string(),
-            ))
+            Err(openalpaca_llm::LlmError::Transport {
+                kind: openalpaca_llm::error::TransportKind::ConnectRefused,
+                message: "stub provider is never called".to_string(),
+            })
         }
     }
 
@@ -846,7 +854,7 @@ mod tests {
         Arc::new(LlmRouter::single_provider(
             Arc::new(StubProvider),
             openalpaca_llm::ProviderType::Anthropic,
-            "claude-sonnet-4-20250514".to_string(),
+            "claude-sonnet-4-6".to_string(),
         ))
     }
 
@@ -1016,6 +1024,139 @@ mod tests {
         assert!(per_request.get("invoke_skill").is_some());
     }
 
+    /// SKILL-NO-CUT: `invoke_skill` is registered exempt from the per-tool
+    /// time limit — a skill is bounded by its own loop — and the turn's
+    /// other per-request tools keep the limit.
+    #[test]
+    fn invoke_skill_is_registered_exempt_from_the_per_tool_time_limit() {
+        let (shared, dispatcher, bus, registry) = setup();
+        let set = build_with(
+            shared,
+            dispatcher,
+            bus,
+            &registry,
+            &routing(true),
+            None,
+            "user1:cli",
+            Arc::new(ArcSwap::from_pointee(DaemonConfig::default())),
+            Some(stub_router()),
+            None,
+        );
+        let per_request = (*registry).clone();
+        set.register_into(&per_request);
+        assert!(per_request.is_exempt_from_timeout("invoke_skill"));
+        for name in ["start_workflow", "task_status"] {
+            assert!(per_request.get(name).is_some(), "{name}");
+            assert!(!per_request.is_exempt_from_timeout(name), "{name}");
+        }
+    }
+
+    /// A provider whose every answer comes after `self.0`.
+    struct AnswersAfter(std::time::Duration);
+
+    impl openalpaca_llm::LlmProvider for AnswersAfter {
+        fn name(&self) -> &str {
+            "answers-after"
+        }
+
+        fn supports_tools(&self) -> bool {
+            true
+        }
+
+        async fn chat(
+            &self,
+            _request: openalpaca_llm::ChatRequest,
+        ) -> Result<openalpaca_llm::ChatResponse, openalpaca_llm::LlmError> {
+            tokio::time::sleep(self.0).await;
+            Ok(openalpaca_llm::ChatResponse {
+                content: "skill output".to_string(),
+                tool_calls: vec![],
+                model: "claude-sonnet-4-6".to_string(),
+                usage: openalpaca_llm::Usage {
+                    input_tokens: 10,
+                    output_tokens: 5,
+                    ..Default::default()
+                },
+                finish_reason: openalpaca_llm::FinishReason::Stop,
+                thinking: None,
+                echo: None,
+                parts: None,
+            })
+        }
+    }
+
+    /// SKILL-NO-CUT, through the sandbox at a test-scale bound (1 s): a
+    /// skill the turn invokes, its model answering after 2 s, returns its
+    /// answer, not "Tool 'invoke_skill' timed out after 1s".
+    #[tokio::test]
+    async fn a_skill_the_turn_invokes_runs_past_the_per_tool_bound() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let skill_dir = tmp.path().join("slow-skill");
+        std::fs::create_dir_all(&skill_dir).unwrap();
+        std::fs::write(
+            skill_dir.join("SKILL.md"),
+            "---\nname: \"Slow Skill\"\ndescription: \"Takes its time\"\n---\nAnswer.\n",
+        )
+        .unwrap();
+        let catalog = Arc::new(SkillCatalog::new());
+        catalog.scan_directory(tmp.path(), crate::middleware::skill::SkillScope::Project);
+        let router = Arc::new(LlmRouter::single_provider(
+            Arc::new(AnswersAfter(std::time::Duration::from_secs(2))),
+            openalpaca_llm::ProviderType::Anthropic,
+            "claude-sonnet-4-6".to_string(),
+        ));
+        let (shared, dispatcher, bus, registry) = setup();
+        let set = main_loop_tool_set(
+            dispatcher,
+            shared,
+            bus.clone(),
+            &routing(true),
+            None,
+            None,
+            Arc::new(ArcSwap::from_pointee(DaemonConfig::default())),
+            catalog,
+            Some(router),
+            1.0,
+            &registry,
+            "user1:cli",
+            &ToolContext {
+                owner_id: Some("user1".to_string()),
+                lane_key: Some("user1:cli".to_string()),
+                ..Default::default()
+            },
+            false,
+        );
+        let per_request = (*registry).clone();
+        set.register_into(&per_request);
+        let sandbox =
+            crate::security::sandbox::SandboxManager::with_defaults(Arc::new(per_request), bus);
+        let policy = crate::security::sandbox::SandboxPolicy {
+            agent_id: "orchestrator".to_string(),
+            allowed_capabilities: crate::security::capabilities::Allowlist::Unrestricted,
+            denied_capabilities: vec![],
+            require_confirmation_for: vec![],
+            max_tool_calls: None,
+            max_tool_runtime_secs: 1,
+            max_tool_runtime_ceiling_secs: 600,
+            stream_id: None,
+            lane_key: None,
+            confirmation_timeout_secs: None,
+            auto_approve: false,
+            unattended: false,
+        };
+        let call = openalpaca_llm::ToolCall {
+            id: "tc_skill".to_string(),
+            name: "invoke_skill".to_string(),
+            arguments: serde_json::json!({"skill": "slow-skill", "query": "go"}),
+        };
+
+        let out = sandbox
+            .execute_tool(&call, &policy, &ToolContext::default())
+            .await;
+
+        assert_eq!(out, Ok("skill output".to_string()));
+    }
+
     /// Design 09 §4.1 (ruling LR13): `memory_confirm` is on the surface of an
     /// attended turn of the GUI's or the CLI's chat (`source == "gui"`) and on
     /// no other — not a connector lane, whose `/yes` is keyed by chat rather
@@ -1072,6 +1213,7 @@ mod tests {
             require_confirmation_for: vec![],
             max_tool_calls: None,
             max_tool_runtime_secs: 60,
+            max_tool_runtime_ceiling_secs: 600,
             stream_id: None,
             lane_key: None,
             confirmation_timeout_secs: None,
@@ -1158,6 +1300,7 @@ mod tests {
             require_confirmation_for: vec![],
             max_tool_calls: None,
             max_tool_runtime_secs: 60,
+            max_tool_runtime_ceiling_secs: 600,
             stream_id: None,
             lane_key: None,
             confirmation_timeout_secs: None,

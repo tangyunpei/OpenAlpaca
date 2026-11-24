@@ -54,7 +54,8 @@ pub struct SessionsArgs {
     pub format: OutputFormat,
 }
 
-#[derive(Subcommand)]
+#[derive(Subcommand, Debug)]
+#[command(defer = true)]
 pub enum SessionsCommands {
     /// Delete a conversation: its rows and its transcript on disk
     Delete {
@@ -85,14 +86,17 @@ pub struct SessionItem {
 }
 
 #[derive(Debug, Deserialize)]
-struct SessionsResponse {
+pub(crate) struct SessionsResponse {
     sessions: Vec<SessionItem>,
-    #[allow(dead_code)]
+    #[expect(
+        dead_code,
+        reason = "the daemon's count; the CLI prints the rows it was sent"
+    )]
     total: i64,
 }
 
 #[derive(Debug, Deserialize)]
-struct MeResponse {
+pub(crate) struct MeResponse {
     default_lane_key: String,
 }
 
@@ -304,7 +308,7 @@ fn session_path(id: &str) -> String {
 /// the read is unscoped (R40) while the delete is owner-scoped, so a
 /// conversation this owner cannot delete answers `404` and nothing is printed.
 async fn delete(id: &str) -> Result<()> {
-    let client = DaemonClient::connect()?;
+    let client = DaemonClient::connect().await?;
     let path = session_path(id);
     let session: SessionItem = client
         .get(&path)
@@ -331,7 +335,7 @@ fn deleted_line(session: &SessionItem) -> String {
 }
 
 async fn list(args: SessionsArgs) -> Result<()> {
-    let client = DaemonClient::connect()?;
+    let client = DaemonClient::connect().await?;
 
     let workspace_id = match args.workspace.as_deref() {
         Some(path) => Some(resolve_workspace_filter(path)?),

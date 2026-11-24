@@ -22,7 +22,6 @@ use crate::prompt_ctx::section::{
 };
 use crate::prompt_ctx::sources::{ContextRequest, ContextSource, ExecutionPath};
 use arc_swap::ArcSwap;
-use async_trait::async_trait;
 use std::path::PathBuf;
 use std::sync::{Arc, RwLock};
 
@@ -96,7 +95,6 @@ impl MemorySource {
     }
 }
 
-#[async_trait]
 impl ContextSource for MemorySource {
     fn name(&self) -> &'static str {
         SOURCE_NAME

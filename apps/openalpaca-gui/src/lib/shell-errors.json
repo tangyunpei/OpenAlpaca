@@ -1,0 +1,52 @@
+{
+  "about": "Every refusal the Tauri shell's commands answer with (Q13), as the webview receives it: one row per variant of src-tauri/src/lib.rs's ShellError, two for spawn_failed (with and without a log tail); mismatch carries both sides' protocols and the remedy, still_starting a log tail (Q04). The shell's test serializes each variant and must equal its row; lib/shell-error.test.ts parses each row and must read its kind, message and log_tail. Add a row with a new variant, on both sides.",
+  "refusals": [
+    {
+      "kind": "not_running",
+      "message": "Discovery not found: daemon may not be running"
+    },
+    {
+      "kind": "expired",
+      "message": "Discovery token has expired"
+    },
+    {
+      "kind": "discovery_unreadable",
+      "message": "Failed to parse discovery.json"
+    },
+    {
+      "kind": "spawn_failed",
+      "message": "The daemon did not start within 5 seconds. Its log (/s/state/logs/daemon.log) ends with:\n\nError: this database is newer than this build",
+      "log_tail": "Error: this database is newer than this build"
+    },
+    {
+      "kind": "spawn_failed",
+      "message": "Failed to spawn daemon: No such file or directory (os error 2)",
+      "log_tail": null
+    },
+    {
+      "kind": "mismatch",
+      "message": "The daemon running (pid 51823, version 0.2.0, protocol 2) is not one this app can use: the app speaks protocol 1. Nothing was stopped or started. Update the app to one that speaks protocol 2, or stop that daemon with `openalpaca daemon stop` and press Reconnect in Settings → Connection to start this app's own.",
+      "daemon_version": "0.2.0",
+      "daemon_protocol": 2,
+      "shell_protocol": 1,
+      "remedy": "Update the app to one that speaks protocol 2, or stop that daemon with `openalpaca daemon stop` and press Reconnect in Settings → Connection to start this app's own."
+    },
+    {
+      "kind": "starting",
+      "message": "The daemon (pid 51823) is starting: it has written its discovery file but does not answer yet. Waiting for it, up to 45 seconds."
+    },
+    {
+      "kind": "still_starting",
+      "message": "The daemon (pid 51823) is still starting after 45 seconds: it is running but does not answer. Nothing was started, stopped or restarted. The last lines of its log (/s/state/logs/daemon.log):\n\nINFO Connecting to MCP server\n\nIf it does not finish starting, stop it with `openalpaca daemon stop` and press Reconnect in Settings → Connection to start a new one.",
+      "log_tail": "INFO Connecting to MCP server"
+    },
+    {
+      "kind": "log_unreadable",
+      "message": "Could not read /s/state/logs/daemon.log: Is a directory (os error 21)"
+    },
+    {
+      "kind": "stop_unconfirmed",
+      "message": "Could not wait for the daemon to stop: task 7 panicked"
+    }
+  ]
+}

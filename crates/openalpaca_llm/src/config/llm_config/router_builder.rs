@@ -1,4 +1,4 @@
-use crate::LlmProvider;
+use crate::DynLlmProvider;
 use crate::error::LlmError;
 use crate::keys::key_pool::{
     ApiKey, KeyPool, ProviderType, SelectionStrategy,
@@ -15,8 +15,40 @@ use super::parse_provider_type;
 use super::router_config::LlmRouterConfig;
 use super::runtime::LlmRuntimeConfig;
 
+/// The prefix of a `[providers."plugin:<name>"]` section, recognised only to
+/// skip it with one warning (M86, its own question taken (a)): the plugin
+/// provider type is removed (D-I (revised)), and a section that never served
+/// a model should not stop every model at the next start. Every other unknown
+/// name keeps its refusal, `LlmError::UnknownProvider`.
+const REMOVED_PLUGIN_PROVIDER_PREFIX: &str = "plugin:";
+
 fn resolve_key_secret(env_var: &str) -> Option<String> {
     std::env::var(env_var).ok()
+}
+
+/// Whether `build_router` may look `binary` up on PATH to register it as a
+/// CLI backend (no `[cli_backends]` entry for it, or one naming no `path`).
+/// A guarded test build never does (CLI-BACKEND-GUARD, pending-decisions
+/// *Rev 137* item 1, (b), taken *Rev 138*): a `claude` or `codex` found there
+/// is the developer's own, and the CLI fallback would run it under their own
+/// login. A configured `path` still registers, and a test registers its own
+/// backend with `LlmRouter::register_cli_backend`. Armed as
+/// `providers::test_endpoint_guard_armed` is: this crate's tests and the
+/// dependants' test builds (`test-endpoint-guard`), never `live-eval`.
+#[cfg(all(any(test, feature = "test-endpoint-guard"), not(feature = "live-eval")))]
+fn cli_path_lookup(binary: &str) -> bool {
+    tracing::debug!(
+        "a test build of openalpaca_llm (test-endpoint-guard) skips the PATH lookup of \
+         the {binary} CLI: configure its path to register it"
+    );
+    false
+}
+
+/// Release, `cargo run`, sidecar and `live-eval` builds: the lookup runs.
+#[cfg(not(all(any(test, feature = "test-endpoint-guard"), not(feature = "live-eval"))))]
+#[inline(always)]
+fn cli_path_lookup(_binary: &str) -> bool {
+    true
 }
 
 /// Build an LlmRouter from a config file path.
@@ -36,7 +68,15 @@ pub fn build_router_with_secret_store(
 }
 
 /// Build router from the hierarchical config format.
-#[allow(unused_variables, unused_mut, unreachable_code)]
+#[cfg_attr(
+    not(any(feature = "anthropic", feature = "openai")),
+    expect(
+        unused_variables,
+        unused_mut,
+        unreachable_code,
+        reason = "with no provider feature the provider loop builds nothing"
+    )
+)]
 fn build_router_from_hierarchical(
     content: &str,
     secret_store: Option<&dyn crate::keys::secret_store::SecretStore>,
@@ -55,6 +95,15 @@ fn build_router_from_hierarchical(
     if let Some(ref providers) = config.providers {
         for (provider_name, provider_config) in providers {
             if provider_config.enabled == Some(false) {
+                continue;
+            }
+            if provider_name.starts_with(REMOVED_PLUGIN_PROVIDER_PREFIX) {
+                tracing::warn!(
+                    "llm.toml's [providers.\"{provider_name}\"] section is skipped: the plugin \
+                     provider type is removed, and LLM providers are the built-in ones \
+                     (anthropic, openai, ollama), configured in llm.toml or in Settings → \
+                     Models & keys. Delete the section to stop this warning."
+                );
                 continue;
             }
 
@@ -137,9 +186,8 @@ fn build_router_from_hierarchical(
                         None
                     };
 
-                    let secret = match secret {
-                        Some(s) => s,
-                        None => continue, // Skip this key, try next
+                    let Some(secret) = secret else {
+                        continue; // Skip this key, try next
                     };
 
                     let mut api_key =
@@ -179,7 +227,7 @@ fn build_router_from_hierarchical(
             let request_timeout = runtime_config.request_timeout_for(provider_name);
             #[cfg(any(feature = "anthropic", feature = "openai", feature = "ollama"))]
             let client = crate::providers::build_http_client(request_timeout);
-            let provider: Box<dyn LlmProvider> = match &provider_type {
+            let provider: Arc<DynLlmProvider<'static>> = match &provider_type {
                 #[cfg(feature = "anthropic")]
                 ProviderType::Anthropic => {
                     let Some(key) = first_secret else {
@@ -196,7 +244,7 @@ fn build_router_from_hierarchical(
                     let max_tokens = provider_config
                         .default_max_tokens
                         .or_else(|| prov_defaults.map(|d| d.default_max_tokens));
-                    Box::new(
+                    DynLlmProvider::new_arc(
                         crate::providers::anthropic::AnthropicProvider::with_client(
                             client, key, model, max_tokens,
                         )
@@ -223,7 +271,7 @@ fn build_router_from_hierarchical(
                     let max_tokens = provider_config
                         .default_max_tokens
                         .or_else(|| prov_defaults.map(|d| d.default_max_tokens));
-                    Box::new(
+                    DynLlmProvider::new_arc(
                         crate::providers::openai::OpenAiProvider::with_client(
                             client, key, model, base_url, max_tokens,
                         )
@@ -248,18 +296,25 @@ fn build_router_from_hierarchical(
                         .clone()
                         .or_else(|| prov_defaults.and_then(|d| d.base_url.clone()));
                     // Read like the other two arms: the file's output ceiling
-                    // reaches the request body instead of the 4096 default (L6).
+                    // reaches the request body instead of the compiled default
+                    // (L6; `DEFAULT_MAX_TOKENS`, 16,000 since OUTPUT-BUDGET).
                     let max_tokens = provider_config
                         .default_max_tokens
                         .or_else(|| prov_defaults.map(|d| d.default_max_tokens));
-                    Box::new(
+                    DynLlmProvider::new_arc(
                         crate::providers::ollama::OllamaProvider::with_client(
                             client, model, base_url, max_tokens,
                         )
                         .with_request_timeout(request_timeout),
                     )
                 }
-                #[allow(unreachable_patterns)]
+                #[cfg_attr(
+                    all(feature = "anthropic", feature = "openai", feature = "ollama"),
+                    expect(
+                        unreachable_patterns,
+                        reason = "with every provider feature on, each provider has its arm"
+                    )
+                )]
                 _ => {
                     return Err(LlmError::UnknownProvider(provider_name.clone()));
                 }
@@ -268,7 +323,7 @@ fn build_router_from_hierarchical(
             providers_map.insert(
                 provider_type,
                 ProviderEntry {
-                    provider: Arc::from(provider),
+                    provider,
                     key_pool: Arc::new(ArcSwap::from_pointee(key_pool)),
                 },
             );
@@ -293,7 +348,7 @@ fn build_router_from_hierarchical(
                 .provider_defaults
                 .get("anthropic")
                 .map(|d| d.default_model.clone())
-                .unwrap_or_else(|| "claude-sonnet-4-5-20250929".to_string())
+                .unwrap_or_else(|| super::runtime::DEFAULT_ORCHESTRATOR_MODEL.to_string())
         });
 
     // Fallback chains
@@ -323,19 +378,25 @@ fn build_router_from_hierarchical(
         rate_limit_config,
     );
 
-    // Register CLI backends if detected
+    // Register CLI backends: a configured one, else one found on PATH — but a
+    // guarded test build looks nothing up on PATH (`cli_path_lookup`).
     let cli_config = config.cli_backends.unwrap_or_default();
     let cli_timeout_secs = router.runtime_config().timeouts.cli_backend_timeout_secs;
 
     if let Some(ref cc_config) = cli_config.claude_code {
-        if let Some(provider) = crate::cli_backend::ClaudeCodeCliProvider::from_config(cc_config) {
+        if (cc_config.path.is_some() || cli_path_lookup("claude"))
+            && let Some(provider) =
+                crate::cli_backend::ClaudeCodeCliProvider::from_config(cc_config)
+        {
             tracing::info!(
                 "Registered Claude Code CLI backend at {:?}",
                 provider.binary_path()
             );
             router.register_cli_backend(ProviderType::Anthropic, Arc::new(provider));
         }
-    } else if let Some(path) = crate::cli_backend::ClaudeCodeCliProvider::detect() {
+    } else if cli_path_lookup("claude")
+        && let Some(path) = crate::cli_backend::ClaudeCodeCliProvider::detect()
+    {
         tracing::info!("Auto-detected Claude Code CLI at {:?}", path);
         let provider = crate::cli_backend::ClaudeCodeCliProvider::new(
             path,
@@ -345,14 +406,18 @@ fn build_router_from_hierarchical(
     }
 
     if let Some(ref codex_config) = cli_config.codex {
-        if let Some(provider) = crate::cli_backend::CodexCliProvider::from_config(codex_config) {
+        if (codex_config.path.is_some() || cli_path_lookup("codex"))
+            && let Some(provider) = crate::cli_backend::CodexCliProvider::from_config(codex_config)
+        {
             tracing::info!(
                 "Registered Codex CLI backend at {:?}",
                 provider.binary_path()
             );
             router.register_cli_backend(ProviderType::OpenAI, Arc::new(provider));
         }
-    } else if let Some(path) = crate::cli_backend::CodexCliProvider::detect() {
+    } else if cli_path_lookup("codex")
+        && let Some(path) = crate::cli_backend::CodexCliProvider::detect()
+    {
         tracing::info!("Auto-detected Codex CLI at {:?}", path);
         let provider = crate::cli_backend::CodexCliProvider::new(
             path,

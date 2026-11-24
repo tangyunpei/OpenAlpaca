@@ -26,7 +26,7 @@ use tracing::{error, info, warn};
 
 impl TelegramConnector {
     /// Handle an incoming Telegram message.
-    #[allow(
+    #[expect(
         clippy::too_many_arguments,
         reason = "the dispatcher's dependencies, injected one by one"
     )]
@@ -44,13 +44,10 @@ impl TelegramConnector {
         let text = msg.text().unwrap_or("").to_string();
 
         let chat_id = msg.chat.id;
-        let from = match msg.from.as_ref() {
-            Some(user) => user,
-            None => {
-                // Channel posts, anonymous admin messages, etc. have no sender.
-                // We cannot resolve identity without a user ID, so skip.
-                return Ok(());
-            }
+        let Some(from) = msg.from.as_ref() else {
+            // Channel posts, anonymous admin messages, etc. have no sender.
+            // We cannot resolve identity without a user ID, so skip.
+            return Ok(());
         };
         let user_id = from.id.0.to_string();
         let display_name = Some(from.first_name.clone());

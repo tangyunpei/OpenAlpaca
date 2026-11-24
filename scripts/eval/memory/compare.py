@@ -1,9 +1,9 @@
-#!/usr/bin/env python3
+#!/usr/bin/env python3.11
 """Paired comparison of two memory-eval reports (plan §5, "Sample size and the
 non-inferiority gate").
 
-    python3 scripts/eval/memory/compare.py report-D.json report-B.json [--margin -5]
-    python3 scripts/eval/memory/compare.py --self-test
+    python3.11 scripts/eval/memory/compare.py report-D.json report-B.json [--margin -5]
+    python3.11 scripts/eval/memory/compare.py --self-test
 
 The first report is the candidate, the second the baseline. Rows are paired by
 question id; a row is counted only when both reports judged it (verdict

@@ -11,6 +11,9 @@ mod args;
 mod background;
 mod bootstrap;
 mod connector_bridge;
+#[cfg(test)]
+mod contract;
+mod discovery_rotation;
 mod event_bridge;
 mod events;
 mod extraction;
@@ -38,6 +41,7 @@ use anyhow::{Context, Result};
 use arc_swap::ArcSwap;
 use chrono::Utc;
 use events::EventBroadcaster;
+use openalpaca_app_support::{discovery, paths};
 use openalpaca_core::{
     bus::EventBus,
     chat::{ChatService, ChatStreamManager},
@@ -46,11 +50,11 @@ use openalpaca_core::{
     lane::LaneManager,
     middleware::identity::identity_document_has_content,
     middleware::user::user_document_has_content,
-    orchestrator::Orchestrator,
+    orchestrator::{DynConnectorSendProvider, Orchestrator},
     runner::LoopConfig,
 };
 use openalpaca_llm::keys::key_encryption::KeyEncryptor;
-use openalpaca_storage::{Database, discovery, store};
+use openalpaca_storage::{Database, store};
 use openalpaca_wake::manager::WakeManager;
 use std::path::PathBuf;
 use std::sync::{Arc, OnceLock};
@@ -63,7 +67,9 @@ use uuid::Uuid;
 
 /// How long graceful shutdown gets before the process is forced out.
 ///
-/// It is the only bound the whole shutdown sequence has, which is why
+/// It bounds the shutdown tail; once the tail has run, the blocking work
+/// still running gets [`shutdown::RUNTIME_END`] more, then the process ends
+/// ([`shutdown::finish_runtime`]). It is the tail's only bound, which is why
 /// [`Extensions::shutdown_all`](crate::managers::extensions::Extensions::shutdown_all)
 /// derives its sweep budget from what is left of it rather than from a literal
 /// of its own, and the connector and wake stages end
@@ -121,7 +127,7 @@ fn main() -> Result<()> {
 
     // D3: Singleton lock FIRST — prevents all multi-process races.
     // Acquired before any config I/O or key generation.
-    let _lock_guard = match discovery::acquire_single_instance_lock(false) {
+    let lock_guard = match discovery::acquire_single_instance_lock() {
         Ok(guard) => {
             info!("Acquired singleton lock");
             guard
@@ -148,7 +154,7 @@ fn main() -> Result<()> {
 
     // D1: master key always in the state dir (canonical, CWD-independent).
     // Nothing relocates one from an older install's data directory (D-D).
-    let master_key_dir = store::master_key_dir().context("Failed to resolve the state dir")?;
+    let master_key_dir = paths::master_key_dir().context("Failed to resolve the state dir")?;
 
     // D6+D7: ensure_at is race-safe; on failure, fail fast.
     // F3: the key stays in this process. It is installed as openalpaca_llm's
@@ -181,6 +187,15 @@ fn main() -> Result<()> {
         }
     }
 
+    // Q21, LOGIN-CAPTURE (Rev 91 (2)): where this daemon's PATH came from —
+    // the app's capture of the login shell's, its fallback list, or, with no
+    // word from the app, whatever started it — read once for the boot line
+    // and removed from the environment beside the master key, so no child
+    // this daemon spawns inherits the app's word about a PATH it never
+    // captured for it.
+    // SAFETY: as the master key's step above — no other thread exists yet.
+    let path_source = bootstrap::parse_path_source(unsafe { paths::take_path_source() }.as_deref());
+
     // Install OS signal handlers BEFORE the tokio runtime starts.
     // This calls sigaction() in the single main thread, before any thread pools
     // (tokio, ONNX Runtime, etc.) are created. The handler sets an AtomicBool flag
@@ -190,16 +205,31 @@ fn main() -> Result<()> {
 
     // Start the tokio runtime AFTER the master key is installed (and the
     // environment cleaned of it) and the signal handlers are set.
-    tokio::runtime::Builder::new_multi_thread()
+    let runtime = tokio::runtime::Builder::new_multi_thread()
         .enable_all()
         .build()
-        .context("Failed to build tokio runtime")?
-        .block_on(async_main(config_base_dir, shutdown_flag))
+        .context("Failed to build tokio runtime")?;
+    let result = runtime.block_on(async_main(config_base_dir, shutdown_flag, path_source));
+
+    // The end of a stop is bounded: the tail has run, and the blocking work
+    // still running — an extraction, an index rebuild — gets
+    // `shutdown::RUNTIME_END` more, not the unbounded wait a dropped runtime
+    // gives it (`shutdown::finish_runtime`).
+    shutdown::finish_runtime(runtime, shutdown::RUNTIME_END);
+
+    // A blocking thread `finish_runtime` left behind may still be writing
+    // until the process dies. Dropping the guard here would release the lock
+    // first, in the moment between `main`'s return and the exit, so a
+    // replacement could take it while this process still writes; forgotten,
+    // the lock is released by the kernel when the process ends.
+    std::mem::forget(lock_guard);
+    result
 }
 
 async fn async_main(
     config_base_dir: PathBuf,
     shutdown_flag: Arc<std::sync::atomic::AtomicBool>,
+    path_source: bootstrap::PathSource,
 ) -> Result<()> {
     // Step 0: the run's own clock. Taken before anything can block — the bind,
     // the migrations, the boot sweep — so `GET /v1/status`'s `uptime_secs`
@@ -210,7 +240,12 @@ async fn async_main(
     // it. Read once, up front — `GET /v1/status`'s `log_path` must be `null`
     // for a daemon this env var was never set on, even when `daemon.log`
     // exists at the usual path (Important #3, T44 fix round 1).
-    let managed_log = std::env::var_os(store::MANAGED_LOG_ENV).is_some();
+    let managed_log = std::env::var_os(paths::MANAGED_LOG_ENV).is_some();
+
+    // Step 0c (Q21): where this daemon's PATH came from, as the preamble
+    // read it. The source and the capture's time, and the variables the app
+    // passed beside it by name (N-DAEMON-2), never the PATH or a value.
+    info!("{}", bootstrap::path_source_line(&path_source));
 
     // Step 1: Bind to dynamic port (127.0.0.1:0 -> OS assigns port)
     let listener = TcpListener::bind(("127.0.0.1", 0))
@@ -227,10 +262,14 @@ async fn async_main(
         discovery::make_discovery(host, port, instance_id.clone(), env!("CARGO_PKG_VERSION"));
     let discovery_path = discovery::write_discovery_atomic(&disc)?;
     info!("Discovery written to: {}", discovery_path.display());
-    let token = disc.auth.token.clone();
+    // T21 (2): the tokens a request may carry, the boot's alone until the
+    // rotation (Step 13) replaces it.
+    let tokens = Arc::new(discovery_rotation::DaemonTokens::new(
+        disc.auth.token.clone(),
+    ));
 
     // Step 3: Initialize database
-    let db_path = store::database_path()?;
+    let db_path = paths::database_path()?;
     let db = Database::open(&db_path).context("Failed to initialize database")?;
     info!("Database initialized: {}", db_path.display());
     // R24: a project re-point the previous process did not finish is
@@ -417,7 +456,7 @@ async fn async_main(
     let cost_tracker_date = chrono::Utc::now().format("%Y-%m-%d").to_string();
 
     // Initialize PluginManager
-    let plugin_dir = store::plugins_dir()?;
+    let plugin_dir = paths::plugins_dir()?;
     let plugin_manager = Arc::new(
         openalpaca_plugins::PluginManager::new(
             plugin_dir,
@@ -592,6 +631,7 @@ async fn async_main(
             agents_dir,
             orchestrator: orchestrator.clone(),
             agent_registry: svcs.shared_context.agent_registry.clone(),
+            db: db.clone(),
             llm_router: llm_router_for_reload,
             llm_settings_service: llm_settings_for_reload,
             secret_store: svcs.secret_store,
@@ -663,11 +703,10 @@ async fn async_main(
 
     // Create send bridge before connector-awareness block so it's available for both
     // the orchestrator and the notification dispatcher.
-    let send_bridge: Arc<dyn openalpaca_core::orchestrator::ConnectorSendProvider> =
-        Arc::new(connector_bridge::ConnectorSendBridge::new(
-            db.clone(),
-            local_user_id.clone(),
-        ));
+    let send_bridge = Arc::new(connector_bridge::ConnectorSendBridge::new(
+        db.clone(),
+        local_user_id.clone(),
+    ));
 
     // Connector awareness: cached status + send bridge wiring
     {
@@ -680,7 +719,7 @@ async fn async_main(
         orchestrator.set_connector_send_provider(send_bridge.clone());
         // Populate the shared lock so the send tool can access it
         if let Ok(mut guard) = svcs.connector_send_lock.write() {
-            *guard = Some(send_bridge.clone());
+            *guard = Some(DynConnectorSendProvider::from_arc(send_bridge.clone()));
         }
 
         // 3. Spawn EventBus subscriber to keep cached status fresh
@@ -691,16 +730,14 @@ async fn async_main(
             let ct = cancel_token.clone();
             async move {
                 loop {
-                    tokio::select! {
-                        result = rx.recv() => match result {
-                            Ok(openalpaca_core::events::SystemEvent::ConnectorStatus { .. }) => {
-                                provider.update(cm.list_status().await);
-                            }
-                            Ok(_) => {}
-                            Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => {}
-                            Err(tokio::sync::broadcast::error::RecvError::Closed) => break,
-                        },
-                        _ = ct.cancelled() => break,
+                    match ct.run_until_cancelled(rx.recv()).await {
+                        Some(Ok(openalpaca_core::events::SystemEvent::ConnectorStatus {
+                            ..
+                        })) => {
+                            provider.update(cm.list_status().await);
+                        }
+                        Some(Ok(_) | Err(tokio::sync::broadcast::error::RecvError::Lagged(_))) => {}
+                        Some(Err(tokio::sync::broadcast::error::RecvError::Closed)) | None => break,
                     }
                 }
             }
@@ -714,7 +751,7 @@ async fn async_main(
             notif_rx,
             db.clone(),
             cancel_token.clone(),
-            Some(send_bridge),
+            Some(DynConnectorSendProvider::from_arc(send_bridge)),
         );
         tokio::spawn(dispatcher.run());
     }
@@ -728,8 +765,9 @@ async fn async_main(
         daemon_config.clone(),
     ));
 
-    // Step 13: Spawn background tasks
-    background::spawn_file_processing_worker(
+    // Step 13: Spawn background tasks. The file worker's task is kept: the
+    // shutdown tail waits for it last (`background::await_file_worker`).
+    let mut file_worker = background::spawn_file_processing_worker(
         db.clone(),
         daemon_config.clone(),
         cancel_token.clone(),
@@ -746,6 +784,9 @@ async fn async_main(
         background::spawn_learning_sweeper(queue.clone(), cancel_token.clone());
         background::spawn_learning_catch_up(queue.clone(), cancel_token.clone());
     }
+    // T21 (2): discovery.json's token and expires_at rotated on a schedule
+    // while the daemon runs; awaited at shutdown before the file is removed.
+    let rotation_task = discovery_rotation::spawn(disc, tokens.clone(), cancel_token.clone());
 
     // Step 14: Build AppState and HTTP router
     let db_for_shutdown = db.clone();
@@ -755,7 +796,7 @@ async fn async_main(
         instance_id: instance_id.clone(),
         started_at,
         managed_log,
-        token,
+        tokens,
         event_broadcaster: event_broadcaster.clone(),
         db,
         shutdown_tx,
@@ -920,8 +961,29 @@ async fn async_main(
         warn!("Failed to shut down WakeManager: {e}");
     }
 
-    // Cleanup: remove discovery file
+    // Cleanup: remove discovery file — after the rotation has stopped (it
+    // stops on the cancel, at most a write in flight later), so it cannot
+    // write the file again once it is gone.
     info!("Cleaning up...");
+    if let Some(Err(e)) = shutdown::within(
+        "The discovery token's rotation",
+        shutdown::stage_deadline(&force_exit_at),
+        rotation_task,
+    )
+    .await
+    {
+        warn!("The discovery token's rotation ended abnormally: {e}");
+    }
+    // The file-processing worker, last (STOP-WAIT, the owner's ruling of
+    // 2026-11-21): an extraction running when the stop came writes its
+    // result if it ends by the stage deadline. Its extractions have run
+    // since the cancel, so waiting here gives them the most of the window
+    // and takes nothing from the stages above; and it comes before the
+    // removal, since the app's stop wait reads `discovery.json`. On the
+    // deadline the handle is left, never aborted, and dropped (detached)
+    // at the end of this function: what still runs is cut when the
+    // process ends, its row left `Processing` for the next start to count.
+    background::await_file_worker(&mut file_worker, shutdown::stage_deadline(&force_exit_at)).await;
     if let Err(e) = discovery::remove_discovery() {
         warn!("Failed to remove discovery file: {e}");
     }

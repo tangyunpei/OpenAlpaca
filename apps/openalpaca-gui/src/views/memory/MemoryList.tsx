@@ -185,7 +185,7 @@ export function MemoryList({
         )}
       </div>
 
-      <div className="sc min-h-0 flex-1 overflow-y-auto p-[8px]">
+      <div className="min-h-0 sc flex-1 overflow-y-auto p-[8px]">
         <Suggestions
           items={suggestions}
           pendingId={suggestionPendingId}

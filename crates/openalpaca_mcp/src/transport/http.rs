@@ -3,13 +3,12 @@
 use std::collections::HashMap;
 use std::time::Duration;
 
-use async_trait::async_trait;
 use reqwest::header::{AUTHORIZATION, HeaderMap, HeaderName, HeaderValue};
 use url::{Origin, Url};
 
 use crate::error::{McpError, RefusedRedirect};
 
-use super::{HttpAuth, Transport, TransportConnection, TransportInner};
+use super::{HttpAuth, TransportConnection, TransportInner};
 
 /// How long the TCP (and TLS) handshake may take before the server counts as
 /// unreachable — the LLM clients' bound (`providers::build_http_client`), and
@@ -48,7 +47,7 @@ impl StreamableHttpTransport {
     /// for a dead one — cut, rmcp would re-open the GET stream and any event
     /// sent meanwhile would be lost — and short enough that a dead connection
     /// nobody waits on is noticed within minutes.
-    pub const DEFAULT_IDLE_TIMEOUT: Duration = Duration::from_secs(300);
+    pub const DEFAULT_IDLE_TIMEOUT: Duration = Duration::from_mins(5);
 
     pub fn new(server_name: impl Into<String>, url: Url) -> Self {
         Self {
@@ -179,9 +178,8 @@ fn origin_of(url: &Url) -> String {
     }
 }
 
-#[async_trait]
-impl Transport for StreamableHttpTransport {
-    async fn connect(&self) -> Result<TransportConnection, McpError> {
+impl StreamableHttpTransport {
+    pub async fn connect(&self) -> Result<TransportConnection, McpError> {
         let headers = self.build_headers()?;
         let configured = self.url.origin();
         let credentialed = self.carries_credentials();
@@ -221,11 +219,11 @@ impl Transport for StreamableHttpTransport {
         })
     }
 
-    fn kind(&self) -> &'static str {
+    pub fn kind(&self) -> &'static str {
         "streamable-http"
     }
 
-    fn server_name(&self) -> &str {
+    pub fn server_name(&self) -> &str {
         &self.server_name
     }
 }
@@ -268,7 +266,7 @@ mod tests {
         let t = StreamableHttpTransport::new("srv", Url::parse("https://example.com/mcp").unwrap())
             .with_header("invalid header", "x"); // space is invalid
         let err = t.build_headers().unwrap_err();
-        assert!(matches!(err, McpError::HandshakeFailed(_)));
+        std::assert_matches!(err, McpError::HandshakeFailed(_));
     }
 
     #[test]
@@ -367,6 +365,47 @@ mod tests {
             refused(false, "data:text/plain,hi", &chain(1)).as_deref(),
             Some("data:")
         );
+    }
+
+    /// RUSTSEC-2026-0592: up to url 2.5.8, `Url::origin()` recursed once per
+    /// `blob:` prefix, so a redirect target nesting ten thousand of them
+    /// (about 50 KB) overflowed the stack and aborted the process, which no
+    /// `catch_unwind` stops. From 2.5.9 such a target has one opaque origin:
+    /// refused, and named by its scheme. Run on a thread with a 2 MiB stack,
+    /// a tokio worker's default, so the result does not depend on the test
+    /// harness's own stack size.
+    #[test]
+    fn a_deeply_nested_blob_redirect_target_is_refused_without_a_crash() {
+        let configured = Url::parse("https://mcp.example.com/mcp").unwrap();
+        let next = Url::parse(&format!("{}https://example.com/", "blob:".repeat(10_000)))
+            .expect("a nested blob: URL parses");
+        let named = std::thread::Builder::new()
+            .stack_size(2 * 1024 * 1024)
+            .spawn(move || {
+                let refused = refuse_redirect(
+                    &configured.origin(),
+                    false,
+                    &next,
+                    std::slice::from_ref(&configured),
+                )
+                .map(|r| r.origin);
+                (refused, origin_of(&next))
+            })
+            .expect("spawn a 2 MiB thread")
+            .join()
+            .expect("the thread returns");
+        assert_eq!(named, (Some("blob:".to_owned()), "blob:".to_owned()));
+    }
+
+    /// A `blob:` URL takes its inner URL's origin only when that one is
+    /// http, https or file (the URL Standard, as url 2.5.9 follows it);
+    /// any other inner scheme, a nested `blob:` included, is opaque.
+    #[test]
+    fn a_blob_url_has_its_inner_origin_only_for_http_https_or_file() {
+        let named = |url: &str| origin_of(&Url::parse(url).unwrap());
+        assert_eq!(named("blob:https://example.com/x"), "https://example.com");
+        assert_eq!(named("blob:ws://example.com/x"), "blob:");
+        assert_eq!(named("blob:blob:https://example.com/x"), "blob:");
     }
 
     #[test]

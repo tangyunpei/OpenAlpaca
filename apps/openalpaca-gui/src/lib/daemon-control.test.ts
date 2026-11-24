@@ -24,8 +24,6 @@ import {
 import { DaemonEventsClient, type SocketLike } from "./events";
 import { ApiError } from "./http";
 
-vi.mock("@tauri-apps/api/core", () => ({ invoke: vi.fn() }));
-
 const INFO: ConnectionInfo = {
   baseUrl: "http://127.0.0.1:51823",
   token: "tok",

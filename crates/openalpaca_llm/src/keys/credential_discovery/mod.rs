@@ -84,14 +84,20 @@ pub struct CredentialDiscoveryConfig {
 pub struct TokenManager {
     tokens: Arc<RwLock<HashMap<CredentialSource, OAuthToken>>>,
     config: CredentialDiscoveryConfig,
+    /// The home that holds `.claude/` and `.codex/`, as the caller resolved
+    /// it (the daemon: `openalpaca_app_support::paths::user_home`, none for
+    /// an unset, empty or relative one); this crate reads no `HOME` itself.
+    home: Option<PathBuf>,
 }
 
 impl TokenManager {
-    pub async fn new(config: CredentialDiscoveryConfig) -> Self {
+    /// Discover on the machine, under `home` (the caller's resolution of
+    /// the user's home; none looks for no credential file).
+    pub async fn new(config: CredentialDiscoveryConfig, home: Option<PathBuf>) -> Self {
         let mut tokens = HashMap::new();
 
         // Initial discovery
-        let discovered = discover_all(&config).await;
+        let discovered = discover_all(&config, home.clone()).await;
         for cred in discovered {
             tokens.insert(cred.source, cred.token);
         }
@@ -99,6 +105,7 @@ impl TokenManager {
         Self {
             tokens: Arc::new(RwLock::new(tokens)),
             config,
+            home,
         }
     }
 
@@ -124,15 +131,11 @@ impl TokenManager {
             interval.tick().await;
 
             loop {
-                tokio::select! {
-                    _ = cancel.cancelled() => {
-                        tracing::info!("TokenManager refresh loop shutting down");
-                        break;
-                    }
-                    _ = interval.tick() => {
-                        tm.rescan(&settings_service, &router).await;
-                    }
+                if cancel.run_until_cancelled(interval.tick()).await.is_none() {
+                    tracing::info!("TokenManager refresh loop shutting down");
+                    break;
                 }
+                tm.rescan(&settings_service, &router).await;
             }
         })
     }
@@ -173,7 +176,7 @@ impl TokenManager {
         settings_service: &LlmSettingsService,
         router: &LlmRouter,
     ) -> Vec<DiscoveredCredentialInfo> {
-        let discovered = discover_all(&self.config).await;
+        let discovered = discover_all(&self.config, self.home.clone()).await;
 
         // Update stored tokens
         {
@@ -188,8 +191,8 @@ impl TokenManager {
             if cred.token.is_expired() {
                 // Try re-reading the credential file (CLI may have refreshed)
                 let refreshed = match cred.source {
-                    CredentialSource::ClaudeCode => discover_claude_code().await,
-                    CredentialSource::Codex => discover_codex().await,
+                    CredentialSource::ClaudeCode => discover_claude_code(self.home.clone()).await,
+                    CredentialSource::Codex => discover_codex(self.home.clone()).await,
                 };
 
                 if let Some(refreshed_cred) = refreshed
@@ -324,9 +327,9 @@ impl TokenManager {
         let pool = KeyPool::new(vec![api_key], SelectionStrategy::PrimaryFallback);
 
         // Build the provider implementation
-        let provider: Option<Arc<dyn crate::LlmProvider>> = match &provider_type {
+        let provider: Option<Arc<crate::DynLlmProvider<'static>>> = match &provider_type {
             #[cfg(feature = "anthropic")]
-            ProviderType::Anthropic => Some(Arc::new(
+            ProviderType::Anthropic => Some(crate::DynLlmProvider::new_arc(
                 crate::providers::anthropic::AnthropicProvider::new(
                     cred.token.access_token.clone(),
                     None,
@@ -334,12 +337,14 @@ impl TokenManager {
                 ),
             )),
             #[cfg(feature = "openai")]
-            ProviderType::OpenAI => Some(Arc::new(crate::providers::openai::OpenAiProvider::new(
-                cred.token.access_token.clone(),
-                None,
-                None,
-                None,
-            ))),
+            ProviderType::OpenAI => Some(crate::DynLlmProvider::new_arc(
+                crate::providers::openai::OpenAiProvider::new(
+                    cred.token.access_token.clone(),
+                    None,
+                    None,
+                    None,
+                ),
+            )),
             _ => None,
         };
 
@@ -353,34 +358,43 @@ impl TokenManager {
 
 /// Where discovery looks: the home folder that holds `.claude/` and `.codex/`, and
 /// whether Claude Code's macOS keychain item is a fallback. Production discovers on
-/// the machine (`$HOME`, the keychain on macOS); a test passes a temporary home and no
-/// keychain, so no test reads the owner's credential files or keychain item.
+/// the machine (the home its caller resolved, the keychain on macOS); a test passes a
+/// temporary home and no keychain, so no test reads the owner's credential files or
+/// keychain item.
 struct DiscoveryHost {
     home: Option<PathBuf>,
     keychain: bool,
 }
 
 impl DiscoveryHost {
-    /// The machine this process runs on.
-    fn system() -> Self {
+    /// The machine this process runs on, its home as the caller resolved it (the
+    /// daemon: `openalpaca_app_support::paths::user_home`, none for an unset, empty
+    /// or relative one, 121-1/121-2).
+    fn system(home: Option<PathBuf>) -> Self {
         // A unit test that reaches this would read the developer's real credentials:
-        // the files under `$HOME` and, on macOS, the keychain item. Tests pass a host.
+        // the files under the home and, on macOS, the keychain item. Tests pass a host.
         #[cfg(test)]
-        panic!("credential discovery reached the host in a test; pass a DiscoveryHost");
+        {
+            let _ = home;
+            panic!("credential discovery reached the host in a test; pass a DiscoveryHost");
+        }
         #[cfg(not(test))]
         Self {
-            home: dirs_path(),
+            home,
             keychain: cfg!(target_os = "macos"),
         }
     }
 }
 
-/// Discover all available credentials based on config.
-pub async fn discover_all(config: &CredentialDiscoveryConfig) -> Vec<DiscoveredCredential> {
+/// Discover all available credentials based on config, on the machine, under `home`.
+pub async fn discover_all(
+    config: &CredentialDiscoveryConfig,
+    home: Option<PathBuf>,
+) -> Vec<DiscoveredCredential> {
     if !config.claude_code.unwrap_or(true) && !config.codex.unwrap_or(true) {
         return Vec::new();
     }
-    discover_all_on(config, &DiscoveryHost::system()).await
+    discover_all_on(config, &DiscoveryHost::system(home)).await
 }
 
 async fn discover_all_on(
@@ -406,8 +420,8 @@ async fn discover_all_on(
 
 /// Discover Claude Code credentials from `~/.claude/.credentials.json`, falling back
 /// to Claude Code's macOS keychain item.
-pub async fn discover_claude_code() -> Option<DiscoveredCredential> {
-    discover_claude_code_on(&DiscoveryHost::system()).await
+pub async fn discover_claude_code(home: Option<PathBuf>) -> Option<DiscoveredCredential> {
+    discover_claude_code_on(&DiscoveryHost::system(home)).await
 }
 
 async fn discover_claude_code_on(host: &DiscoveryHost) -> Option<DiscoveredCredential> {
@@ -459,8 +473,8 @@ async fn discover_claude_code_on(host: &DiscoveryHost) -> Option<DiscoveredCrede
 }
 
 /// Discover Codex credentials from `~/.codex/auth.json`.
-pub async fn discover_codex() -> Option<DiscoveredCredential> {
-    discover_codex_on(&DiscoveryHost::system()).await
+pub async fn discover_codex(home: Option<PathBuf>) -> Option<DiscoveredCredential> {
+    discover_codex_on(&DiscoveryHost::system(home)).await
 }
 
 async fn discover_codex_on(host: &DiscoveryHost) -> Option<DiscoveredCredential> {
@@ -556,12 +570,6 @@ async fn discover_from_keychain(
             None
         }
     }
-}
-
-/// Get the user's home directory (the machine's host only; tests pass a home).
-#[cfg(not(test))]
-fn dirs_path() -> Option<PathBuf> {
-    std::env::var("HOME").ok().map(PathBuf::from)
 }
 
 #[cfg(test)]

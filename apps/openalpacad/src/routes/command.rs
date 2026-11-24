@@ -14,10 +14,12 @@ use crate::AppState;
 pub struct CommandRequest {
     pub command: String,
     #[serde(default)]
-    #[allow(dead_code)]
     pub args: HashMap<String, serde_json::Value>,
     #[serde(skip_serializing_if = "Option::is_none")]
-    #[allow(dead_code)]
+    #[expect(
+        dead_code,
+        reason = "accepted in the request body; no command reads it"
+    )]
     pub target_agent: Option<String>,
     /// **S5** — this client cannot answer a tool-approval prompt, the same
     /// declaration `POST /v1/chat` takes. `openalpaca command` is scriptable
@@ -34,6 +36,24 @@ pub struct CommandRequest {
 pub struct CommandResponse {
     pub request_id: String,
     pub status: String,
+}
+
+/// `POST /v1/command {"command":"shutdown"}`'s answer: an acceptance, never
+/// a completion (split out for the API contract's sample, API-CONTRACT).
+fn shutdown_accepted(request_id: &str) -> serde_json::Value {
+    serde_json::json!({
+        "request_id": request_id,
+        "status": "shutting_down"
+    })
+}
+
+/// The API contract's sample of the shutdown's answer (API-CONTRACT).
+#[cfg(test)]
+pub(crate) fn contract_samples(out: &mut crate::contract::Samples) {
+    out.response(
+        "post-command",
+        shutdown_accepted("6f1c0e2a-1b3d-4c5e-8f70-9a1b2c3d4e5f"),
+    );
 }
 
 /// Handle POST /v1/command
@@ -339,13 +359,7 @@ pub async fn command_handler(
                 }
             });
 
-            (
-                StatusCode::OK,
-                Json(serde_json::json!({
-                    "request_id": request_id,
-                    "status": "shutting_down"
-                })),
-            )
+            (StatusCode::OK, Json(shutdown_accepted(&request_id)))
         }
         _ => (
             StatusCode::BAD_REQUEST,

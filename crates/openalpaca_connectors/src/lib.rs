@@ -22,15 +22,24 @@ pub mod discord;
 pub mod startup;
 
 use arc_swap::ArcSwap;
-use async_trait::async_trait;
 use openalpaca_core::bus::EventBus;
 use openalpaca_core::daemon_config::DaemonConfig;
 use openalpaca_core::gateway::Gateway;
 use openalpaca_core::security::confirmation::ConfirmationBroker;
 use openalpaca_storage::Database;
-#[allow(unused_imports)] // used only by feature-gated connector factories
-use std::sync::atomic::AtomicBool;
 use std::sync::Arc;
+#[cfg_attr(
+    not(any(
+        test,
+        feature = "discord",
+        all(feature = "imessage", target_os = "macos")
+    )),
+    expect(
+        unused_imports,
+        reason = "used only by the feature-gated connector factories"
+    )
+)]
+use std::sync::atomic::AtomicBool;
 
 /// Unified connector trait for all chat platforms.
 ///
@@ -38,17 +47,16 @@ use std::sync::Arc;
 /// 1. Receiving messages from the platform
 /// 2. Routing them through the Gateway (`Gateway::handle_event`)
 /// 3. Sending responses back to the platform
-#[async_trait]
 pub trait Connector: Send + Sync {
     /// The unique identifier for this connector (e.g., "telegram", "imessage")
     fn name(&self) -> &str;
 
     /// Start the connector. This is typically a blocking call that
     /// runs the connector's main loop (e.g., polling, webhook server).
-    async fn run(&self) -> Result<(), ConnectorError>;
+    fn run(&self) -> impl Future<Output = Result<(), ConnectorError>> + Send;
 
     /// Gracefully shutdown the connector.
-    async fn shutdown(&self) -> Result<(), ConnectorError>;
+    fn shutdown(&self) -> impl Future<Output = Result<(), ConnectorError>> + Send;
 }
 
 /// Common error type for connectors.
@@ -68,7 +76,17 @@ pub enum ConnectorError {
 }
 
 /// Builder for creating connectors with shared dependencies.
-#[allow(dead_code)] // fields read only by feature-gated connector methods
+#[cfg_attr(
+    not(any(
+        feature = "telegram",
+        feature = "discord",
+        all(feature = "imessage", target_os = "macos")
+    )),
+    expect(
+        dead_code,
+        reason = "its fields are read only by feature-gated connector methods"
+    )
+)]
 pub struct ConnectorBuilder {
     db: Arc<Database>,
     bus: Arc<EventBus>,
@@ -340,6 +358,7 @@ impl ConnectorFactory for DiscordFactory {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::atomic::Ordering;
 
     /// GAP-17/T49: the display name belongs to the connector, not to a `match`
     /// in a route. The invariant holds for every compiled factory, so a new
@@ -379,5 +398,50 @@ mod tests {
     #[test]
     fn discord_display_name() {
         assert_eq!(DiscordFactory.display_name(), "Discord");
+    }
+
+    /// M13: `Connector` is a native async trait. An impl writes plain
+    /// `async fn` with no attribute, and the trait's own `+ Send` bound makes
+    /// the futures spawnable: `spawn_through_the_trait` sees only `C:
+    /// Connector`, so it compiles only while the trait declares them `Send`.
+    struct PlainAsyncConnector {
+        stopped: AtomicBool,
+    }
+
+    impl Connector for PlainAsyncConnector {
+        fn name(&self) -> &str {
+            "plain"
+        }
+
+        async fn run(&self) -> Result<(), ConnectorError> {
+            Ok(())
+        }
+
+        async fn shutdown(&self) -> Result<(), ConnectorError> {
+            self.stopped.store(true, Ordering::SeqCst);
+            Ok(())
+        }
+    }
+
+    fn spawn_through_the_trait<C: Connector + 'static>(
+        connector: Arc<C>,
+    ) -> tokio::task::JoinHandle<Result<(), ConnectorError>> {
+        tokio::spawn(async move {
+            connector.run().await?;
+            connector.shutdown().await
+        })
+    }
+
+    #[tokio::test]
+    async fn a_plain_async_fn_impl_is_a_connector_with_send_futures() {
+        let connector = Arc::new(PlainAsyncConnector {
+            stopped: AtomicBool::new(false),
+        });
+        spawn_through_the_trait(Arc::clone(&connector))
+            .await
+            .expect("the connector's task joins")
+            .expect("run and shutdown answer Ok");
+        assert_eq!(connector.name(), "plain");
+        assert!(connector.stopped.load(Ordering::SeqCst));
     }
 }

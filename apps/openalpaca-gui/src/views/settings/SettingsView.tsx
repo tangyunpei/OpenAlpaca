@@ -117,7 +117,7 @@ export default function SettingsView() {
         </div>
       </nav>
 
-      <div className="sc min-h-0 flex-1 overflow-y-auto px-[32px] pt-[26px] pb-[34px]">
+      <div className="min-h-0 sc flex-1 overflow-y-auto px-[32px] pt-[26px] pb-[34px]">
         <div className="max-w-settings-max">
           <PageHead title={meta.label} blurb={meta.blurb} />
           {renderSection(active)}

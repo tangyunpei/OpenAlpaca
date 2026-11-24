@@ -170,6 +170,19 @@ describe("runEventsFromLog — sentences", () => {
     ).toBe("shell_execute · failed");
   });
 
+  /** TIMEOUT-ONE-CLOCK: a failed run with the reason `timeout` says so. */
+  it("marks a tool call the sandbox cut as timed out", () => {
+    expect(
+      one(
+        row(9, "tool_executed", {
+          tool_name: "shell_execute",
+          success: false,
+          reason: "timeout",
+        }),
+      )?.text,
+    ).toBe("shell_execute · timed out");
+  });
+
   /**
    * The outcome of a prompt is in the row's `result` blob, not its `detail` —
    * that is where `events/persistence.rs` writes it (T1). Without it the row

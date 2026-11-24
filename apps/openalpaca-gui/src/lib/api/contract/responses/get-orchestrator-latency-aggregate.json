@@ -1,0 +1,14 @@
+{
+  "aggregates": [
+    {
+      "auto_promotion_count": 0,
+      "count": 0,
+      "fallback_count": 0,
+      "mean_ack_ms": 0,
+      "mode": "",
+      "p50_total_ms": 0,
+      "p95_total_ms": 0,
+      "p99_total_ms": 0
+    }
+  ]
+}

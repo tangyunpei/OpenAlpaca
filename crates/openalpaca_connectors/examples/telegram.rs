@@ -5,7 +5,7 @@
 //! 2. Run: TELOXIDE_TOKEN=your_token cargo run --example telegram --features telegram
 
 use arc_swap::ArcSwap;
-use async_trait::async_trait;
+use openalpaca_app_support::paths;
 use openalpaca_connectors::TelegramConnector;
 use openalpaca_core::{
     bus::EventBus,
@@ -29,7 +29,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // 3. Connect to the real system database (shared with Daemon).
     //    Through `open_home_database`: it makes `state/` at 0700 the way the
     //    daemon's own boot does.
-    println!("Using Database: {}", store::database_path()?.display());
+    println!("Using Database: {}", paths::database_path()?.display());
 
     let db = store::open_home_database()?;
     let bus = EventBus::default();
@@ -40,7 +40,6 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // 4. Create Gateway with a stub handler
     struct EchoHandler;
 
-    #[async_trait]
     impl MessageHandler for EchoHandler {
         async fn handle(&self, request: HandleRequest) -> Result<HandleResult, String> {
             Ok(HandleResult::text(format!("Echo: {}", request.content)))

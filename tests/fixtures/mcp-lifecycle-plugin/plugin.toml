@@ -1,0 +1,12 @@
+[plugin]
+name = "strict-mcp"
+version = "0.1.0"
+description = "Test plugin that refuses any first message but MCP's initialize"
+entry = "./strict-mcp-server.py"
+mcp_compatible = true
+
+[capabilities]
+provides = ["testing"]
+
+[types]
+tools = true

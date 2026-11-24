@@ -14,7 +14,6 @@ struct Counted {
     runs: AtomicUsize,
 }
 
-#[async_trait]
 impl BuiltInTool for Counted {
     async fn execute(&self, _arguments: &serde_json::Value) -> Result<String, String> {
         self.runs.fetch_add(1, Ordering::SeqCst);
@@ -77,6 +76,7 @@ fn with_github(registry: &ToolRegistry, parameters: serde_json::Value) -> Extens
                 remote_name: "create_issue".to_string(),
                 server_name: "github".to_string(),
                 generation,
+                output_schema: None,
             },
         ))
         .unwrap();
@@ -101,7 +101,7 @@ async fn an_argument_the_schema_refuses_is_dispatchs_own_refusal() {
         .register(registered(
             "write_note",
             note_schema(),
-            ToolBackend::BuiltIn(tool.clone()),
+            ToolBackend::built_in_arc(tool.clone()),
         ))
         .unwrap();
     let arguments = serde_json::json!({});
@@ -197,7 +197,7 @@ async fn a_valid_call_passes_and_nothing_runs() {
         .register(registered(
             "write_note",
             note_schema(),
-            ToolBackend::BuiltIn(tool.clone()),
+            ToolBackend::built_in_arc(tool.clone()),
         ))
         .unwrap();
     let ext = with_github(&registry, serde_json::json!({"type": "object"}));

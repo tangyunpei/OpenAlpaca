@@ -35,16 +35,17 @@ pub(crate) enum RowWrite {
 /// Why no lead agent could be spawned (L9).
 ///
 /// Two very different facts wore one sentence. "All agents are busy" is a
-/// capacity problem that clears on its own; an install with **no agent
-/// templates at all** — which is what a packaged daemon had before the daemon
-/// started seeding them — never clears, and the owner reading "busy" has no
+/// capacity problem that clears on its own; a catalog with **no template
+/// that can be spawned** never clears, and the owner reading "busy" has no
 /// reason to go looking at a directory. The registry knows which it is, so it
-/// is asked.
+/// is asked. With the bundled templates always registered (subagent design
+/// §2.5 S-5), an empty catalog means files in `config/agents` withhold them,
+/// which the start's log names.
 pub(crate) fn no_lead_agent_message(no_templates: bool) -> String {
     if no_templates {
-        "No agent templates are installed, so nothing can act as Lead Agent. \
-         Put one carrying the `orchestration` capability in the daemon's \
-         `config/agents` directory — a first boot seeds the shipped set there."
+        "No agent template can act as Lead Agent: none can be spawned. A file in \
+         the daemon's `config/agents` directory may withhold a built-in template \
+         (one that does not parse) — `state/logs/daemon.log` names each such file."
             .to_string()
     } else {
         "No agents available to act as Lead Agent. All agents are busy.".to_string()
@@ -67,7 +68,10 @@ impl TaskDispatcher {
     /// the loop's LLM round re-homed the completion report, its artifact links
     /// and the run's JSONL into whichever conversation happened to be active by
     /// the time the dispatch ran.
-    #[allow(clippy::too_many_arguments)]
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "the run's row fields and its session, from the caller"
+    )]
     pub(crate) fn dispatch_lead_agent(
         &self,
         description: &str,
@@ -102,7 +106,10 @@ impl TaskDispatcher {
     /// A re-run is a second run of the same work, and both rows have to survive
     /// — the original's result is the thing the user is comparing against — so
     /// it gets a new id and answers `201`.
-    #[allow(clippy::too_many_arguments)]
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "as dispatch_lead_agent, with the source run for the session"
+    )]
     pub(crate) fn dispatch_lead_agent_rerun(
         &self,
         description: &str,
@@ -140,7 +147,10 @@ impl TaskDispatcher {
     /// ([`SharedContext::claim_run_slot`](crate::context::SharedContext::claim_run_slot))
     /// and must release it if this returns `Err` — the claim is what stops two
     /// simultaneous `start`s from putting two lead agents on one task id.
-    #[allow(clippy::too_many_arguments)]
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "as dispatch_lead_agent, under an id the caller holds"
+    )]
     pub(crate) fn dispatch_lead_agent_with_id(
         &self,
         task_id: &str,
@@ -179,7 +189,10 @@ impl TaskDispatcher {
     /// caller holds the id, the row is re-queued in place, and the run slot was
     /// claimed before this was called. The seed is what the lead's loop reads
     /// to rebuild its messages instead of starting from the objective alone.
-    #[allow(clippy::too_many_arguments)]
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "as dispatch_lead_agent_with_id, with the resume seed"
+    )]
     pub(crate) fn dispatch_lead_agent_resume(
         &self,
         task_id: &str,
@@ -210,7 +223,10 @@ impl TaskDispatcher {
         )
     }
 
-    #[allow(clippy::too_many_arguments)]
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "the inputs of the four dispatch entries it serves"
+    )]
     fn dispatch_lead_agent_inner(
         &self,
         task_id: String,
@@ -248,7 +264,15 @@ impl TaskDispatcher {
         let resuming = resume.is_some();
 
         // Spawn a lead agent instance from the singleton template.
-        // Prefer templates with "orchestration" capability, fall back to any template.
+        // Prefer templates with "orchestration" capability, fall back to any
+        // template — each list in one order (G-1): the person's files, then
+        // the bundled templates, then plugins', each by id, so the same lead
+        // is chosen from start to start and a borrowed lead is the first
+        // template that can be spawned. The fallback tries the default
+        // subagent last (SA-1, subagent design §3.1 A-4): a lead borrowed
+        // from it — an edited `general_agent.md` is a file, so first by
+        // layer — would leave its run no default to spawn, so it leads only
+        // when no other template can.
         let lead_agent = {
             let templates = self
                 .shared_context
@@ -266,8 +290,17 @@ impl TaskDispatcher {
                 }
             }
             if spawned.is_none() {
-                // Fallback: try spawning from any available template
-                for t in self.shared_context.agent_registry.list_templates() {
+                // Fallback: try spawning from any available template,
+                // `general_agent` last.
+                let (default, others): (Vec<_>, Vec<_>) = self
+                    .shared_context
+                    .agent_registry
+                    .list_templates_by_layer()
+                    .into_iter()
+                    .partition(|t| {
+                        t.frontmatter.id == crate::runner::lead_agent::DEFAULT_SUBAGENT_TEMPLATE
+                    });
+                for t in others.iter().chain(&default) {
                     if let Ok(agent) = self
                         .shared_context
                         .agent_registry
@@ -479,7 +512,10 @@ impl TaskDispatcher {
 
     /// Spawn the lead agent execution in a background tokio task.
     /// The lead agent runs a full agentic loop with `spawn_subagent` tool access.
-    #[allow(clippy::too_many_arguments)]
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "everything the spawned run's task owns, moved in"
+    )]
     fn spawn_lead_agent_execution(
         &self,
         task_id: String,
@@ -905,11 +941,14 @@ impl TaskDispatcher {
                 )
             };
 
-            // Persist LLM usage for the lead agent's own loop
+            // Persist LLM usage for the lead agent's own loop. Where no round
+            // answered, the row names the id the lead's choice resolved to
+            // (C8, M-6e), never its template's word: this `lead_agent` is the
+            // unresolved instance `spawn_instance` gave.
             usage::record_llm_usage(
                 &router,
                 &result.loop_result,
-                lead_agent.llm_config.model.as_deref(),
+                result.lead_model.as_deref(),
                 &lead_agent.id,
                 &task_id,
                 start_time.elapsed().as_millis() as i64,
@@ -978,7 +1017,7 @@ impl TaskDispatcher {
                     .loop_result
                     .model_used
                     .as_deref()
-                    .or(lead_agent.llm_config.model.as_deref())
+                    .or(result.lead_model.as_deref())
                     .unwrap_or(&default_model);
                 // GAP-23: the report carries the run it closed *and* a
                 // `role='artifact'` link per file the run produced — the two

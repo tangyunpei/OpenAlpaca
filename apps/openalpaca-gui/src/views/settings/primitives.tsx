@@ -36,7 +36,7 @@ export function SectionNavItem({
       onClick={onSelect}
       className={cn(
         "flex w-full cursor-pointer items-center gap-[8px] rounded-lg border-none px-[9px] py-[7px] text-left text-base-plus leading-[normal]",
-        "transition-[background-color,color] duration-[120ms]",
+        "transition-[background-color,color] duration-120",
         "focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-blue",
         active
           ? "bg-rail font-medium text-ink"
@@ -355,7 +355,7 @@ export function Toggle({
       onClick={() => onChange?.(!checked)}
       className={cn(
         "flex h-[19px] w-[34px] shrink-0 items-center rounded-pill border px-[2px]",
-        "transition-[background-color,border-color] duration-[120ms]",
+        "transition-[background-color,border-color] duration-120",
         "focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-blue",
         checked ? "border-green bg-green" : "border-line-strong bg-muted",
         disabled ? "cursor-not-allowed opacity-55" : "cursor-pointer",

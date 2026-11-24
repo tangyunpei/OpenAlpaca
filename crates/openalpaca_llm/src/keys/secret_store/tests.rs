@@ -188,10 +188,7 @@ fn keyring_items_are_addressed_by_the_openalpaca_service_and_the_ref_as_account(
     assert_eq!(item.get_password().unwrap(), "sk-two");
 
     keyring.delete("llm/openai/abc").unwrap();
-    assert!(matches!(
-        item.get_password(),
-        Err(keyring_core::Error::NoEntry)
-    ));
+    std::assert_matches!(item.get_password(), Err(keyring_core::Error::NoEntry));
     assert_eq!(keyring.get("llm/openai/abc"), Ok(None));
     // Deleting what is already gone is not an error.
     keyring.delete("llm/openai/abc").unwrap();

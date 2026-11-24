@@ -36,6 +36,7 @@ fn config(name: &str, transport: TransportKind) -> McpClientConfig {
         request_timeout: Duration::from_secs(5),
         max_reconnect_attempts: 0,
         reconnect_backoff_ms: 10,
+        stderr_tail: Default::default(),
     }
 }
 
@@ -499,7 +500,7 @@ mod http {
         let Err(err) = McpClient::connect(http_config(url)).await else {
             panic!("a 401 must fail the connect");
         };
-        assert!(matches!(err, McpError::Unauthorized(401)), "got {err:?}");
+        std::assert_matches!(err, McpError::Unauthorized(401), "got {err:?}");
         assert_eq!(
             methods(&snapshot(&sent)),
             ["server/discover"],
@@ -515,7 +516,7 @@ mod http {
         let Err(err) = McpClient::connect(http_config(url)).await else {
             panic!("a 401 must fail the connect");
         };
-        assert!(matches!(err, McpError::Unauthorized(401)), "got {err:?}");
+        std::assert_matches!(err, McpError::Unauthorized(401), "got {err:?}");
         assert_eq!(methods(&snapshot(&sent)), ["server/discover", "initialize"]);
     }
 }

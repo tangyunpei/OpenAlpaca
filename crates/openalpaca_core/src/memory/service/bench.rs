@@ -652,8 +652,8 @@ fn bench_service_100k_learned_notes() {
     run_service_bench("bench_service_100k_learned_notes", 100_000, Mix::Learned);
 }
 
-/// The seeding itself (not a bench, so it runs in CI): a small partition
-/// seeded in one pass opens ready, every note verifies against the
+/// The seeding itself (not a bench, so `cargo test` runs it): a small
+/// partition seeded in one pass opens ready, every note verifies against the
 /// snapshot, and the suggestions are the service's own.
 #[test]
 fn the_service_bench_seeds_a_partition_the_service_reads() {

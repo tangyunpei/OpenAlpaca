@@ -120,7 +120,6 @@ mod lifecycle_tests {
         tools: Vec<String>,
         skills: Vec<String>,
         agents: Vec<String>,
-        models: Vec<String>,
     }
 
     /// The committed stub: Content-Length-framed JSON-RPC over stdio, answers
@@ -234,6 +233,13 @@ mcp_compatible = true
             Self::build(root, Some(HomeStoreGuard::set(&root.join(".home"))))
         }
 
+        /// [`Self::new`], its plugins' channel default `wait` — a test-scale
+        /// stand-in for the production 60 s.
+        fn with_channel_timeout(root: &Path, wait: std::time::Duration) -> Self {
+            let home = HomeStoreGuard::set(&root.join(".home"));
+            Self::build_waiting(root, Some(home), wait)
+        }
+
         /// A second supervisor over the same plugins root, as a restart is —
         /// fresh in-memory state, the same two files on disk.
         fn restart(root: &Path) -> Self {
@@ -241,6 +247,14 @@ mcp_compatible = true
         }
 
         fn build(root: &Path, home: Option<HomeStoreGuard>) -> Self {
+            Self::build_waiting(root, home, CHANNEL_DEFAULT_TIMEOUT)
+        }
+
+        fn build_waiting(
+            root: &Path,
+            home: Option<HomeStoreGuard>,
+            wait: std::time::Duration,
+        ) -> Self {
             let bus = EventBus::new(256);
             // The production shape from C4 (`services/tools.rs`): the ledger
             // holds the bus, so `mark_failed` announces its own `failed` and
@@ -256,7 +270,8 @@ mcp_compatible = true
                     Some(Arc::clone(&agents)),
                 )
                 .with_event_bus(bus.clone())
-                .with_notice_lane(NOTICE_LANE),
+                .with_notice_lane(NOTICE_LANE)
+                .with_channel_timeout(wait),
             );
             Self {
                 manager,
@@ -280,7 +295,6 @@ mcp_compatible = true
                 tools: state.registered_tools.clone(),
                 skills: state.registered_skills.clone(),
                 agents: state.registered_agents.clone(),
-                models: state.registered_models.clone(),
             }
         }
 
@@ -352,8 +366,7 @@ mcp_compatible = true
             .arg("-c")
             .arg(format!("kill -0 {pid} 2>/dev/null"))
             .status()
-            .map(|s| s.success())
-            .unwrap_or(false)
+            .is_ok_and(|s| s.success())
     }
 
     /// Kill a plugin's child out of band and wait until the supervisor's
@@ -486,8 +499,9 @@ mcp_compatible = true
         std::fs::create_dir(&permissions).unwrap();
 
         let err = h.manager.deny_plugin("echo-test").await.unwrap_err();
-        assert!(
-            matches!(err, ExtensionError::StoreUnreadable(_) | ExtensionError::WriteFailed(_)),
+        std::assert_matches!(
+            err,
+            ExtensionError::StoreUnreadable(_) | ExtensionError::WriteFailed(_),
             "expected the failed write to surface, got {err:?}"
         );
 
@@ -573,6 +587,7 @@ mcp_compatible = true
         let live_pid = h.child_pid("echo-test").await;
 
         // The stale proxy's own call: its channel's writer is gone.
+        use openalpaca_api::plugin_traits::PluginToolExecutor;
         let ToolBackend::Plugin(executor) = &stale.backend else {
             panic!("the stub's tool is not plugin-backed")
         };
@@ -596,6 +611,791 @@ mcp_compatible = true
             .await
             .expect_err("the gate must refuse a stale handle");
         assert!(gated.contains("previous load"), "{gated}");
+    }
+
+    /// The committed stub at `tests/fixtures/named-plugin/`: one process that
+    /// lists an `echo` tool and answers `tools/call` only for that name (a
+    /// JSON-RPC error naming any other), and leads a process group of its own.
+    fn named_stub_dir() -> PathBuf {
+        Path::new(env!("CARGO_MANIFEST_DIR")).join("../../tests/fixtures/named-plugin")
+    }
+
+    /// Lay the named stub out under `root` as the plugin its manifest names.
+    fn install_named_stub(root: &Path) -> PathBuf {
+        let dir = root.join("named-test");
+        std::fs::create_dir_all(&dir).unwrap();
+        // fs::copy carries the mode across on Unix, so the entry stays executable.
+        for file in ["named-server.py", "plugin.toml"] {
+            std::fs::copy(named_stub_dir().join(file), dir.join(file)).unwrap();
+        }
+        dir
+    }
+
+    /// SIGKILL to a stub's whole process group when this guard drops, so a
+    /// test that fails before its teardown leaves nothing behind. The stub
+    /// leads its group, so its pid is the group's id; one already gone
+    /// answers ESRCH, which `kill` reports and the guard ignores.
+    struct KillGroupOnDrop(u32);
+
+    impl Drop for KillGroupOnDrop {
+        fn drop(&mut self) {
+            let _ = std::process::Command::new("sh")
+                .arg("-c")
+                .arg(format!("kill -9 -- -{} 2>/dev/null", self.0))
+                .status();
+        }
+    }
+
+    /// Bring the named stub up and hand back its pid under the group guard.
+    async fn load_named_stub(h: &Harness) -> (u32, KillGroupOnDrop) {
+        load_running_stub_with_caps(h, "named-test", &["testing"]).await;
+        let pid = h.child_pid("named-test").await;
+        (pid, KillGroupOnDrop(pid))
+    }
+
+    /// Disable the named stub and assert its child is gone (T4 awaits the
+    /// child's `wait()`, so the pid really is gone, not a zombie).
+    async fn tear_down_named_stub(h: &Harness, pid: u32) {
+        h.manager.disable(&ext("named-test")).await.unwrap();
+        assert!(
+            !pid_alive(pid),
+            "the named stub {pid} outlived its teardown"
+        );
+    }
+
+    /// **A plugin tool is called by the name it listed.** The registry holds
+    /// the tool as `<plugin>::<tool>` and hands that name to the plugin's
+    /// executor; the plugin listed `echo` and must be asked for `echo`. The
+    /// committed echo stub ignores the name, which is how sending the
+    /// namespaced one went unseen.
+    #[tokio::test]
+    async fn a_plugin_tool_is_called_by_the_name_it_listed() {
+        let tmp = tempfile::tempdir().unwrap();
+        install_named_stub(tmp.path());
+        let h = Harness::new(tmp.path());
+        let (pid, _group) = load_named_stub(&h).await;
+
+        let answer = h
+            .tools
+            .execute(
+                "named-test::echo",
+                &serde_json::json!({"message": "by its own name"}),
+            )
+            .await;
+        assert_eq!(
+            answer.as_deref(),
+            Ok("echo: by its own name"),
+            "the plugin was not asked for the tool by the name it listed"
+        );
+
+        tear_down_named_stub(&h, pid).await;
+    }
+
+    // ── N-PLUG-5: an mcp_compatible plugin is opened with MCP's lifecycle ──
+
+    /// The committed stub at `tests/fixtures/mcp-lifecycle-plugin/`: an MCP
+    /// server strict about its lifecycle, as an rmcp server is — a request
+    /// before `initialize` is refused, a notification before it ends the
+    /// process — that logs every method it is sent to `seen.log`.
+    fn install_strict_mcp_stub(root: &Path) -> PathBuf {
+        let source =
+            Path::new(env!("CARGO_MANIFEST_DIR")).join("../../tests/fixtures/mcp-lifecycle-plugin");
+        let dir = root.join("strict-mcp");
+        std::fs::create_dir_all(&dir).unwrap();
+        // fs::copy carries the mode across on Unix, so the entry stays executable.
+        for file in ["strict-mcp-server.py", "plugin.toml"] {
+            std::fs::copy(source.join(file), dir.join(file)).unwrap();
+        }
+        dir
+    }
+
+    /// **An `mcp_compatible` plugin gets MCP's lifecycle**: `initialize` at
+    /// `2025-11-25` with MCP's params, then `notifications/initialized`, and
+    /// only then `tools/list` — never OpenAlpaca's own `initialize` params,
+    /// and never `tools/list` first, which an MCP server refuses.
+    #[tokio::test]
+    async fn an_mcp_compatible_plugin_is_opened_with_the_mcp_lifecycle() {
+        let tmp = tempfile::tempdir().unwrap();
+        let dir = install_strict_mcp_stub(tmp.path());
+        let h = Harness::new(tmp.path());
+        h.manager
+            .permission_gate
+            .approve("strict-mcp", &["testing".to_string()])
+            .expect("approve the stub");
+        h.scan().await;
+
+        let row = h.row("strict-mcp").await;
+        let seen = std::fs::read_to_string(dir.join("seen.log")).unwrap_or_default();
+        let group = h
+            .manager
+            .plugins
+            .read()
+            .await
+            .get("strict-mcp")
+            .and_then(|s| s.process.as_ref())
+            .and_then(|p| p.child.id())
+            .map(KillGroupOnDrop);
+        assert_eq!(
+            row.state,
+            ExtensionState::Enabled,
+            "the plugin did not load; it was sent, in order:\n{seen}"
+        );
+        let methods: Vec<&str> = seen.lines().collect();
+        assert_eq!(
+            methods.get(..3),
+            Some(&["initialize", "notifications/initialized", "tools/list"][..]),
+            "the lifecycle's order: {methods:?}"
+        );
+
+        let params: serde_json::Value = serde_json::from_str(
+            &std::fs::read_to_string(dir.join("initialize-params.json")).unwrap(),
+        )
+        .unwrap();
+        assert_eq!(params["protocolVersion"], "2025-11-25");
+        assert_eq!(params["capabilities"], serde_json::json!({}));
+        assert_eq!(params["clientInfo"]["name"], "openalpaca-mcp");
+        assert_eq!(
+            params["clientInfo"]["version"],
+            env!("CARGO_PKG_VERSION"),
+            "the daemon's version, as the MCP client sends it"
+        );
+        assert!(
+            params.get("config").is_none() && params.get("plugin_id").is_none(),
+            "OpenAlpaca's own initialize params reached an MCP server: {params}"
+        );
+
+        assert_eq!(
+            h.registered("strict-mcp").await.tools,
+            vec!["strict-mcp::echo"]
+        );
+        let answer = h
+            .tools
+            .execute(
+                "strict-mcp::echo",
+                &serde_json::json!({"message": "lifecycle"}),
+            )
+            .await;
+        assert_eq!(answer.as_deref(), Ok("echo: lifecycle"));
+
+        let pid = h.child_pid("strict-mcp").await;
+        h.manager.disable(&ext("strict-mcp")).await.unwrap();
+        assert!(
+            !pid_alive(pid),
+            "the strict stub {pid} outlived its teardown"
+        );
+        drop(group);
+    }
+
+    /// The tolerant echo stub, which answers every method, still loads under
+    /// the lifecycle: its `initialize` answer (`{}`) carries no
+    /// `protocolVersion`, and the load goes on.
+    #[tokio::test]
+    async fn the_echo_fixture_still_loads_under_the_mcp_lifecycle() {
+        let tmp = tempfile::tempdir().unwrap();
+        install_stub_plugin(tmp.path(), "echo-test", "[types]\ntools = true\n");
+        let h = Harness::new(tmp.path());
+        load_running_stub(&h, "echo-test").await;
+        let pid = h.child_pid("echo-test").await;
+        h.manager.disable(&ext("echo-test")).await.unwrap();
+        assert!(!pid_alive(pid), "the echo stub {pid} outlived its teardown");
+    }
+
+    /// **An `mcp_compatible` plugin that refuses MCP's `initialize` ends
+    /// `Failed`, its child shut down** (E-FAIL on the MCP branch): the strict
+    /// stub answers `initialize` with a JSON-RPC error, and the load sends it
+    /// `shutdown` and reaps it before it commits the row. The entry is a
+    /// wrapper that logs the stub's pid (`exec` keeps it), since a `Failed`
+    /// row holds no child to ask.
+    #[tokio::test]
+    async fn an_mcp_compatible_plugin_refusing_initialize_fails_and_is_shut_down() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let tmp = tempfile::tempdir().unwrap();
+        let dir = install_strict_mcp_stub(tmp.path());
+        let wrapper = dir.join("logged-entry.sh");
+        std::fs::write(
+            &wrapper,
+            "#!/bin/sh\necho $$ >> spawns.log\n\
+             STRICT_STUB_INIT_ERROR=1 exec ./strict-mcp-server.py\n",
+        )
+        .unwrap();
+        std::fs::set_permissions(&wrapper, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let manifest_path = dir.join("plugin.toml");
+        let manifest = std::fs::read_to_string(&manifest_path).unwrap();
+        assert!(manifest.contains("mcp_compatible = true"), "{manifest}");
+        std::fs::write(
+            &manifest_path,
+            manifest.replace("./strict-mcp-server.py", "./logged-entry.sh"),
+        )
+        .unwrap();
+
+        let h = Harness::new(tmp.path());
+        h.manager
+            .permission_gate
+            .approve("strict-mcp", &["testing".to_string()])
+            .expect("approve the stub");
+        h.scan().await;
+
+        let pids = spawned_pids(&dir);
+        let _groups: Vec<KillGroupOnDrop> = pids.iter().copied().map(KillGroupOnDrop).collect();
+        assert_eq!(pids.len(), 1, "one child was spawned: {pids:?}");
+        let seen = std::fs::read_to_string(dir.join("seen.log")).unwrap_or_default();
+        let methods: Vec<&str> = seen.lines().collect();
+        assert_eq!(
+            methods,
+            ["initialize", "shutdown"],
+            "a refused handshake is followed by the shutdown request alone"
+        );
+        let row = h.row("strict-mcp").await;
+        std::assert_matches!(
+            row.state,
+            ExtensionState::Failed {
+                reason: FailureReason::Unreachable,
+                ..
+            },
+            "a refused initialize leaves the row Failed: {:?}",
+            row.state
+        );
+        assert!(
+            !h.holds_process("strict-mcp").await,
+            "a child is still held"
+        );
+        assert!(
+            !pid_alive(pids[0]),
+            "the refused stub {} outlived the failed load",
+            pids[0]
+        );
+    }
+
+    /// **A failed plugin call names the tool once**: `plugin <plugin>::<tool>:
+    /// …`, never `<plugin>::<plugin>::<tool>`. The error is the plugin's own
+    /// (a JSON-RPC error while the plugin is `Enabled`), so the wording is
+    /// the proxy's fallback, not a ledger refusal.
+    #[tokio::test]
+    async fn a_failed_plugin_call_names_the_tool_once() {
+        let tmp = tempfile::tempdir().unwrap();
+        install_named_stub(tmp.path());
+        let h = Harness::new(tmp.path());
+        let (pid, _group) = load_named_stub(&h).await;
+
+        let error = h
+            .tools
+            .execute(
+                "named-test::echo",
+                &serde_json::json!({"message": "x", "fail": true}),
+            )
+            .await
+            .expect_err("the stub answers fail = true with a JSON-RPC error");
+        assert!(
+            error.starts_with("plugin named-test::echo: "),
+            "the failure does not name the tool once: {error}"
+        );
+        assert!(
+            !error.contains("named-test::named-test::"),
+            "the failure doubles the plugin's prefix: {error}"
+        );
+        assert!(
+            error.contains("echo was asked to fail"),
+            "the error is not the listed tool's own: {error}"
+        );
+        assert_eq!(h.state("named-test").await, ExtensionState::Enabled);
+
+        tear_down_named_stub(&h, pid).await;
+    }
+
+    /// **An `isError` result is an error** (N-PLUG-1, Z2-02). A plugin's
+    /// `tools/call` result follows MCP's `CallToolResult`: one that says
+    /// `isError: true` is the tool's own failure, and the call yields
+    /// `Err(<its joined text>)` — the text bare, as the MCP bridge's
+    /// `serialize_call_result` gives it — where it used to read as a success.
+    /// The plugin answered, so it stays `Enabled`.
+    #[tokio::test]
+    async fn an_is_error_result_is_an_error() {
+        let tmp = tempfile::tempdir().unwrap();
+        install_named_stub(tmp.path());
+        let h = Harness::new(tmp.path());
+        let (pid, _group) = load_named_stub(&h).await;
+
+        let answer = h
+            .tools
+            .execute(
+                "named-test::echo",
+                &serde_json::json!({"message": "boom", "is_error": true}),
+            )
+            .await;
+        assert_eq!(
+            answer,
+            Err("boom".to_string()),
+            "an isError result was not read as the tool's error"
+        );
+        assert_eq!(h.state("named-test").await, ExtensionState::Enabled);
+
+        tear_down_named_stub(&h, pid).await;
+    }
+
+    // ── PLUGIN-WAIT: a plugin tool waits the sandbox's figure ────────
+
+    /// The channel default these tests run under: a test-scale stand-in for
+    /// the production 60 s, which every plugin tool call waited before.
+    const CHANNEL_WAIT: std::time::Duration = std::time::Duration::from_secs(1);
+
+    /// Call `named-test::echo` through a sandbox over the harness's registry,
+    /// under a policy whose per-tool bound is `bound_secs` (its ceiling the
+    /// shipped 600 s) and which admits every tool — the path every loop's
+    /// tool calls take.
+    async fn call_through_sandbox(
+        h: &Harness,
+        bound_secs: u64,
+        arguments: serde_json::Value,
+    ) -> Result<String, String> {
+        use openalpaca_core::security::capabilities::Allowlist;
+        use openalpaca_core::security::sandbox::{SandboxManager, SandboxPolicy};
+
+        let sandbox = SandboxManager::with_defaults(Arc::clone(&h.tools), h.bus.clone());
+        let policy = SandboxPolicy {
+            agent_id: "plugin-wait".to_string(),
+            allowed_capabilities: Allowlist::Unrestricted,
+            denied_capabilities: vec![],
+            require_confirmation_for: vec![],
+            max_tool_calls: None,
+            max_tool_runtime_secs: bound_secs,
+            max_tool_runtime_ceiling_secs: 600,
+            stream_id: None,
+            lane_key: None,
+            confirmation_timeout_secs: None,
+            auto_approve: false,
+            unattended: false,
+        };
+        let call = openalpaca_llm::ToolCall {
+            id: "tc_wait".to_string(),
+            name: "named-test::echo".to_string(),
+            arguments,
+        };
+        let ctx = openalpaca_core::tools::registry::ToolContext {
+            agent_id: Some("plugin-wait".to_string()),
+            ..Default::default()
+        };
+        sandbox.execute_tool(&call, &policy, &ctx).await
+    }
+
+    /// **A plugin tool waits the sandbox's figure, not the channel's.** The
+    /// stub answers after 2 s; the channel's default is 1 s and the
+    /// sandbox's bound 3 s, so the answer is due — where the call used to end
+    /// at the channel's default with "timeout waiting for plugin response".
+    #[tokio::test]
+    async fn a_slow_plugin_tool_waits_the_sandboxs_figure_not_the_channels() {
+        let tmp = tempfile::tempdir().unwrap();
+        install_named_stub(tmp.path());
+        let h = Harness::with_channel_timeout(tmp.path(), CHANNEL_WAIT);
+        let (pid, _group) = load_named_stub(&h).await;
+
+        let answer = call_through_sandbox(
+            &h,
+            3,
+            serde_json::json!({"message": "late", "delay_secs": 2}),
+        )
+        .await;
+        assert_eq!(
+            answer.as_deref(),
+            Ok("echo: late"),
+            "a plugin tool did not wait the sandbox's figure"
+        );
+
+        tear_down_named_stub(&h, pid).await;
+    }
+
+    /// **Through the sandbox, an `isError` result is the call's `Err`**
+    /// (N-PLUG-1): the path every loop's tool calls take, where the call
+    /// is cut (`execute_within`), hands the plugin's text back as the
+    /// tool's failure, unwrapped.
+    #[tokio::test]
+    async fn through_the_sandbox_an_is_error_result_is_an_error() {
+        let tmp = tempfile::tempdir().unwrap();
+        install_named_stub(tmp.path());
+        let h = Harness::new(tmp.path());
+        let (pid, _group) = load_named_stub(&h).await;
+
+        let answer = call_through_sandbox(
+            &h,
+            30,
+            serde_json::json!({"message": "boom", "is_error": true}),
+        )
+        .await;
+        assert_eq!(
+            answer,
+            Err("boom".to_string()),
+            "through the sandbox an isError result was not the call's error"
+        );
+        assert_eq!(h.state("named-test").await, ExtensionState::Enabled);
+
+        tear_down_named_stub(&h, pid).await;
+    }
+
+    /// **Past the sandbox's figure a plugin tool is cut with the sandbox's
+    /// message**, "Tool '<name>' timed out after <n>s", not the plugin
+    /// channel's: the sandbox's clock is the one that ends it. Cut below the
+    /// ceiling, it is told its limit and the ceiling and, since its schema
+    /// takes no `timeout_secs`, advised none (TIMEOUT-ONE-CLOCK, item 19;
+    /// PLUGIN-WAIT-2 told it to ask). The cut is a failed tool run with
+    /// the reason `timeout`, never a security violation. The row stays
+    /// `Enabled` — a cut is no crash.
+    #[tokio::test]
+    async fn past_the_sandboxs_figure_a_plugin_tool_is_cut_with_its_message() {
+        let tmp = tempfile::tempdir().unwrap();
+        install_named_stub(tmp.path());
+        let h = Harness::with_channel_timeout(tmp.path(), CHANNEL_WAIT);
+        let (pid, _group) = load_named_stub(&h).await;
+
+        let mut events = h.bus.subscribe();
+        let error = call_through_sandbox(
+            &h,
+            2,
+            serde_json::json!({"message": "too late", "delay_secs": 4}),
+        )
+        .await
+        .expect_err("the stub answers after the sandbox's bound");
+        assert_eq!(
+            error,
+            "Tool 'named-test::echo' timed out after 2s\nHint: this tool's limit here is 2 \
+             seconds (the most any call may run is 600 seconds). Split the work into smaller \
+             calls that each finish sooner.",
+            "the call was not cut by the sandbox's clock, or was sent after a timeout_secs its \
+             schema does not take"
+        );
+        let (mut executed, mut violations) = (Vec::new(), 0);
+        while let Ok(event) = events.try_recv() {
+            match event {
+                openalpaca_core::events::SystemEvent::ToolExecuted {
+                    tool_name,
+                    success,
+                    reason,
+                    ..
+                } if tool_name == "named-test::echo" => executed.push((success, reason)),
+                openalpaca_core::events::SystemEvent::SecurityViolation { tool_name, .. }
+                    if tool_name == "named-test::echo" =>
+                {
+                    violations += 1;
+                }
+                _ => {}
+            }
+        }
+        assert_eq!(
+            executed,
+            vec![(
+                false,
+                Some(openalpaca_api::events::ToolFailureReason::Timeout)
+            )],
+            "a cut call is a failed tool run with the reason timeout"
+        );
+        assert_eq!(violations, 0, "a timeout is no security violation");
+        assert_eq!(h.state("named-test").await, ExtensionState::Enabled);
+
+        tear_down_named_stub(&h, pid).await;
+    }
+
+    /// **A plugin tool's call may ask for its own figure**, as a command's
+    /// may: its `timeout_secs` (3) lifts the sandbox's bound (1 s) for that
+    /// call, and the argument reaches the plugin as it was sent.
+    #[tokio::test]
+    async fn a_plugin_tool_call_may_ask_for_its_own_figure() {
+        let tmp = tempfile::tempdir().unwrap();
+        install_named_stub(tmp.path());
+        let h = Harness::with_channel_timeout(tmp.path(), CHANNEL_WAIT);
+        let (pid, _group) = load_named_stub(&h).await;
+
+        let answer = call_through_sandbox(
+            &h,
+            1,
+            serde_json::json!({"message": "asked", "delay_secs": 2, "timeout_secs": 3}),
+        )
+        .await;
+        assert_eq!(
+            answer.as_deref(),
+            Ok("echo: asked (timeout_secs 3)"),
+            "a plugin tool's timeout_secs did not lift the bound for its call"
+        );
+
+        tear_down_named_stub(&h, pid).await;
+    }
+
+    /// **A call no sandbox cuts keeps the channel's default**: one made on
+    /// the registry directly names no figure, so its plugin's answer is
+    /// waited for as long as every other request's.
+    #[tokio::test]
+    async fn without_the_sandboxs_figure_a_plugin_tool_waits_the_channels_default() {
+        let tmp = tempfile::tempdir().unwrap();
+        install_named_stub(tmp.path());
+        let h = Harness::with_channel_timeout(tmp.path(), CHANNEL_WAIT);
+        let (pid, _group) = load_named_stub(&h).await;
+
+        let error = h
+            .tools
+            .execute(
+                "named-test::echo",
+                &serde_json::json!({"message": "unbounded", "delay_secs": 2}),
+            )
+            .await
+            .expect_err("the stub answers after the channel's default");
+        assert_eq!(
+            error, "plugin named-test::echo: timeout waiting for plugin response",
+            "a call no sandbox cuts did not wait the channel's default"
+        );
+
+        tear_down_named_stub(&h, pid).await;
+    }
+
+    /// **The plugin's other requests still wait the channel's default** —
+    /// `tools/list`, `skill/invoke`, the agent bridge's — which names no
+    /// figure of its own.
+    #[tokio::test]
+    async fn the_channels_other_requests_still_wait_its_default() {
+        let tmp = tempfile::tempdir().unwrap();
+        install_named_stub(tmp.path());
+        let h = Harness::with_channel_timeout(tmp.path(), CHANNEL_WAIT);
+        let (pid, _group) = load_named_stub(&h).await;
+
+        let channel = {
+            let plugins = h.manager.plugins.read().await;
+            let state = plugins.get("named-test").expect("the stub is loaded");
+            state
+                .process
+                .as_ref()
+                .expect("it holds its child")
+                .channel
+                .clone()
+        };
+        let started = std::time::Instant::now();
+        let result = channel
+            .call("ping", serde_json::json!({"delay_secs": 2}))
+            .await;
+        std::assert_matches!(
+            result,
+            Err(PluginError::Timeout),
+            "a request with no figure of its own did not end at the channel's default: {result:?}"
+        );
+        assert!(
+            started.elapsed() < std::time::Duration::from_millis(1900),
+            "it waited past the channel's default: {:?}",
+            started.elapsed()
+        );
+
+        tear_down_named_stub(&h, pid).await;
+    }
+
+    /// **`initialize` keeps its own figure, 10 s** — neither the channel's
+    /// default nor a tool call's: a plugin that answers it after 2 s, under
+    /// a channel default of 1 s, starts.
+    #[tokio::test]
+    async fn initialize_keeps_its_own_figure() {
+        let tmp = tempfile::tempdir().unwrap();
+        let dir = install_named_stub(tmp.path());
+        let manifest_path = dir.join("plugin.toml");
+        let manifest = std::fs::read_to_string(&manifest_path)
+            .unwrap()
+            .replace("mcp_compatible = true", "mcp_compatible = false")
+            .replace(
+                "\n[capabilities]",
+                "\n[plugin.env]\nNAMED_STUB_INIT_DELAY_SECS = \"2\"\n\n[capabilities]",
+            );
+        std::fs::write(&manifest_path, manifest).unwrap();
+        let manifest = PluginManifest::from_dir(&dir).unwrap();
+        assert_eq!(
+            manifest
+                .plugin
+                .env
+                .get("NAMED_STUB_INIT_DELAY_SECS")
+                .map(String::as_str),
+            Some("2")
+        );
+
+        let mut process = PluginProcess::spawn(&manifest, &dir, CHANNEL_WAIT).unwrap();
+        let pid = process.child.id().expect("the stub has a pid");
+        let _group = KillGroupOnDrop(pid);
+        let ready = process
+            .initialize("named-test", "0.1.0", &[], HashMap::new())
+            .await;
+        assert!(
+            ready.is_ok(),
+            "initialize did not wait its own figure: {ready:?}"
+        );
+
+        process.kill();
+        let _ = process.child.wait().await;
+        assert!(!pid_alive(pid), "the stub {pid} outlived the test");
+    }
+
+    /// **MCP's `initialize` keeps the same figure, 10 s**: the named stub,
+    /// still `mcp_compatible = true`, answers it after 2 s under a channel
+    /// default of 1 s, and the load goes through the MCP branch to `Enabled`.
+    #[tokio::test]
+    async fn mcp_initialize_keeps_its_own_figure() {
+        let tmp = tempfile::tempdir().unwrap();
+        let dir = install_named_stub(tmp.path());
+        let manifest_path = dir.join("plugin.toml");
+        let manifest = std::fs::read_to_string(&manifest_path).unwrap();
+        assert!(manifest.contains("mcp_compatible = true"), "{manifest}");
+        std::fs::write(
+            &manifest_path,
+            manifest.replace(
+                "\n[capabilities]",
+                "\n[plugin.env]\nNAMED_STUB_INIT_DELAY_SECS = \"2\"\n\n[capabilities]",
+            ),
+        )
+        .unwrap();
+        assert!(
+            PluginManifest::from_dir(&dir)
+                .unwrap()
+                .plugin
+                .mcp_compatible
+        );
+
+        let h = Harness::with_channel_timeout(tmp.path(), CHANNEL_WAIT);
+        h.manager
+            .permission_gate
+            .approve("named-test", &["testing".to_string()])
+            .expect("approve the stub");
+        h.scan().await;
+        let group = h
+            .manager
+            .plugins
+            .read()
+            .await
+            .get("named-test")
+            .and_then(|s| s.process.as_ref())
+            .and_then(|p| p.child.id())
+            .map(KillGroupOnDrop);
+        assert_eq!(
+            h.state("named-test").await,
+            ExtensionState::Enabled,
+            "MCP's initialize did not wait its own figure"
+        );
+
+        let pid = h.child_pid("named-test").await;
+        tear_down_named_stub(&h, pid).await;
+        drop(group);
+    }
+
+    // ── PLUGIN-WAIT-2: a cut call leaves nothing waiting ─────────────
+
+    /// The named stub's channel — the one its tool calls and its other
+    /// requests travel on.
+    async fn named_channel(h: &Harness) -> crate::stdio_channel::StdioChannel {
+        let plugins = h.manager.plugins.read().await;
+        let state = plugins.get("named-test").expect("the stub is loaded");
+        state
+            .process
+            .as_ref()
+            .expect("it holds its child")
+            .channel
+            .clone()
+    }
+
+    /// **A cut plugin call leaves no request waiting in its channel**
+    /// (PLUGIN-WAIT-2): the sandbox's cut drops the proxy's wait, and the
+    /// request's entry goes with it, so a plugin that never answers does not
+    /// grow the channel's map. Nothing tells the plugin (no JSON-RPC cancel);
+    /// its next call is answered as before.
+    #[tokio::test]
+    async fn a_cut_plugin_call_leaves_no_request_pending() {
+        let tmp = tempfile::tempdir().unwrap();
+        install_named_stub(tmp.path());
+        let h = Harness::with_channel_timeout(tmp.path(), CHANNEL_WAIT);
+        let (pid, _group) = load_named_stub(&h).await;
+        let channel = named_channel(&h).await;
+
+        let error = call_through_sandbox(
+            &h,
+            1,
+            serde_json::json!({"message": "never", "silent": true}),
+        )
+        .await
+        .expect_err("the stub never answers");
+        assert!(
+            error.starts_with("Tool 'named-test::echo' timed out after 1s"),
+            "the call was not cut by the sandbox: {error}"
+        );
+        assert_eq!(
+            channel.pending_len().await,
+            0,
+            "the cut call's request is still waiting in the channel"
+        );
+
+        let next = call_through_sandbox(&h, 3, serde_json::json!({"message": "next"})).await;
+        assert_eq!(next.as_deref(), Ok("echo: next"));
+        assert_eq!(channel.pending_len().await, 0);
+
+        tear_down_named_stub(&h, pid).await;
+    }
+
+    /// **A cut call's late answer reaches no caller** (PLUGIN-WAIT-2): its
+    /// entry went with the cut, so when the plugin answers it after all the
+    /// channel discards the answer, and the next call is handed its own.
+    #[tokio::test]
+    async fn a_late_answer_to_a_cut_plugin_call_is_discarded() {
+        let tmp = tempfile::tempdir().unwrap();
+        install_named_stub(tmp.path());
+        let h = Harness::with_channel_timeout(tmp.path(), CHANNEL_WAIT);
+        let (pid, _group) = load_named_stub(&h).await;
+        let channel = named_channel(&h).await;
+
+        let error = call_through_sandbox(
+            &h,
+            1,
+            serde_json::json!({"message": "late", "delay_secs": 2}),
+        )
+        .await
+        .expect_err("the stub answers after the sandbox's bound");
+        assert!(
+            error.starts_with("Tool 'named-test::echo' timed out after 1s"),
+            "the call was not cut by the sandbox: {error}"
+        );
+        assert_eq!(
+            channel.pending_len().await,
+            0,
+            "the cut call's request is still waiting for its late answer"
+        );
+
+        // One process: the stub answers the cut call, at about 2 s, before
+        // it reads this one.
+        let next = call_through_sandbox(&h, 3, serde_json::json!({"message": "next"})).await;
+        assert_eq!(
+            next.as_deref(),
+            Ok("echo: next"),
+            "the next call was not handed its own answer"
+        );
+        assert_eq!(channel.pending_len().await, 0);
+
+        tear_down_named_stub(&h, pid).await;
+    }
+
+    /// **Any dropped wait removes its request**, not only the sandbox's cut
+    /// (PLUGIN-WAIT-2): a caller that gives up on a request long before the
+    /// request's own timeout leaves nothing behind in the channel.
+    #[tokio::test]
+    async fn a_dropped_wait_removes_its_request_from_the_channel() {
+        let tmp = tempfile::tempdir().unwrap();
+        install_named_stub(tmp.path());
+        let h = Harness::with_channel_timeout(tmp.path(), CHANNEL_WAIT);
+        let (pid, _group) = load_named_stub(&h).await;
+        let channel = named_channel(&h).await;
+
+        let params = serde_json::json!({
+            "name": "echo",
+            "arguments": {"message": "never", "silent": true},
+        });
+        let gave_up = tokio::time::timeout(
+            std::time::Duration::from_millis(200),
+            channel.call_with_timeout("tools/call", params, std::time::Duration::from_secs(30)),
+        )
+        .await;
+        assert!(gave_up.is_err(), "the stub never answers: {gave_up:?}");
+        assert_eq!(
+            channel.pending_len().await,
+            0,
+            "the dropped wait's request is still in the channel"
+        );
+
+        tear_down_named_stub(&h, pid).await;
     }
 
     /// **Redundant enable registers no second capability provider** (design
@@ -702,14 +1502,12 @@ mcp_compatible = true
         h.scan().await;
 
         let row = h.row("echo-test").await;
-        assert!(
-            matches!(
-                row.state,
-                ExtensionState::Failed {
-                    reason: FailureReason::ConfigInvalid,
-                    ..
-                }
-            ),
+        std::assert_matches!(
+            row.state,
+            ExtensionState::Failed {
+                reason: FailureReason::ConfigInvalid,
+                ..
+            },
             "expected config_invalid, got {:?}",
             row.state
         );
@@ -731,8 +1529,9 @@ mcp_compatible = true
             h.manager.deny_plugin("echo-test").await,
             h.manager.approve_plugin("echo-test").await,
         ] {
-            assert!(
-                matches!(result, Err(ExtensionError::StoreUnreadable(_))),
+            std::assert_matches!(
+                result,
+                Err(ExtensionError::StoreUnreadable(_)),
                 "a verb took a transition over an unreadable store: {result:?}"
             );
         }
@@ -781,14 +1580,12 @@ mcp_compatible = true
         h.scan().await;
 
         let state = h.state("echo-test").await;
-        assert!(
-            matches!(
-                state,
-                ExtensionState::Failed {
-                    reason: FailureReason::ConfigInvalid,
-                    ..
-                }
-            ),
+        std::assert_matches!(
+            state,
+            ExtensionState::Failed {
+                reason: FailureReason::ConfigInvalid,
+                ..
+            },
             "expected config_invalid for an escaping symlink, got {state:?}"
         );
         assert!(
@@ -824,14 +1621,12 @@ mcp_compatible = true
             .expect("scan hung on a FIFO plugin.toml");
 
         let state = h.state("echo-test").await;
-        assert!(
-            matches!(
-                state,
-                ExtensionState::Failed {
-                    reason: FailureReason::ConfigInvalid,
-                    ..
-                }
-            ),
+        std::assert_matches!(
+            state,
+            ExtensionState::Failed {
+                reason: FailureReason::ConfigInvalid,
+                ..
+            },
             "expected config_invalid for a FIFO manifest, got {state:?}"
         );
     }
@@ -988,11 +1783,9 @@ mcp_compatible = true
             .agents
             .get_template("writing_agent")
             .expect("the shipped template survives the plugin's disable");
-        assert!(
-            matches!(
-                shipped.source,
-                openalpaca_core::agent::template::AgentSource::Internal
-            ),
+        std::assert_matches!(
+            shipped.source,
+            openalpaca_core::agent::template::AgentSource::Internal,
             "and it is still the shipped one: {:?}",
             shipped.source
         );
@@ -1005,6 +1798,52 @@ mcp_compatible = true
             h.row("echo-test").await.agents.is_empty(),
             "a refused id is never recorded as the plugin's"
         );
+    }
+
+    /// The holder's row names a plugin refused its id (`plugin_refused`).
+    fn refused_by(plugin: &str) -> Vec<openalpaca_core::agent::registry::NotUsed> {
+        use openalpaca_core::agent::registry::{NotUsed, NotUsedReason, TemplateLayer};
+        vec![NotUsed {
+            layer: TemplateLayer::Plugin,
+            path: None,
+            reason: NotUsedReason::PluginRefused,
+            plugin: Some(plugin.to_string()),
+        }]
+    }
+
+    /// **A disabled plugin is no longer listed `plugin_refused` on the
+    /// holder's row** (subagent design §2.4 L-1). The refusal is recorded at
+    /// the plugin's load; T2 forgets it, so `GET /v1/agent-templates` does
+    /// not go on naming a plugin that is off, and a re-enable records it
+    /// again.
+    #[tokio::test]
+    async fn a_disabled_plugin_is_no_longer_listed_as_refused() {
+        let tmp = tempfile::tempdir().unwrap();
+        let dir = install_stub_plugin(
+            tmp.path(),
+            "echo-test",
+            "[types]\ntools = true\nagent = true\n",
+        );
+        std::fs::write(dir.join("agent-info.json"), r#"{"id":"writing_agent"}"#).unwrap();
+        let h = Harness::new(tmp.path());
+        assert!(
+            h.agents
+                .register_template(agent_template("writing_agent", &["file_read"]))
+        );
+        let not_used = |h: &Harness| h.agents.provenance("writing_agent").unwrap().not_used;
+
+        load_running_stub(&h, "echo-test").await;
+        assert_eq!(not_used(&h), refused_by("echo-test"), "listed at load");
+
+        h.manager.disable(&ext("echo-test")).await.unwrap();
+        assert!(
+            not_used(&h).is_empty(),
+            "a disabled plugin is still listed as refused: {:?}",
+            not_used(&h)
+        );
+
+        h.manager.enable(&ext("echo-test")).await.unwrap();
+        assert_eq!(not_used(&h), refused_by("echo-test"), "listed again");
     }
 
     /// Lay out a file skill directory, as `config/skills/<dir>/SKILL.md`.
@@ -1068,10 +1907,10 @@ mcp_compatible = true
             .skills
             .get("code-review")
             .expect("the file skill named like the plugin's skill id survives its unload");
-        assert!(matches!(
+        std::assert_matches!(
             survivor.source,
             openalpaca_core::orchestrator::skill_catalog::SkillSource::FileBased
-        ));
+        );
     }
 
     // ── C4 — T1 step 3: the dependent scan (§3.2 T1, §7.3) ───────────
@@ -1086,7 +1925,7 @@ mcp_compatible = true
                 singleton: false,
                 capabilities: caps.iter().map(|c| c.to_string()).collect(),
                 denied_capabilities: vec![],
-                temperature: 0.5,
+                temperature: None,
                 verbosity: "normal".into(),
                 model: None,
                 fallback_models: vec![],
@@ -1102,7 +1941,6 @@ mcp_compatible = true
         }
     }
 
-    #[allow(clippy::type_complexity)]
     fn withdrawn_frames(
         rx: &mut tokio::sync::broadcast::Receiver<openalpaca_core::events::SystemEvent>,
     ) -> Vec<(ExtensionId, ExtensionState, WithdrawalCause, Vec<String>, String)> {
@@ -1270,14 +2108,12 @@ mcp_compatible = true
         kill_out_of_band_and_sweep(&h, "echo-test").await;
         let rows = ExtensionSupervisor::list(&*h.manager).await;
         let row = rows.iter().find(|r| r.id.name == "echo-test").unwrap();
-        assert!(
-            matches!(
-                row.state,
-                ExtensionState::Failed {
-                    reason: FailureReason::Crashed,
-                    ..
-                }
-            ),
+        std::assert_matches!(
+            row.state,
+            ExtensionState::Failed {
+                reason: FailureReason::Crashed,
+                ..
+            },
             "expected failed/crashed, got {:?}",
             row.state
         );
@@ -1446,26 +2282,19 @@ mcp_compatible = true
     }
 
     /// **S2 residue guard** (design §3.2 T2 step 4): after `disable` the row
-    /// reads `connector: null, provider: null` and the plugin's recorded model
-    /// set is empty.
-    ///
-    /// The models third is asserted against `PluginState.registered_models` —
-    /// what E3 recorded and T2 clears — because that is the only place a plugin
-    /// provider's models exist today: the provider bridge is not wired into
-    /// `LlmRouter` yet, so a freshly built `ModelRegistry` is empty whatever the
-    /// supervisor does, and `LlmRouter::list_models_for_provider` is a live
-    /// network call (design §3.2 T2). When the bridge lands, the deregistration
-    /// goes beside T2's clear and this assertion gains a second half.
+    /// reads `connector: null`; `provider` reads `null` on every row, enabled
+    /// or not, since the plugin provider type is removed (M86) — even when
+    /// the plugin answers `provider/info` with a name and models.
     #[tokio::test]
-    async fn a_disabled_plugin_leaves_no_connector_or_provider_residue() {
+    async fn a_disabled_plugin_leaves_no_connector_residue_and_no_row_names_a_provider() {
         let tmp = tempfile::tempdir().unwrap();
         let dir = install_stub_plugin(
             tmp.path(),
             "echo-test",
             "[types]\ntools = true\nconnector = true\nprovider = true\n",
         );
-        // The stub answers `provider/info` from a file when one is present, so
-        // the load has real models to record.
+        // The stub answers `provider/info` from a file when one is present:
+        // what the parent recorded as the row's provider and its models.
         std::fs::write(
             dir.join("provider-info.json"),
             r#"{"provider_name":"echo-provider","models":[{"id":"echo-small"},{"id":"echo-large"}]}"#,
@@ -1474,26 +2303,18 @@ mcp_compatible = true
         let h = Harness::new(tmp.path());
         load_running_stub(&h, "echo-test").await;
 
-        // Whatever E4 registered is on the row while it is enabled.
+        // Whatever E4 registered is on the row while it is enabled; no
+        // provider is.
         let row = h.row("echo-test").await;
         assert!(row.connector.is_some(), "the stub declared a connector");
-        assert_eq!(row.provider.as_deref(), Some("echo-provider"));
-        assert_eq!(
-            h.registered("echo-test").await.models,
-            vec!["echo-small".to_string(), "echo-large".to_string()],
-            "the load recorded no models to withdraw"
-        );
+        assert_eq!(row.provider, None, "an enabled row names a provider");
 
         h.manager.disable(&ext("echo-test")).await.unwrap();
 
         let row = h.row("echo-test").await;
         assert_eq!(row.state, ExtensionState::Disabled);
         assert_eq!(row.connector, None, "a disabled row still names a connector");
-        assert_eq!(row.provider, None, "a disabled row still names a provider");
-        assert!(
-            h.registered("echo-test").await.models.is_empty(),
-            "a disabled plugin's provider models are still registered"
-        );
+        assert_eq!(row.provider, None, "a disabled row names a provider");
     }
 
     /// **`two_dirs_same_manifest_name_second_is_config_invalid`** (design §2.2
@@ -1529,15 +2350,14 @@ mcp_compatible = true
 
         // The impostor is parked, with the bit as read and no child.
         let row = h.row("echo-copy").await;
-        assert!(
-            matches!(
+        std::assert_matches!(
                 &row.state,
                 ExtensionState::Failed {
                     reason: FailureReason::ConfigInvalid,
                     detail,
                     ..
                 } if detail == "manifest name does not match directory"
-            ),
+            ,
             "expected the name-mismatch park, got {:?}",
             row.state
         );
@@ -1577,14 +2397,12 @@ mcp_compatible = true
         h.manager.permission_gate.approve("echo-copy", &[]).unwrap();
         h.scan().await;
 
-        assert!(
-            matches!(
-                h.state("echo-copy").await,
-                ExtensionState::Failed {
-                    reason: FailureReason::ConfigInvalid,
-                    ..
-                }
-            ),
+        std::assert_matches!(
+            h.state("echo-copy").await,
+            ExtensionState::Failed {
+                reason: FailureReason::ConfigInvalid,
+                ..
+            },
             "the scan did not park the impostor"
         );
         assert_eq!(spawn_count(&impostor), 0);
@@ -1592,15 +2410,14 @@ mcp_compatible = true
     }
 
     fn assert_still_parked(row: &ExtensionRecord, impostor: &Path, verb: &str) {
-        assert!(
-            matches!(
+        std::assert_matches!(
                 &row.state,
                 ExtensionState::Failed {
                     reason: FailureReason::ConfigInvalid,
                     detail,
                     ..
                 } if detail == "manifest name does not match directory"
-            ),
+            ,
             "{verb} left the name-mismatch row at {:?}",
             row.state
         );
@@ -1679,14 +2496,12 @@ mcp_compatible = true
 
         assert!(!h.holds_process("echo-test").await, "T4 kept the dead handle");
         assert!(!h.has_tool("echo-test::echo"), "the reaper published nothing");
-        assert!(
-            matches!(
-                h.state("echo-test").await,
-                ExtensionState::Failed {
-                    reason: FailureReason::Crashed,
-                    ..
-                }
-            ),
+        std::assert_matches!(
+            h.state("echo-test").await,
+            ExtensionState::Failed {
+                reason: FailureReason::Crashed,
+                ..
+            },
             "the reaper wrote state"
         );
     }
@@ -1971,8 +2786,9 @@ mcp_compatible = true
             h.manager.approve_plugin("echo-test").await,
             h.manager.deny_plugin("echo-test").await,
         ] {
-            assert!(
-                matches!(result, Err(ExtensionError::Orphaned)),
+            std::assert_matches!(
+                result,
+                Err(ExtensionError::Orphaned),
                 "an orphaned row accepted a verb: {result:?}"
             );
         }
@@ -2017,14 +2833,12 @@ mcp_compatible = true
         h.manager.permission_gate.approve("echo-test", &[]).unwrap();
         h.scan().await;
 
-        assert!(
-            matches!(
-                h.state("echo-test").await,
-                ExtensionState::Failed {
-                    reason: FailureReason::NeedsConfig { .. },
-                    ..
-                }
-            ),
+        std::assert_matches!(
+            h.state("echo-test").await,
+            ExtensionState::Failed {
+                reason: FailureReason::NeedsConfig { .. },
+                ..
+            },
             "expected the unresolved-secret park, got {:?}",
             h.state("echo-test").await
         );
@@ -2062,8 +2876,9 @@ mcp_compatible = true
             .manager
             .set_plugin_config("echo-test", "token", toml::Value::String("sk-live".into()))
             .await;
-        assert!(
-            matches!(refused, Err(PluginError::PermissionDenied(_))),
+        std::assert_matches!(
+            refused,
+            Err(PluginError::PermissionDenied(_)),
             "a sensitive key was accepted: {refused:?}"
         );
 
@@ -2075,8 +2890,9 @@ mcp_compatible = true
             .manager
             .set_plugin_config("echo-test", "token", toml::Value::String("sk-live".into()))
             .await;
-        assert!(
-            matches!(refused, Err(PluginError::NoDeclaration(_))),
+        std::assert_matches!(
+            refused,
+            Err(PluginError::NoDeclaration(_)),
             "a write with no declaration in hand was accepted: {refused:?}"
         );
         assert!(
@@ -2091,10 +2907,7 @@ mcp_compatible = true
             .manager
             .set_plugin_config("echo-test", "endpoint", toml::Value::String("https://x".into()))
             .await;
-        assert!(
-            matches!(refused, Err(PluginError::NoDeclaration(_))),
-            "{refused:?}"
-        );
+        std::assert_matches!(refused, Err(PluginError::NoDeclaration(_)), "{refused:?}");
         assert!(!config_path.exists());
     }
 
@@ -2133,18 +2946,14 @@ mcp_compatible = true
             "a traversal entry was orphaned into the ledger: {rows:?}"
         );
         // 404, never 403: the daemon names no resource for this id.
-        assert!(
-            matches!(
-                h.manager.known(&ext("../escape")).await,
-                Err(ExtensionError::NotFound(_))
-            ),
+        std::assert_matches!(
+            h.manager.known(&ext("../escape")).await,
+            Err(ExtensionError::NotFound(_)),
             "a traversal id read as known"
         );
-        assert!(
-            matches!(
-                h.manager.uninstall("../escape", true).await,
-                Err(InstallError::Extension(ExtensionError::NotFound(_)))
-            ),
+        std::assert_matches!(
+            h.manager.uninstall("../escape", true).await,
+            Err(InstallError::Extension(ExtensionError::NotFound(_))),
             "uninstall accepted a traversal id"
         );
     }
@@ -2395,13 +3204,11 @@ mcp_compatible = true
         // A second bring-up of the same plugin, published behind the live one's
         // back.
         let manifest = PluginManifest::from_dir(&dir).unwrap();
-        let intruder = PluginProcess::spawn(&manifest, &dir).unwrap();
+        let intruder = PluginProcess::spawn(&manifest, &dir, CHANNEL_DEFAULT_TIMEOUT).unwrap();
         let intruder_pid = intruder.child.id().expect("the second child has a pid");
         let discovered = Discovered {
             tools: vec![mock_plugin_tool("echo-test::intruder", "echo-test")],
             connector: None,
-            provider: None,
-            models: Vec::new(),
             skill: None,
             agent: None,
         };
@@ -2411,8 +3218,7 @@ mcp_compatible = true
             .publish(&ext("echo-test"), &dir, manifest, intruder, discovered)
             .await
             .expect_err("E5 published over a live handle");
-        assert!(
-            matches!(err, PluginError::HandleHeld(ref id) if id == "echo-test"),
+        std::assert_matches!(err, PluginError::HandleHeld(ref id) if id == "echo-test",
             "expected HandleHeld, got {err:?}"
         );
 
@@ -2438,6 +3244,119 @@ mcp_compatible = true
         assert_eq!(h.provider_handle("echo-test").await, live_handle);
         assert!(h.has_tool("echo-test::echo"));
         assert_eq!(h.stub_caps(), 1);
+    }
+
+    /// **The `HandleHeld` unwind takes back the refusal its attempt
+    /// recorded** (subagent design §2.4 L-1): an attempt refused at E5 whose
+    /// agent template was refused an id at E4 leaves no `plugin_refused`
+    /// entry on the holder's row.
+    #[tokio::test]
+    async fn a_refused_publish_leaves_no_plugin_refused_entry() {
+        let tmp = tempfile::tempdir().unwrap();
+        let dir = install_stub_plugin(tmp.path(), "echo-test", "[types]\ntools = true\n");
+        let h = Harness::new(tmp.path());
+        assert!(
+            h.agents
+                .register_template(agent_template("writing_agent", &["file_read"]))
+        );
+        load_running_stub(&h, "echo-test").await;
+
+        let manifest = PluginManifest::from_dir(&dir).unwrap();
+        let intruder = PluginProcess::spawn(&manifest, &dir, CHANNEL_DEFAULT_TIMEOUT).unwrap();
+        let generation = h.manager.ledger.generation(&ext("echo-test")).unwrap();
+        let bridge = Arc::new(PluginAgentBridge::new(
+            "echo-test".to_string(),
+            "writing_agent".to_string(),
+            intruder.channel.clone(),
+            generation,
+            Arc::clone(&h.manager.ledger),
+        ));
+        let discovered = Discovered {
+            tools: Vec::new(),
+            connector: None,
+            skill: None,
+            agent: Some(build_agent_template_from_info(
+                &serde_json::json!({"id": "writing_agent"}),
+                "echo-test",
+                bridge,
+            )),
+        };
+
+        let err = h
+            .manager
+            .publish(&ext("echo-test"), &dir, manifest, intruder, discovered)
+            .await
+            .expect_err("E5 published over a live handle");
+        std::assert_matches!(err, PluginError::HandleHeld(ref id) if id == "echo-test",
+            "expected HandleHeld, got {err:?}"
+        );
+
+        let not_used = h.agents.provenance("writing_agent").unwrap().not_used;
+        assert!(
+            not_used.is_empty(),
+            "the refused attempt left its refusal listed: {not_used:?}"
+        );
+    }
+
+    /// **The `HandleHeld` unwind leaves the live load's refusal listed**
+    /// (subagent design §2.4 L-1): when the live load of the plugin was
+    /// itself refused the id, a second attempt refused at E5 recorded
+    /// nothing, so it takes nothing back. The unwind used to forget every
+    /// refusal of the plugin's, and the holder's row stopped naming a
+    /// plugin that is still on until its next load.
+    #[tokio::test]
+    async fn a_refused_publish_leaves_the_live_loads_refusal_listed() {
+        let tmp = tempfile::tempdir().unwrap();
+        let dir = install_stub_plugin(
+            tmp.path(),
+            "echo-test",
+            "[types]\ntools = true\nagent = true\n",
+        );
+        std::fs::write(dir.join("agent-info.json"), r#"{"id":"writing_agent"}"#).unwrap();
+        let h = Harness::new(tmp.path());
+        assert!(
+            h.agents
+                .register_template(agent_template("writing_agent", &["file_read"]))
+        );
+        load_running_stub(&h, "echo-test").await;
+        let not_used = |h: &Harness| h.agents.provenance("writing_agent").unwrap().not_used;
+        assert_eq!(not_used(&h), refused_by("echo-test"), "listed at load");
+
+        let manifest = PluginManifest::from_dir(&dir).unwrap();
+        let intruder = PluginProcess::spawn(&manifest, &dir, CHANNEL_DEFAULT_TIMEOUT).unwrap();
+        let generation = h.manager.ledger.generation(&ext("echo-test")).unwrap();
+        let bridge = Arc::new(PluginAgentBridge::new(
+            "echo-test".to_string(),
+            "writing_agent".to_string(),
+            intruder.channel.clone(),
+            generation,
+            Arc::clone(&h.manager.ledger),
+        ));
+        let discovered = Discovered {
+            tools: Vec::new(),
+            connector: None,
+            skill: None,
+            agent: Some(build_agent_template_from_info(
+                &serde_json::json!({"id": "writing_agent"}),
+                "echo-test",
+                bridge,
+            )),
+        };
+
+        let err = h
+            .manager
+            .publish(&ext("echo-test"), &dir, manifest, intruder, discovered)
+            .await
+            .expect_err("E5 published over a live handle");
+        std::assert_matches!(err, PluginError::HandleHeld(ref id) if id == "echo-test",
+            "expected HandleHeld, got {err:?}"
+        );
+
+        assert_eq!(
+            not_used(&h),
+            refused_by("echo-test"),
+            "the refused attempt took back the live load's refusal"
+        );
     }
 
     /// **A reload over an unreadable store leaves the row alone** (design §3.2:
@@ -2467,8 +3386,9 @@ mcp_compatible = true
             .reload(&ext("echo-test"))
             .await
             .expect_err("a reload over an unreadable store must refuse");
-        assert!(
-            matches!(err, ExtensionError::StoreUnreadable(_)),
+        std::assert_matches!(
+            err,
+            ExtensionError::StoreUnreadable(_),
             "expected store_unreadable, got {err:?}"
         );
 
@@ -2890,11 +3810,9 @@ mod install_tests {
 
         let error = h.manager.install_from_path(&source).await.unwrap_err();
 
-        assert!(
-            matches!(
-                error,
-                InstallError::Extension(ExtensionError::WriteFailed(_))
-            ),
+        std::assert_matches!(
+            error,
+            InstallError::Extension(ExtensionError::WriteFailed(_)),
             "the store write is what failed: {error:?}"
         );
         assert!(
@@ -3043,11 +3961,12 @@ mod install_tests {
         );
     }
 
-    /// **An unwired type is warned about, never refused.** `types.provider`
-    /// and `types.connector` are probed at load and were listed in the preview
-    /// with no caveat, though neither bridge has a production caller.
+    /// **An unused type is warned about, never refused.** `types.connector`
+    /// is told its bridge is not wired; `types.provider` is told the plugin
+    /// provider type is removed (M86, D-I (revised)), and never that a bridge
+    /// is not wired.
     #[tokio::test]
-    async fn an_unwired_type_installs_with_a_warning_that_its_bridge_is_not_wired() {
+    async fn an_unused_type_installs_with_a_warning() {
         let h = Harness::new();
         let source = h.source(
             "echo-test",
@@ -3057,8 +3976,15 @@ mod install_tests {
 
         let summary = h.manager.validate_source(&source).await.expect("validate");
         let warnings = summary_warnings(&summary);
+        let provider: Vec<&String> = warnings
+            .iter()
+            .filter(|w| w.contains("types.provider"))
+            .collect();
+        assert_eq!(provider.len(), 1, "one provider warning: {warnings:?}");
         assert!(
-            warnings.iter().any(|w| w.contains("types.provider") && w.contains("provider bridge is not wired")),
+            provider[0].contains("the plugin provider type is removed")
+                && provider[0].contains("Settings → Models & keys")
+                && !provider[0].contains("not wired"),
             "the provider warning: {warnings:?}"
         );
         assert!(
@@ -3078,11 +4004,43 @@ mod install_tests {
                 .record
                 .warnings
                 .iter()
-                .any(|w| w.contains("provider bridge is not wired")),
+                .any(|w| w.contains("the plugin provider type is removed")),
             "the install's row: {:?}",
             outcome.record.warnings
         );
         assert!(h.root.join("echo-test/plugin.toml").is_file());
+
+        // M86: the plugin approves and loads, its tools register, and nothing
+        // it would offer as a provider is taken — though the stub answers
+        // `provider/info` with a name and models when asked.
+        std::fs::write(
+            h.root.join("echo-test/provider-info.json"),
+            r#"{"provider_name":"echo-provider","models":[{"id":"echo-small"}]}"#,
+        )
+        .unwrap();
+        let approved = h
+            .manager
+            .approve_plugin("echo-test")
+            .await
+            .expect("approve");
+        assert!(
+            approved
+                .warnings
+                .iter()
+                .any(|w| w.contains("the plugin provider type is removed")),
+            "the approve's row: {:?}",
+            approved.warnings
+        );
+        let row = h.row("echo-test").await;
+        assert_eq!(row.state, ExtensionState::Enabled);
+        assert!(
+            h.tools
+                .registered_tool_names()
+                .iter()
+                .any(|n| n == "echo-test::echo"),
+            "a provider plugin's tools register"
+        );
+        assert_eq!(row.provider, None, "an enabled row names no provider");
     }
 
     /// A manifest that says only what OpenAlpaca reads carries no warning —
@@ -3099,6 +4057,15 @@ mod install_tests {
              [config.api_key]\ntype = \"secret\"\nrequired = true\nsensitive = true\n\
              description = \"key\"\ndefault = \"\"\n",
         );
+        // A `[config]` is read only by a plugin opened with OpenAlpaca's own
+        // `initialize`: on an `mcp_compatible` one it warns (N-PLUG-5).
+        let manifest = source.join("plugin.toml");
+        let text = std::fs::read_to_string(&manifest).unwrap();
+        std::fs::write(
+            &manifest,
+            text.replace("mcp_compatible = true", "mcp_compatible = false"),
+        )
+        .unwrap();
 
         let summary = h.manager.validate_source(&source).await.expect("validate");
         assert!(
@@ -3213,10 +4180,7 @@ mod install_tests {
         let h = Harness::new();
         let source = h.source("echo-test", "0.1.0", "");
         let error = h.manager.update_from_path("echo-test", &source).await.unwrap_err();
-        assert!(matches!(
-            error,
-            InstallError::Extension(ExtensionError::NotFound(_))
-        ));
+        std::assert_matches!(error, InstallError::Extension(ExtensionError::NotFound(_)));
     }
 
     /// **The order, on the other verb** (D7). The update path is the worse of
@@ -3262,11 +4226,9 @@ mod install_tests {
             .await
             .unwrap_err();
 
-        assert!(
-            matches!(
-                error,
-                InstallError::Extension(ExtensionError::WriteFailed(_))
-            ),
+        std::assert_matches!(
+            error,
+            InstallError::Extension(ExtensionError::WriteFailed(_)),
             "the store write is what failed: {error:?}"
         );
         assert!(
@@ -3751,9 +4713,6 @@ mod install_tests {
     async fn uninstalling_an_unknown_plugin_is_not_found() {
         let h = Harness::new();
         let error = h.manager.uninstall("nope", true).await.unwrap_err();
-        assert!(matches!(
-            error,
-            InstallError::Extension(ExtensionError::NotFound(_))
-        ));
+        std::assert_matches!(error, InstallError::Extension(ExtensionError::NotFound(_)));
     }
 }

@@ -8,7 +8,12 @@
  * `parseErrorPayload` handles all of them so callers never have to.
  */
 
-import { ensureConnection, httpUrl, type ConnectionInfo } from "./connection";
+import {
+  ensureConnection,
+  httpUrl,
+  refreshConnection,
+  type ConnectionInfo,
+} from "./connection";
 
 export type QueryValue = string | number | boolean | undefined | null;
 
@@ -25,17 +30,23 @@ export interface ApiRequestInit {
 
 /** A non-2xx response, or a transport failure, from the daemon. */
 export class ApiError extends Error {
+  readonly status: number;
+  /** Envelope error code (`NOT_FOUND`, `STREAM_NOT_FOUND`, …) when present. */
+  readonly code: string | null;
+  /** The parsed body, for callers that need `cap`, `details`, etc. */
+  readonly detail: unknown;
   override readonly name = "ApiError";
 
   constructor(
     message: string,
-    readonly status: number,
-    /** Envelope error code (`NOT_FOUND`, `STREAM_NOT_FOUND`, …) when present. */
-    readonly code: string | null = null,
-    /** The parsed body, for callers that need `cap`, `details`, etc. */
-    readonly detail: unknown = null,
+    status: number,
+    code: string | null = null,
+    detail: unknown = null,
   ) {
     super(message);
+    this.status = status;
+    this.code = code;
+    this.detail = detail;
   }
 
   /** `status === 0` means the request never reached the daemon. */
@@ -151,12 +162,48 @@ function buildHeaders(info: ConnectionInfo, init: ApiRequestInit): Headers {
   return headers;
 }
 
-/** Issue an authenticated request and return the raw `Response`. */
+/**
+ * Issue an authenticated request and return the raw `Response`.
+ *
+ * The daemon rotates its token while it runs and honours the one it replaced
+ * only until that one's own expiry (T21), so a window open longer than that
+ * holds a token it refuses: a `401` reads the connection again
+ * (`refreshConnection`, one read for every request refused together) and the
+ * request is sent once more, only when the same daemon names another token.
+ */
 export async function apiRequest(
   path: string,
   init: ApiRequestInit = {},
 ): Promise<Response> {
   const info = await ensureConnection();
+  const response = await send(info, path, init);
+  if (response.status !== 401) return checked(response);
+
+  let fresh: ConnectionInfo;
+  try {
+    fresh = await refreshConnection();
+  } catch {
+    return checked(response);
+  }
+  // The same daemon with another token: the first send was refused before
+  // any handler ran, so sending it again does nothing twice. Another daemon
+  // (a restart) is the instance listeners' to handle, not this request's.
+  if (fresh.token === info.token || fresh.instanceId !== info.instanceId) {
+    return checked(response);
+  }
+  return checked(await send(fresh, path, init));
+}
+
+async function checked(response: Response): Promise<Response> {
+  if (!response.ok) throw await errorFromResponse(response);
+  return response;
+}
+
+async function send(
+  info: ConnectionInfo,
+  path: string,
+  init: ApiRequestInit,
+): Promise<Response> {
   const url = httpUrl(info, `${path}${buildQuery(init.query)}`);
 
   let response: Response;
@@ -176,8 +223,6 @@ export async function apiRequest(
       cause instanceof Error ? cause.message : "Network request failed";
     throw new ApiError(message, 0, null, cause);
   }
-
-  if (!response.ok) throw await errorFromResponse(response);
   return response;
 }
 

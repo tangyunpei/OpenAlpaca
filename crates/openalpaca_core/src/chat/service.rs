@@ -327,9 +327,11 @@ impl ChatService {
     /// Resolve chat attachments from DB and wait briefly for processing completion.
     ///
     /// Returns all attachments even when some are not ready yet (timeout/error path),
-    /// with `extracted_text=None` for those assets so downstream logic can render
-    /// a safe "pending" fallback instead of stale/partial text.
-    async fn resolve_attachments_with_wait(
+    /// with `extracted_text=None` for those assets so downstream logic renders a
+    /// placeholder instead of stale/partial text: "pending" for a row still
+    /// `Uploaded` or `Processing`, "failed" (`extraction_failed`) for one in
+    /// `Error`. The row's `extract_error` is never carried.
+    pub(crate) async fn resolve_attachments_with_wait(
         db: Database,
         attachment_refs: &[AttachmentRef],
         principal: &str,
@@ -408,6 +410,7 @@ impl ChatService {
                     size_bytes: asset.size_bytes,
                     extracted_text,
                     storage_path: asset.storage_path,
+                    extraction_failed: matches!(asset.status, FileAssetStatus::Error),
                 }
             })
             .collect())
@@ -422,9 +425,8 @@ impl ChatService {
             let repo = FileAssetRepository::new(&db);
             let mut out = Vec::with_capacity(attachment_refs.len());
             for att_ref in &attachment_refs {
-                let asset = match repo.get_by_id(&att_ref.file_id)? {
-                    Some(a) => a,
-                    None => anyhow::bail!("Attachment not found: {}", att_ref.file_id),
+                let Some(asset) = repo.get_by_id(&att_ref.file_id)? else {
+                    anyhow::bail!("Attachment not found: {}", att_ref.file_id);
                 };
                 if asset.owner_id != principal {
                     anyhow::bail!("Access denied to attachment: {}", att_ref.file_id);
@@ -528,6 +530,93 @@ mod tests {
         assert!(resolved[0].extracted_text.is_none());
     }
 
+    /// Insert one row with its `extract_error` and resolve it with no wait.
+    async fn resolve_one(
+        status: FileAssetStatus,
+        extracted_text: Option<&str>,
+        extract_error: Option<&str>,
+    ) -> crate::gateway::ResolvedAttachment {
+        let db = setup_db();
+        let mut asset = build_asset("a-1", status, extracted_text);
+        asset.extract_error = extract_error.map(ToString::to_string);
+        FileAssetRepository::new(&db).insert(&asset).unwrap();
+        let refs = vec![AttachmentRef {
+            file_id: "a-1".to_string(),
+            caption: None,
+        }];
+        let mut resolved = ChatService::resolve_attachments_with_wait(db, &refs, "u1", 0, 20)
+            .await
+            .unwrap();
+        assert_eq!(resolved.len(), 1);
+        resolved.remove(0)
+    }
+
+    /// ATTACH-PLACEHOLDER: an `Error` row from an ordinary failed
+    /// extraction resolves as failed, with no text, and its error's own
+    /// text is carried nowhere in the resolved attachment.
+    #[tokio::test]
+    async fn an_error_row_resolves_as_failed_without_its_error_text() {
+        let resolved = resolve_one(
+            FileAssetStatus::Error,
+            None,
+            Some("[attempt:1] PDF parse failed: SENTINEL-ORDINARY xref broken"),
+        )
+        .await;
+        assert!(resolved.extraction_failed);
+        assert!(resolved.extracted_text.is_none());
+        let carried = format!("{resolved:?}");
+        assert!(!carried.contains("SENTINEL-ORDINARY"), "{carried}");
+        assert!(!carried.contains("[attempt:"), "{carried}");
+    }
+
+    /// ATTACH-PLACEHOLDER: a row a stop interrupted (the worker's
+    /// `INTERRUPTED_REASON` behind its attempt tag) resolves as failed too,
+    /// and neither the tag nor the reason is carried.
+    #[tokio::test]
+    async fn an_interrupted_error_row_resolves_as_failed_without_its_tag() {
+        let resolved = resolve_one(
+            FileAssetStatus::Error,
+            None,
+            Some(
+                "[attempt:2] extraction was interrupted: the daemon stopped before it \
+                 finished",
+            ),
+        )
+        .await;
+        assert!(resolved.extraction_failed);
+        assert!(resolved.extracted_text.is_none());
+        let carried = format!("{resolved:?}");
+        assert!(!carried.contains("[attempt:"), "{carried}");
+        assert!(!carried.contains("interrupted"), "{carried}");
+    }
+
+    /// ATTACH-PLACEHOLDER: a `Processing` row carries its attempt tag in
+    /// `extract_error` while it extracts; it is still pending, not failed.
+    #[tokio::test]
+    async fn a_processing_row_with_its_attempt_tag_is_still_pending() {
+        let resolved = resolve_one(
+            FileAssetStatus::Processing,
+            None,
+            Some("[attempt:1] extraction in progress"),
+        )
+        .await;
+        assert!(!resolved.extraction_failed);
+        assert!(resolved.extracted_text.is_none());
+        assert!(!format!("{resolved:?}").contains("[attempt:"));
+    }
+
+    /// ATTACH-PLACEHOLDER: a `Ready` row keeps its text and an `Uploaded`
+    /// one stays pending; neither reads as failed.
+    #[tokio::test]
+    async fn ready_and_uploaded_rows_are_not_failed() {
+        let ready = resolve_one(FileAssetStatus::Ready, Some("hello"), None).await;
+        assert!(!ready.extraction_failed);
+        assert_eq!(ready.extracted_text.as_deref(), Some("hello"));
+        let uploaded = resolve_one(FileAssetStatus::Uploaded, None, None).await;
+        assert!(!uploaded.extraction_failed);
+        assert!(uploaded.extracted_text.is_none());
+    }
+
     #[tokio::test]
     async fn test_resolve_attachments_with_wait_timeout_keeps_attachment() {
         let db = setup_db();
@@ -626,7 +715,6 @@ mod tests {
         release: AsyncMutex<Option<oneshot::Receiver<()>>>,
     }
 
-    #[async_trait::async_trait]
     impl MessageHandler for ParkedStreamingHandler {
         async fn handle(&self, request: HandleRequest) -> Result<HandleResult, String> {
             let sink = request
@@ -651,7 +739,6 @@ mod tests {
     /// provider with no streaming whose answer arrives whole.
     struct SilentHandler;
 
-    #[async_trait::async_trait]
     impl MessageHandler for SilentHandler {
         async fn handle(&self, _request: HandleRequest) -> Result<HandleResult, String> {
             Ok(HandleResult::text("the whole answer".to_string()))
@@ -662,7 +749,6 @@ mod tests {
     /// conversation (design 11 §5).
     struct ContinuingHandler;
 
-    #[async_trait::async_trait]
     impl MessageHandler for ContinuingHandler {
         async fn handle(&self, _request: HandleRequest) -> Result<HandleResult, String> {
             Ok(HandleResult {
@@ -678,7 +764,9 @@ mod tests {
         }
     }
 
-    fn service_with(handler: Arc<dyn MessageHandler>) -> (ChatService, Arc<ChatStreamManager>) {
+    fn service_with(
+        handler: Arc<impl MessageHandler + 'static>,
+    ) -> (ChatService, Arc<ChatStreamManager>) {
         let bus = EventBus::default();
         let gateway = Arc::new(crate::gateway::Gateway::new(
             Arc::new(SharedContext::new()),

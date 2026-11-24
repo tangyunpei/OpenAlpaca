@@ -343,7 +343,7 @@ async fn no_episode_before_four_user_turns() {
 #[tokio::test]
 async fn a_close_makes_two_calls_with_two_labels_when_both_are_due() {
     let mut config = DaemonConfig::default();
-    config.orchestrator.costs.summary_model = Some("claude-haiku-4-5-20251001".into());
+    config.orchestrator.costs.summary_model = Some("claude-haiku-5-5".into());
     let scene = Scene::with(
         Scripted::new(vec![trip_state(), trip_state(), trip_summary()]),
         config,
@@ -377,12 +377,10 @@ async fn a_close_makes_two_calls_with_two_labels_when_both_are_due() {
     }
     assert!(episode.contains("<today>2026-"), "{episode}");
     let request = scene.model.seen.lock().unwrap()[2].clone();
-    assert_eq!(request.model.as_deref(), Some("claude-haiku-4-5-20251001"));
-    assert!(
-        matches!(
-            request.thinking,
-            Some(openalpaca_llm::ThinkingConfig::Disabled)
-        ),
+    assert_eq!(request.model.as_deref(), Some("claude-haiku-5-5"));
+    std::assert_matches!(
+        request.thinking,
+        Some(openalpaca_llm::ThinkingConfig::Disabled),
         "{:?}",
         request.thinking
     );
@@ -481,11 +479,9 @@ async fn an_episode_is_one_active_extracted_other_note_with_the_designs_fields()
     );
 
     let request = scene.model.first_request();
-    assert!(
-        matches!(
-            request.thinking,
-            Some(openalpaca_llm::ThinkingConfig::Disabled)
-        ),
+    std::assert_matches!(
+        request.thinking,
+        Some(openalpaca_llm::ThinkingConfig::Disabled),
         "{:?}",
         request.thinking
     );
@@ -1596,7 +1592,7 @@ async fn a_30_minute_quiet_period_makes_the_conversation_due_for_its_episode() {
         .turn_started(uuid::Uuid::new_v4(), "user1:cli", false);
     guard.attach_session(&few);
     drop(guard);
-    tokio::time::advance(std::time::Duration::from_secs(31 * 60)).await;
+    tokio::time::advance(std::time::Duration::from_mins(31)).await;
     scene.queue.sweep().await;
     assert!(
         !scene.queue.is_episode_due(&few),

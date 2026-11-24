@@ -9,25 +9,25 @@ mod types;
 
 pub use fallback::{flatten_messages, truncate_messages_for_cli};
 pub use types::{
-    LlmCapacityInfo, LlmRouterError, ProviderEntry, RateHeadroom, RequestContext, RoutedStream,
+    AliasResolution, LlmRouterError, ProviderEntry, RateHeadroom, RequestContext, RoutedStream,
     RouterRequest,
 };
 
-use crate::LlmProvider;
 use crate::config::LlmRuntimeConfig;
 use crate::keys::key_pool::{
     ApiKey, KeyGuard, KeyPool, KeyStatus, ProviderType, SelectionStrategy,
 };
 use crate::routing::cost_tracker::CostTracker;
+use crate::routing::model_alias::{ALIAS_TABLE, ModelAlias, compiled_alias};
 use crate::routing::model_registry::ModelRegistry;
 use crate::routing::rate_limiter::{RateLimitConfig, RateLimiterRegistry};
+use crate::types::{ChatRequest, ThinkingConfig, ThinkingDisplay, ToolChoice};
+use crate::{DynLlmProvider, LlmProvider};
 use arc_swap::ArcSwap;
 
 // Re-export types used by tests via `use super::*;`
 #[cfg(test)]
 use crate::error::LlmError;
-#[cfg(test)]
-use crate::keys::key_pool::CallResult;
 #[cfg(test)]
 use crate::types::*;
 use dashmap::{DashMap, DashSet};
@@ -49,6 +49,43 @@ pub(super) fn keyless_slot(provider_name: &str) -> KeyGuard {
     }
 }
 
+/// The call to `entry`'s provider that failed with `error` after `elapsed`,
+/// as the spent local call it may be (LOCAL-HOUR-NO-RETRY, the owner's
+/// answer of 2026-11-12): a provider that needs no key, a request timeout —
+/// the non-streaming deadline or the read gap, both the provider's
+/// [`LlmProvider::request_timeout`] — and at least that long gone. The rule
+/// is the call's own figure, not a fixed hour: the seeded 3,600 s or the
+/// person's own. The OS's TCP timeout, which reqwest reports as the same
+/// kind, before the figure is up, and a provider that names no figure, keep
+/// today's retries. `None` for every other failure.
+pub(super) fn spent_local_call(
+    entry: &ProviderEntry,
+    model: &str,
+    error: &crate::error::LlmError,
+    elapsed: std::time::Duration,
+) -> Option<LlmRouterError> {
+    use crate::error::{LlmError, TransportKind};
+    let provider = &entry.provider;
+    if provider.requires_key() {
+        return None;
+    }
+    let LlmError::Transport {
+        kind: TransportKind::RequestTimeout,
+        ..
+    } = error
+    else {
+        return None;
+    };
+    let timeout = provider.request_timeout()?;
+    (elapsed >= timeout).then(|| LlmRouterError::LocalCallTimedOut {
+        model: model.to_string(),
+        provider: provider.name().to_string(),
+        timeout_secs: timeout.as_secs(),
+        // A rung's is marked by `try_fallback`, which knows it is one.
+        asked: true,
+    })
+}
+
 /// The LLM Router — routes requests to providers with key rotation and fallback.
 pub struct LlmRouter {
     pub(super) providers: DashMap<ProviderType, ProviderEntry>,
@@ -60,7 +97,7 @@ pub struct LlmRouter {
     pub cost_tracker: Arc<CostTracker>,
     default_model: ArcSwap<String>,
     /// CLI backend providers for fallback (e.g. `claude` CLI, `codex` CLI).
-    pub(super) cli_backends: DashMap<ProviderType, Arc<dyn LlmProvider>>,
+    pub(super) cli_backends: DashMap<ProviderType, Arc<DynLlmProvider<'static>>>,
     /// Hot-swappable runtime config (timeouts, endpoints, env vars, provider defaults).
     runtime_config: ArcSwap<LlmRuntimeConfig>,
     /// Limits concurrent in-flight LLM API calls to prevent rate-limit stampedes
@@ -74,6 +111,21 @@ pub struct LlmRouter {
     /// (requested → effective) pairs already announced, so a substitution is
     /// visible once per pair instead of once per round (L3).
     pub(super) substitutions_logged: DashSet<(String, String)>,
+    /// (alias, provider) pairs whose collapse on a mixed install — to the
+    /// parent's model, or the default where the parent is not routable — was
+    /// announced (M-5), so it is said once per pair.
+    pub(super) alias_collapses_logged: DashSet<(ModelAlias, String)>,
+    /// Models whose refusal of a forced tool choice was announced — a forced
+    /// choice sent to one as `auto` is said once a model (C7a).
+    pub(super) forced_choices_logged: DashSet<String>,
+    /// Models a keyed provider on a local server listed with no context
+    /// window, announced once a model (MODEL-ROWS, *Rev 96* (5)).
+    pub(super) unknown_windows_logged: DashSet<String>,
+    /// The ids the catalogue retired that each provider's last read
+    /// listing named, said again on a hot reload (RETIRED-ID; not
+    /// [`ModelInfo::discovered`](crate::ModelInfo::discovered), which a
+    /// failed or empty listing also sets on a person's own row).
+    pub(super) retired_listed: DashMap<ProviderType, Vec<String>>,
 }
 
 /// Append `candidate` unless it is the model we are already replacing, or is
@@ -99,7 +151,7 @@ impl LlmRouter {
         }
         let model_registry = Arc::new(model_registry);
         cost_tracker.use_registry(Arc::clone(&model_registry));
-        Self {
+        let router = Self {
             providers: dm,
             model_registry,
             fallback_chains,
@@ -111,7 +163,13 @@ impl LlmRouter {
             rate_limiter_registry: Arc::new(RateLimiterRegistry::new(rate_config)),
             discovery: DashMap::new(),
             substitutions_logged: DashSet::new(),
-        }
+            alias_collapses_logged: DashSet::new(),
+            forced_choices_logged: DashSet::new(),
+            unknown_windows_logged: DashSet::new(),
+            retired_listed: DashMap::new(),
+        };
+        router.note_local_server_providers();
+        router
     }
 
     /// Create a router with an explicit runtime config and rate limit config.
@@ -130,7 +188,7 @@ impl LlmRouter {
         }
         let model_registry = Arc::new(model_registry);
         cost_tracker.use_registry(Arc::clone(&model_registry));
-        Self {
+        let router = Self {
             providers: dm,
             model_registry,
             fallback_chains,
@@ -142,12 +200,18 @@ impl LlmRouter {
             rate_limiter_registry: Arc::new(RateLimiterRegistry::new(rate_limit_config)),
             discovery: DashMap::new(),
             substitutions_logged: DashSet::new(),
-        }
+            alias_collapses_logged: DashSet::new(),
+            forced_choices_logged: DashSet::new(),
+            unknown_windows_logged: DashSet::new(),
+            retired_listed: DashMap::new(),
+        };
+        router.note_local_server_providers();
+        router
     }
 
     /// Convenience constructor for single-provider setups (legacy / tests).
     pub fn single_provider(
-        provider: Arc<dyn LlmProvider>,
+        provider: Arc<impl LlmProvider + 'static>,
         provider_type: ProviderType,
         default_model: String,
     ) -> Self {
@@ -164,7 +228,7 @@ impl LlmRouter {
         providers.insert(
             provider_type,
             ProviderEntry {
-                provider,
+                provider: DynLlmProvider::from_arc(provider),
                 key_pool: Arc::new(ArcSwap::from_pointee(key_pool)),
             },
         );
@@ -174,7 +238,7 @@ impl LlmRouter {
         cost_tracker.use_registry(Arc::clone(&model_registry));
         let rate_config = RateLimitConfig::default();
 
-        Self {
+        let router = Self {
             providers,
             model_registry,
             fallback_chains: HashMap::new(),
@@ -186,7 +250,13 @@ impl LlmRouter {
             rate_limiter_registry: Arc::new(RateLimiterRegistry::new(rate_config)),
             discovery: DashMap::new(),
             substitutions_logged: DashSet::new(),
-        }
+            alias_collapses_logged: DashSet::new(),
+            forced_choices_logged: DashSet::new(),
+            unknown_windows_logged: DashSet::new(),
+            retired_listed: DashMap::new(),
+        };
+        router.note_local_server_providers();
+        router
     }
 
     /// Get the default model.
@@ -205,8 +275,39 @@ impl LlmRouter {
     }
 
     /// Hot-reload the runtime config (timeouts, endpoints, env vars, provider defaults).
+    ///
+    /// The registry learns which providers' `base_url` is local from it, so
+    /// what their discovery listed is priced as a local server's (item 17).
     pub fn reload_runtime_config(&self, config: LlmRuntimeConfig) {
         self.runtime_config.store(Arc::new(config));
+        self.note_local_server_providers();
+    }
+
+    /// Tell the registry which providers run on a machine of the person's
+    /// own though keyed (item 17): the runtime config's `base_url` is local,
+    /// on loopback or the home network
+    /// ([`LlmRuntimeConfig::is_on_local_server`], learning's LR7 test), and
+    /// so is the address the provider was built to call
+    /// ([`LlmProvider::base_url`]). Both, because a hot reload rebuilds no
+    /// provider and the Anthropic arm reads no `base_url`: either alone
+    /// could exempt calls that reach a paid API. Run at construction, on
+    /// every reload, and whenever a provider is registered or removed.
+    fn note_local_server_providers(&self) {
+        let runtime = self.runtime_config();
+        let local = self
+            .providers
+            .iter()
+            .filter(|entry| {
+                runtime.is_on_local_server(entry.key())
+                    && entry
+                        .value()
+                        .provider
+                        .base_url()
+                        .is_some_and(crate::is_local_url)
+            })
+            .map(|entry| entry.key().to_string())
+            .collect();
+        self.model_registry.set_local_server_providers(local);
     }
 
     /// Batch-reload model registry entries from config.
@@ -235,6 +336,29 @@ impl LlmRouter {
         self.providers.get(provider_type).map(|e| e.value().clone())
     }
 
+    /// The error a streamed round to `model` ends as when it ran its whole
+    /// round bound, `bound`, on a provider that needs no key
+    /// (LOCAL-HOUR-NO-RETRY): the agentic loop holds that bound, so it says
+    /// when; the provider's name is the router's to read.
+    pub fn local_call_timed_out(&self, model: &str, bound: std::time::Duration) -> LlmRouterError {
+        let provider = self
+            .model_registry
+            .resolve_provider(model)
+            .and_then(|pt| self.provider_entry(&pt))
+            .map_or_else(
+                || "local".to_string(),
+                |entry| entry.provider.name().to_string(),
+            );
+        LlmRouterError::LocalCallTimedOut {
+            model: model.to_string(),
+            provider,
+            timeout_secs: bound.as_secs(),
+            // A streamed round is never a rung: `complete_streaming` walks
+            // no ladder.
+            asked: true,
+        }
+    }
+
     /// Is this provider loaded right now?
     ///
     /// The router keeps no `enabled` bit of its own — a disabled provider is
@@ -247,11 +371,36 @@ impl LlmRouter {
     // ── L3: which model a request actually reaches ──────────────────────────
 
     /// Can a call naming this model be made at all — is the id in the
-    /// catalogue *and* its provider loaded?
+    /// catalogue *and* its provider loaded? And, where that provider is
+    /// built to call another server than its vendor's own API, is it a row
+    /// that server serves rather than a compiled one (COMPAT-SERVER, the
+    /// owner's answer of 2026-11-15): what it listed, or a `[models]` row
+    /// the person wrote ([`ModelRegistry::is_compiled_only`]).
     pub fn is_routable(&self, model_id: &str) -> bool {
-        self.model_registry
-            .resolve_provider(model_id)
-            .is_some_and(|pt| self.has_provider(&pt))
+        let Some(provider) = self.model_registry.resolve_provider(model_id) else {
+            return false;
+        };
+        let serves_compiled = self
+            .providers
+            .get(&provider)
+            .map(|entry| entry.value().provider.serves_compiled_rows());
+        match serves_compiled {
+            None => false,
+            Some(true) => true,
+            Some(false) => !self.model_registry.is_compiled_only(model_id),
+        }
+    }
+
+    /// Whether the rows this build compiles for `provider` — its
+    /// [`ALIAS_TABLE`] row and its catalogue rows — apply to it: true but
+    /// for a loaded provider built to call another server than its
+    /// vendor's own API (`LlmProvider::serves_compiled_rows`;
+    /// COMPAT-SERVER). An unloaded provider answers true, so a compiled id
+    /// of its is passed over as not routable, as before.
+    fn serves_compiled_rows(&self, provider: &ProviderType) -> bool {
+        self.providers
+            .get(provider)
+            .is_none_or(|entry| entry.value().provider.serves_compiled_rows())
     }
 
     /// Loaded providers, in the order the ladder prefers them.
@@ -295,8 +444,9 @@ impl LlmRouter {
             return Some(model);
         }
         self.model_registry
-            .first_model_for_provider(provider_type)
-            .filter(|m| self.is_routable(m))
+            .models_for_provider_in_order(provider_type)
+            .into_iter()
+            .find(|m| self.is_routable(m))
     }
 
     /// The default model the owner actually configured, if they configured one.
@@ -366,24 +516,35 @@ impl LlmRouter {
     /// Otherwise the first rung of the ladder that is, announced once. `None`
     /// when nothing is routable.
     ///
-    /// This is what keeps the shipped agent templates working: their Claude
-    /// pins are right when Anthropic is configured, and fall through here when
-    /// it is not, instead of dying on `UnknownModel` before the fallback chain
-    /// was ever consulted.
+    /// This is what keeps a template that names a model id working (the
+    /// shipped ones did until C8; they name `inherit` or an alias since, which
+    /// resolve to a routable model before the call): a Claude pin is right
+    /// when Anthropic is configured, and falls through here when it is not,
+    /// instead of dying on `UnknownModel` before the fallback chain was ever
+    /// consulted.
     pub(super) fn resolve_routable(
         &self,
         requested: &str,
         request_chain: &[String],
     ) -> Option<String> {
+        let effective = self.would_answer(requested, request_chain)?;
+        self.note_substitution(requested, &effective);
+        Some(effective)
+    }
+
+    /// The model a request naming `requested`, with `request_chain` as its
+    /// own fallbacks, would be sent as — [`Self::resolve_routable`]'s answer,
+    /// announcing nothing: what a caller that describes a run before it
+    /// starts reads (C8: the spawn tools' `model` parameter names the model
+    /// an edited lead's unroutable id reaches, M-8; built beyond the rows'
+    /// words). `None` when nothing is routable.
+    pub fn would_answer(&self, requested: &str, request_chain: &[String]) -> Option<String> {
         if self.is_routable(requested) {
             return Some(requested.to_string());
         }
-        let effective = self
-            .substitution_ladder(requested, request_chain)
+        self.substitution_ladder(requested, request_chain)
             .into_iter()
-            .find(|m| self.is_routable(m))?;
-        self.note_substitution(requested, &effective);
-        Some(effective)
+            .find(|m| self.is_routable(m))
     }
 
     /// Say, once per distinct pair, that an answer came from another model.
@@ -406,6 +567,293 @@ impl LlmRouter {
                  or [orchestrator] model."
             );
         }
+    }
+
+    // ── M-4: the model aliases ──────────────────────────────────────────────
+
+    /// The model `alias` names for a run whose parent runs on `parent` (the
+    /// subagent design's M-4; `parent` `None`: the effective default).
+    ///
+    /// In order: (1) the parent's provider's pin,
+    /// `[providers.<name>.model_aliases]`, if routable — it may name another
+    /// provider's model, the person's choice; (2) that provider's compiled id
+    /// ([`ALIAS_TABLE`]), if routable and the provider calls its vendor's own
+    /// API (COMPAT-SERVER: an `openai` provider built to call another server
+    /// skips the step, as a provider with no row does); (3) the parent's
+    /// model itself — an
+    /// alias with no model of its own here collapses to the parent's (the
+    /// effective default when the parent is not routable either); (4) `None`,
+    /// nothing routable. **No step goes to another loaded provider's row or
+    /// pin by itself**: a run stays on the vendor, keys and prices the person
+    /// put its parent on.
+    ///
+    /// A pin or compiled id passed over (steps 1 and 2) is announced once per (id,
+    /// answer) pair at `WARN`; a collapse where another loaded provider has a
+    /// model for the alias, once per (alias, provider) at `INFO` (M-5). The
+    /// alias resolves before the request, so the request is routable and the
+    /// substitution ladder is not walked.
+    pub fn resolve_alias(
+        &self,
+        alias: ModelAlias,
+        parent: Option<&str>,
+    ) -> Option<AliasResolution> {
+        self.alias_resolution(alias, parent, true)
+    }
+
+    /// [`Self::resolve_alias`]'s answer, announcing nothing: what a listing
+    /// of the aliases reads (C8: the spawn tools' `model` parameter, M-8,
+    /// and a per-call refusal, M-7), since M-5's lines say a step a run's
+    /// resolution took, not one a listing looked at (built beyond the rows'
+    /// words).
+    pub fn peek_alias(&self, alias: ModelAlias, parent: Option<&str>) -> Option<AliasResolution> {
+        self.alias_resolution(alias, parent, false)
+    }
+
+    /// M-4's resolution; `announce` says M-5's lines when a step is taken.
+    fn alias_resolution(
+        &self,
+        alias: ModelAlias,
+        parent: Option<&str>,
+        announce: bool,
+    ) -> Option<AliasResolution> {
+        let parent = parent
+            .map(str::trim)
+            .filter(|p| !p.is_empty())
+            .map(str::to_string)
+            .or_else(|| self.effective_default_model());
+        let provider = parent
+            .as_deref()
+            .and_then(|p| self.model_registry.resolve_provider(p));
+        let mut passed_over: Vec<String> = Vec::new();
+
+        if let Some(provider) = &provider {
+            let candidates = [
+                self.alias_pin(provider, alias),
+                compiled_alias(provider, alias)
+                    .filter(|_| self.serves_compiled_rows(provider))
+                    .map(str::to_string),
+            ];
+            for candidate in candidates.into_iter().flatten() {
+                if self.is_routable(&candidate) {
+                    if announce {
+                        self.announce_passed_over(alias, provider, &passed_over, &candidate);
+                    }
+                    return Some(AliasResolution {
+                        model: candidate,
+                        passed_over,
+                    });
+                }
+                if !passed_over.contains(&candidate) {
+                    passed_over.push(candidate);
+                }
+            }
+        }
+
+        let model = parent
+            .clone()
+            .filter(|p| self.is_routable(p))
+            .or_else(|| self.effective_default_model())?;
+        if announce && let Some(provider) = &provider {
+            if passed_over.is_empty() {
+                self.announce_collapse(alias, provider, parent.as_deref(), &model);
+            } else {
+                self.announce_passed_over(alias, provider, &passed_over, &model);
+            }
+        }
+        Some(AliasResolution { model, passed_over })
+    }
+
+    /// The person's pin for `alias` on `provider`, as the runtime config
+    /// last loaded it.
+    fn alias_pin(&self, provider: &ProviderType, alias: ModelAlias) -> Option<String> {
+        self.runtime_config()
+            .provider_defaults
+            .get(&provider.to_string())
+            .and_then(|d| d.model_aliases.get(&alias).cloned())
+    }
+
+    /// M-5's `WARN`, once per (passed-over id, answering model).
+    fn announce_passed_over(
+        &self,
+        alias: ModelAlias,
+        provider: &ProviderType,
+        passed_over: &[String],
+        model: &str,
+    ) {
+        for id in passed_over {
+            if self
+                .substitutions_logged
+                .insert((id.clone(), model.to_string()))
+            {
+                tracing::warn!(
+                    alias = alias.as_str(),
+                    passed_over = id.as_str(),
+                    model,
+                    "Model alias '{alias}' would use {id}, which is not available — \
+                     answering with {model}. Pin a routable model under \
+                     [providers.{provider}.model_aliases] in llm.toml, or enable its provider."
+                );
+            }
+        }
+    }
+
+    /// M-5's `INFO` for a collapse on a mixed install: the parent's provider
+    /// has no model for `alias`, and another loaded provider has one, which
+    /// the alias does not move to (a compiled row counts only for a provider
+    /// that calls its vendor's own API, COMPAT-SERVER). Once per (alias,
+    /// provider); nothing where no loaded provider has one (an Ollama-only
+    /// install, or one beside an OpenAI-compatible server). Where the parent
+    /// is not routable either, step 3 answered the effective default, and
+    /// the line says so rather than call it the parent's model.
+    fn announce_collapse(
+        &self,
+        alias: ModelAlias,
+        provider: &ProviderType,
+        parent: Option<&str>,
+        model: &str,
+    ) {
+        let elsewhere = self.providers.iter().any(|entry| {
+            let other = entry.key();
+            other != provider
+                && (self.alias_pin(other, alias).is_some()
+                    || (ALIAS_TABLE.iter().any(|row| &row.provider == other)
+                        && entry.value().provider.serves_compiled_rows()))
+        });
+        if elsewhere
+            && self
+                .alias_collapses_logged
+                .insert((alias, provider.to_string()))
+        {
+            match parent.filter(|p| *p != model) {
+                None => tracing::info!(
+                    alias = alias.as_str(),
+                    provider = %provider,
+                    model,
+                    "Model alias '{alias}' has no model on {provider}: it runs on {model}, the \
+                     parent's model. To use another, pin it under \
+                     [providers.{provider}.model_aliases]."
+                ),
+                Some(parent) => tracing::info!(
+                    alias = alias.as_str(),
+                    provider = %provider,
+                    parent,
+                    model,
+                    "Model alias '{alias}' has no model on {provider}: its parent's model \
+                     {parent} is not available, so it runs on {model}, the default model. \
+                     To use another, pin it under [providers.{provider}.model_aliases]."
+                ),
+            }
+        }
+    }
+
+    /// Make `request` meet the request contract of `model`, the model it is
+    /// about to be sent to (C7a, M-3d): what the model's row says its API
+    /// refuses is left out, where the request first names its model — after
+    /// the ladder has settled on it, so a fallback rung is held to its own.
+    ///
+    /// - No sampling parameters: `temperature` is not sent (the arm sends no
+    ///   `top_p` or `top_k` at all).
+    /// - Thinking always on: a `Disabled` thinking request is not sent; the
+    ///   model thinks adaptively, which is what no `thinking` field means.
+    /// - Adaptive thinking only: a manual budget (`Enabled`) is sent as
+    ///   `Adaptive`.
+    /// - No forced tool choice: `any` or a named tool goes as `auto`, and
+    ///   `daemon.log` says so at `INFO` once a model.
+    /// - Summarized thinking (ANTHROPIC-THINKING): a request with no
+    ///   thinking, or adaptive thinking, asks for its summary — `display`
+    ///   `"summarized"`. A `Disabled` request the contract keeps never
+    ///   carries it (the thinking page: "`display` is invalid with
+    ///   `thinking.type: "disabled"`"); nor does a manual budget, which no
+    ///   row with this fact takes.
+    ///
+    /// A row with no contract — every row but the ones whose pages say so —
+    /// leaves the request as its caller made it.
+    pub(super) fn meet_request_contract(&self, model: &str, request: &mut ChatRequest) {
+        let contract = self.model_registry.request_contract(model);
+        if contract.no_sampling_parameters {
+            request.temperature = None;
+        }
+        match request.thinking {
+            Some(ThinkingConfig::Disabled) if contract.thinking_always_on => {
+                request.thinking = None;
+            }
+            Some(ThinkingConfig::Enabled { .. }) if contract.adaptive_thinking_only => {
+                request.thinking = Some(ThinkingConfig::Adaptive {
+                    display: ThinkingDisplay::ModelDefault,
+                });
+            }
+            _ => {}
+        }
+        if contract.summarized_thinking
+            && matches!(
+                request.thinking,
+                None | Some(ThinkingConfig::Adaptive { .. })
+            )
+        {
+            request.thinking = Some(ThinkingConfig::Adaptive {
+                display: ThinkingDisplay::Summarized,
+            });
+        }
+        if contract.no_forced_tool_choice
+            && let Some(forced @ (ToolChoice::Any | ToolChoice::Tool(_))) = &request.tool_choice
+        {
+            if self.forced_choices_logged.insert(model.to_string()) {
+                let asked = match forced {
+                    ToolChoice::Tool(name) => format!("the tool '{name}'"),
+                    _ => "any tool".to_string(),
+                };
+                tracing::info!(
+                    model,
+                    asked = %asked,
+                    "{model} refuses a forced tool choice: a call that asks for {asked} is \
+                     sent with tool_choice auto, here and on every later call to {model}"
+                );
+            }
+            request.tool_choice = Some(ToolChoice::Auto);
+        }
+    }
+
+    /// Every model a call can name right now: a catalogue entry whose
+    /// provider is loaded ([`Self::is_routable`]), sorted. Not
+    /// `available_models()`, which lists discovered models only.
+    pub fn routable_models(&self) -> Vec<String> {
+        let mut ids: Vec<String> = self
+            .model_registry
+            .model_ids()
+            .into_iter()
+            .filter(|id| self.is_routable(id))
+            .collect();
+        ids.sort();
+        ids
+    }
+
+    /// The (requested, answering) pairs the ladder has announced since the
+    /// router was built ([`Self::note_substitution`]'s once-per-pair set),
+    /// sorted — what a caller outside the router reads to tell that a request
+    /// it built was not sent as asked (C8: a shipped template that names an
+    /// alias or `inherit` never walks the ladder).
+    pub fn noted_substitutions(&self) -> Vec<(String, String)> {
+        let mut pairs: Vec<(String, String)> = self
+            .substitutions_logged
+            .iter()
+            .map(|p| p.clone())
+            .collect();
+        pairs.sort();
+        pairs
+    }
+
+    /// The (alias, provider) collapses M-5's `INFO` has said since the router
+    /// was built ([`Self::announce_collapse`]'s once-per-pair set), as
+    /// (`fast`/`balanced`/`strong`, provider name), sorted — a reader beside
+    /// [`Self::noted_substitutions`] (C8; built beyond the rows' words).
+    pub fn noted_alias_collapses(&self) -> Vec<(String, String)> {
+        let mut pairs: Vec<(String, String)> = self
+            .alias_collapses_logged
+            .iter()
+            .map(|p| (p.0.as_str().to_string(), p.1.clone()))
+            .collect();
+        pairs.sort();
+        pairs
     }
 
     /// Does this provider need an API key? `None` when it is not loaded.
@@ -437,19 +885,37 @@ impl LlmRouter {
 
     /// Register a provider that was not in the original config.
     /// Used when auto-discovered credentials exist but no provider was configured.
+    ///
+    /// A provider rebuilt in place at another address (a `base_url` edit,
+    /// then the enable toggle) forgets what the old address's discovery
+    /// found: its rows only discovery wrote go and the rest are no longer
+    /// marked served, until a refresh asks the new address
+    /// (COMPAT-SERVER). A rebuild at the same address changes nothing.
     pub fn register_provider(
         &self,
         provider_type: ProviderType,
-        provider: Arc<dyn LlmProvider>,
+        provider: Arc<DynLlmProvider<'static>>,
         pool: KeyPool,
     ) -> bool {
-        self.providers.insert(
-            provider_type,
+        let address = provider.base_url().map(str::to_string);
+        let replaced = self.providers.insert(
+            provider_type.clone(),
             ProviderEntry {
                 provider,
                 key_pool: Arc::new(ArcSwap::from_pointee(pool)),
             },
         );
+        if replaced.is_some_and(|old| old.provider.base_url() != address.as_deref()) {
+            let forgotten = self
+                .model_registry
+                .withdraw_absent_for_provider(&provider_type, &std::collections::HashSet::new());
+            tracing::info!(
+                provider = %provider_type,
+                forgotten = ?forgotten,
+                "Provider rebuilt at another address — what its old address listed is forgotten"
+            );
+        }
+        self.note_local_server_providers();
         true
     }
 
@@ -457,12 +923,19 @@ impl LlmRouter {
     /// Returns the list of model IDs that were removed.
     pub fn deregister_provider(&self, provider_type: &ProviderType) -> Vec<String> {
         self.providers.remove(provider_type);
+        self.retired_listed.remove(provider_type);
+        self.note_local_server_providers();
         self.model_registry.remove_by_provider(provider_type)
     }
 
     /// Register a CLI backend for fallback.
-    pub fn register_cli_backend(&self, provider_type: ProviderType, backend: Arc<dyn LlmProvider>) {
-        self.cli_backends.insert(provider_type, backend);
+    pub fn register_cli_backend(
+        &self,
+        provider_type: ProviderType,
+        backend: Arc<impl LlmProvider + 'static>,
+    ) {
+        self.cli_backends
+            .insert(provider_type, DynLlmProvider::from_arc(backend));
     }
 
     /// Get registered CLI backend provider types.
@@ -550,5 +1023,26 @@ impl LlmRouter {
 #[cfg(test)]
 mod tests;
 
+#[cfg(test)]
+mod alias_tests;
+
 #[cfg(all(test, feature = "ollama", feature = "openai"))]
 mod ollama_tests;
+
+#[cfg(all(test, feature = "ollama", feature = "openai"))]
+mod transport_tests;
+
+#[cfg(all(test, feature = "anthropic", feature = "ollama", feature = "openai"))]
+mod pricing_tests;
+
+#[cfg(all(test, feature = "anthropic"))]
+mod contract_tests;
+
+#[cfg(all(test, feature = "anthropic", feature = "ollama", feature = "openai"))]
+mod latest_models_tests;
+
+#[cfg(all(test, feature = "openai"))]
+mod compat_server_tests;
+
+#[cfg(all(test, feature = "openai"))]
+mod model_rows_tests;

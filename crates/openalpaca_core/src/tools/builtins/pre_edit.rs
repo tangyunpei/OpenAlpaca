@@ -132,7 +132,7 @@ pub(super) async fn keep_pre_edit_copy(
 /// `results/` live there, and a session that copied its own log would grow
 /// the very bytes the caps are about.
 fn home_store() -> Option<PathBuf> {
-    openalpaca_storage::store::home_root()
+    openalpaca_app_support::paths::home_root()
         .ok()
         .map(|root| root.canonicalize().unwrap_or(root))
 }

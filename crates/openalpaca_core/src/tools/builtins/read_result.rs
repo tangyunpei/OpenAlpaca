@@ -21,10 +21,8 @@
 //! not granted it is refused by the gate, fail-closed, like any other.
 
 use crate::tools::registry::{BuiltInTool, RegisteredTool, ToolBackend, ToolContext};
-use async_trait::async_trait;
 use openalpaca_llm::ToolDefinition;
 use std::path::PathBuf;
-use std::sync::Arc;
 
 use super::annotations_for_builtin;
 
@@ -54,7 +52,6 @@ impl ReadResultTool {
     }
 }
 
-#[async_trait]
 impl BuiltInTool for ReadResultTool {
     async fn execute(&self, _arguments: &serde_json::Value) -> Result<String, String> {
         Err("read_result requires execution context — use execute_with_context".to_string())
@@ -81,12 +78,11 @@ impl BuiltInTool for ReadResultTool {
         let results_dir = session_dir.join(crate::session_log::RESULTS_DIR);
         // A session that has never spilled has no directory — that is a
         // missing result, not a broken tool.
-        let path =
-            match openalpaca_storage::store::confine_to_root(&results_dir, &results_dir.join(&name))
-            {
-                Ok(path) => path,
-                Err(_) => return Err(not_there(&session_dir, &name).await),
-            };
+        let Ok(path) =
+            openalpaca_storage::store::confine_to_root(&results_dir, &results_dir.join(&name))
+        else {
+            return Err(not_there(&session_dir, &name).await);
+        };
 
         let offset = arguments
             .get("offset")
@@ -101,11 +97,10 @@ impl BuiltInTool for ReadResultTool {
 
         // One seek and one bounded read: the page is `limit` bytes wherever it
         // sits in the file, and a 256 MB spill costs the same as a 4 KB one.
-        let (buf, total) = match read_page_bytes(&path, offset, limit).await {
-            Ok(read) => read,
+        let Ok((buf, total)) = read_page_bytes(&path, offset, limit).await else {
             // The file was there for `confine_to_root` and is not now, or it
             // cannot be opened at all — answer it the way a miss is answered.
-            Err(_) => return Err(not_there(&session_dir, &name).await),
+            return Err(not_there(&session_dir, &name).await);
         };
         let from = (offset as usize).min(total);
         let (start, end) = page_bounds(&buf, limit, from + buf.len() >= total);
@@ -282,7 +277,7 @@ pub(super) fn read_result_tool(sessions_root: Option<PathBuf>) -> RegisteredTool
                 "limit": 8192
             })]),
         },
-        backend: ToolBackend::BuiltIn(Arc::new(ReadResultTool { sessions_root })),
+        backend: ToolBackend::built_in(ReadResultTool { sessions_root }),
         provides_capabilities: vec!["read_result".into()],
         exempt_from_timeout: false,
         annotations: annotations_for_builtin("read_result"),

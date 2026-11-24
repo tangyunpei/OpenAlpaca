@@ -284,8 +284,9 @@ async fn approve_and_deny_on_an_mcp_server_are_409_unsupported_for_kind() {
         assert_eq!(status, StatusCode::CONFLICT, "{verb:?}");
         assert_eq!(error_word(&body), "unsupported_for_kind");
     }
-    assert!(
-        matches!(h.state("mcp", "srv"), Some(ExtensionState::Enabled)),
+    std::assert_matches!(
+        h.state("mcp", "srv"),
+        Some(ExtensionState::Enabled),
         "a refused verb must take no transition"
     );
 }
@@ -323,13 +324,14 @@ async fn reload_from_disabled_is_409_not_loaded() {
     let h = Harness::new();
     h.declare_unreachable("srv", false);
     h.mcp.reconcile_all().await;
-    assert!(matches!(h.state("mcp", "srv"), Some(ExtensionState::Disabled)));
+    std::assert_matches!(h.state("mcp", "srv"), Some(ExtensionState::Disabled));
 
     let (status, body) = h.verb("mcp", "srv", Verb::Reload).await;
     assert_eq!(status, StatusCode::CONFLICT);
     assert_eq!(error_word(&body), "not_loaded");
-    assert!(
-        matches!(h.state("mcp", "srv"), Some(ExtensionState::Disabled)),
+    std::assert_matches!(
+        h.state("mcp", "srv"),
+        Some(ExtensionState::Disabled),
         "a refused reload must take no transition"
     );
 }
@@ -339,10 +341,10 @@ async fn reload_from_unapproved_is_409_not_loaded() {
     let h = Harness::new();
     h.write_plugin("waiting");
     h.plugins.start().await.expect("plugin scan");
-    assert!(matches!(
+    std::assert_matches!(
         h.state("plugin", "waiting"),
         Some(ExtensionState::Unapproved { .. })
-    ));
+    );
 
     let (status, body) = h.verb("plugin", "waiting", Verb::Reload).await;
     assert_eq!(status, StatusCode::CONFLICT);
@@ -357,8 +359,9 @@ async fn reload_from_enabled_and_from_failed_are_200() {
     let h = Harness::new();
     h.declare_stub("srv", 0);
     h.mcp.reconcile_all().await;
-    assert!(
-        matches!(h.state("mcp", "srv"), Some(ExtensionState::Enabled)),
+    std::assert_matches!(
+        h.state("mcp", "srv"),
+        Some(ExtensionState::Enabled),
         "the stub should have come up: {:?}",
         h.state("mcp", "srv")
     );
@@ -491,7 +494,7 @@ async fn a_write_that_fails_is_a_500_and_takes_no_transition() {
     h.declare_unreachable("srv", true);
     h.mcp.reconcile_all().await;
     let before = h.state("mcp", "srv");
-    assert!(matches!(before, Some(ExtensionState::Failed { .. })));
+    std::assert_matches!(before, Some(ExtensionState::Failed { .. }));
 
     // Readable, but not writable: this is a **write** failure, not the
     // `409 store_unreadable` of a store nobody can parse.
@@ -534,7 +537,7 @@ async fn delete_on_a_row_that_is_not_orphaned_is_409_not_orphaned() {
         .remove(&ExtensionId::plugin("present"))
         .await
         .expect_err("a present plugin is not removable");
-    assert!(matches!(error, ExtensionError::NotOrphaned));
+    std::assert_matches!(error, ExtensionError::NotOrphaned);
     let (status, body) = split(extension_error(&error)).await;
     assert_eq!(status, StatusCode::CONFLICT);
     assert_eq!(error_word(&body), "not_orphaned");
@@ -575,8 +578,9 @@ async fn delete_on_an_orphan_removes_its_entry_and_its_record() {
         .reconcile(&ExtensionId::plugin("gone"))
         .await
         .expect("reconcile should park the vanished plugin");
-    assert!(
-        matches!(h.state("plugin", "gone"), Some(ExtensionState::Orphaned)),
+    std::assert_matches!(
+        h.state("plugin", "gone"),
+        Some(ExtensionState::Orphaned),
         "a vanished directory parks as Orphaned: {:?}",
         h.state("plugin", "gone")
     );
@@ -1076,10 +1080,7 @@ async fn a_dropped_request_does_not_abandon_the_transition() {
         h.config_dir.path().join("slow-server.sh").display()
     ));
     h.mcp.reconcile_all().await;
-    assert!(matches!(
-        h.state("mcp", "slow"),
-        Some(ExtensionState::Disabled)
-    ));
+    std::assert_matches!(h.state("mcp", "slow"), Some(ExtensionState::Disabled));
 
     let extensions = h.extensions.clone();
     let request = tokio::spawn(async move {
@@ -1087,8 +1088,9 @@ async fn a_dropped_request_does_not_abandon_the_transition() {
     });
     // Long enough to be past E0's CAS and inside the handshake.
     tokio::time::sleep(Duration::from_millis(300)).await;
-    assert!(
-        matches!(h.state("mcp", "slow"), Some(ExtensionState::Enabling)),
+    std::assert_matches!(
+        h.state("mcp", "slow"),
+        Some(ExtensionState::Enabling),
         "the verb should be mid-transition when the request is dropped: {:?}",
         h.state("mcp", "slow")
     );
@@ -1303,11 +1305,14 @@ async fn validate_answers_the_preview_without_installing() {
 }
 
 /// **N-PLUG-2 — a warning, never a refusal.** A top-level `tool = true` (the
-/// switch is `types.tools`) and a `types.provider = true` (no bridge is wired)
-/// used to validate clean. Now the dry run's `manifest.warnings`, the install
-/// preview and the install's row each say so, and both still install.
+/// switch is `types.tools`) and a `types.provider = true` (the plugin provider
+/// type is removed, M86) used to validate clean. Now the dry run's
+/// `manifest.warnings`, the install preview and the install's row each say
+/// so, and both still install.
 #[tokio::test]
-async fn validate_and_install_warn_on_an_unknown_key_and_an_unwired_type() {
+async fn validate_and_install_warn_on_an_unknown_key_and_an_unused_type() {
+    const PROVIDER_REMOVED: &str = "the plugin provider type is removed: LLM providers are the \
+         built-in ones, configured in llm.toml or in Settings → Models & keys";
     let h = Harness::new();
     let typo = h.source("typo", "1.0.0", "");
     std::fs::write(
@@ -1345,14 +1350,11 @@ async fn validate_and_install_warn_on_an_unknown_key_and_an_unwired_type() {
     assert!(
         names(&body["manifest"]["warnings"])
             .iter()
-            .any(|w| w.contains("provider bridge is not wired")),
-        "the dry run says the provider bridge is not wired: {body}"
+            .any(|w| w.contains(PROVIDER_REMOVED) && !w.contains("not wired")),
+        "the dry run says the plugin provider type is removed: {body}"
     );
 
-    for (source, needle) in [
-        (&typo, "'tool'"),
-        (&provider, "provider bridge is not wired"),
-    ] {
+    for (source, needle) in [(&typo, "'tool'"), (&provider, PROVIDER_REMOVED)] {
         let (status, body) = h
             .install(
                 "plugin",
@@ -1388,10 +1390,7 @@ async fn validate_and_install_warn_on_an_unknown_key_and_an_unwired_type() {
     // manifest declares: `declared.warnings`, standing, while the row's own
     // `warnings` stays per-call.
     let rows = h.rows(false).await;
-    for (id, needle) in [
-        ("typo", "'tool'"),
-        ("modelish", "provider bridge is not wired"),
-    ] {
+    for (id, needle) in [("typo", "'tool'"), ("modelish", PROVIDER_REMOVED)] {
         let row = rows
             .iter()
             .find(|r| r["id"] == id)
@@ -1776,4 +1775,90 @@ fn the_new_paths_do_not_collide_with_the_verb_paths() {
 
     // Building it is the assertion: `Router::route` panics on a conflict.
     drop(router);
+}
+
+/// `/v1/extensions*`'s JSON bodies for the API contract's folder
+/// (API-CONTRACT): a plugin validated, installed, denied, updated and
+/// uninstalled, and a switched-off MCP server added — nothing spawned.
+pub(crate) async fn contract_samples(out: &mut crate::contract::Samples) {
+    use crate::contract::ok_body;
+    let h = Harness::new();
+    let manifest = "[types]\ntools = true\n[capabilities]\nprovides = [\"notes_write\"]\n";
+    let source = h.source("notion", "1.4.0", manifest);
+    let request = serde_json::json!({ "source": "path", "path": source.display().to_string() });
+    let body = ok_body(super::validate_plugin(h.extensions.clone(), request.clone()).await).await;
+    out.response("post-extensions-plugin-validate", body);
+    let body =
+        ok_body(super::install_extension(h.extensions.clone(), "plugin", request).await).await;
+    out.response("post-extensions-plugin", body);
+    let body = ok_body(
+        super::install_extension(
+            h.extensions.clone(),
+            "mcp",
+            serde_json::json!({
+                "name": "remote",
+                "transport": "http",
+                "url": "https://example.com/mcp",
+                "connect_timeout_secs": 1,
+                "enabled": false,
+            }),
+        )
+        .await,
+    )
+    .await;
+    out.response("post-extensions-mcp", body);
+    let body = ok_body(run_verb(h.extensions.clone(), "plugin", "notion", Verb::Deny).await).await;
+    out.response("post-extensions-kind-id-verb", body);
+    let body = ok_body(super::list_extensions(&h.extensions, true).await).await;
+    out.response("get-extensions", body);
+    let newer = h.source("notion", "1.5.0", manifest);
+    let body = ok_body(
+        super::update_extension(
+            h.extensions.clone(),
+            "plugin",
+            "notion",
+            serde_json::json!({ "source": "path", "path": newer.display().to_string() }),
+        )
+        .await,
+    )
+    .await;
+    out.response("put-extensions-plugin-id", body);
+    let query = DeleteQuery {
+        uninstall: true,
+        keep_data: false,
+    };
+    let body =
+        ok_body(super::delete_extension(h.extensions.clone(), "plugin", "notion", query).await)
+            .await;
+    out.response("delete-extensions-kind-id", body);
+}
+
+/// CLI-PROTOCOL read the plugin source through `PluginSourceBody`: each
+/// body reads as the bare body read before — an object's `source` and
+/// `path`, a non-string value as the key left out, and anything but an
+/// object (serde would read an array's items as the fields in order) as
+/// nothing at all.
+#[test]
+fn a_plugin_source_is_read_as_the_bare_body_was() {
+    use serde_json::json;
+    assert_eq!(
+        plugin_source(&json!({"source": "path", "path": "/x"})).ok(),
+        Some(std::path::PathBuf::from("/x"))
+    );
+    assert_eq!(
+        plugin_source(&json!({"path": "/x"})).ok(),
+        Some(std::path::PathBuf::from("/x"))
+    );
+    for refused in [
+        json!(["path", "/x"]),
+        json!([null, "/x"]),
+        json!("/x"),
+        json!({"source": "path", "path": 7}),
+        json!({"source": 7, "path": ""}),
+    ] {
+        let refusal = plugin_source(&refused).expect_err("refused");
+        assert_eq!(refusal.code, "invalid_path", "{refused}");
+    }
+    let refusal = plugin_source(&json!({"source": "url", "path": "/x"})).expect_err("refused");
+    assert_eq!(refusal.code, "unsupported_source");
 }

@@ -8,7 +8,6 @@
 use crate::context::SharedContext;
 use crate::orchestrator::task_status_query;
 use crate::tools::registry::{BuiltInTool, ToolContext};
-use async_trait::async_trait;
 use openalpaca_llm::ToolDefinition;
 use std::sync::Arc;
 
@@ -27,7 +26,6 @@ impl TaskStatusTool {
     }
 }
 
-#[async_trait]
 impl BuiltInTool for TaskStatusTool {
     async fn execute(&self, _arguments: &serde_json::Value) -> Result<String, String> {
         Err("task_status requires execution context — use execute_with_context".to_string())

@@ -8,9 +8,19 @@ import { act, renderHook, waitFor } from "@testing-library/react";
 import type { ReactNode } from "react";
 import { afterEach, describe, expect, it, vi } from "vitest";
 
-import { setStopIntent } from "@/lib/connection";
+import {
+  bootstrapConnection,
+  resetConnection,
+  setStopIntent,
+} from "@/lib/connection";
+import { fixtureHost } from "@/lib/host/fixture";
 
-import { useDaemonStatus, useHealth, useStopIntent } from "./useConnection";
+import {
+  useConnectionStatus,
+  useDaemonStatus,
+  useHealth,
+  useStopIntent,
+} from "./useConnection";
 
 const reads = vi.hoisted(() => ({
   health: vi.fn(() =>
@@ -29,7 +39,6 @@ vi.mock("@/lib/api/status", () => ({
   getDaemonStatus: reads.status,
   requestDaemonShutdown: vi.fn(),
 }));
-vi.mock("@tauri-apps/api/core", () => ({ invoke: vi.fn() }));
 
 /** One client per test, held outside the wrapper so a rerender keeps it. */
 function makeWrapper() {
@@ -77,5 +86,47 @@ describe("while the daemon is stopped", () => {
 
     expect(result.current.intent).toBeNull();
     await waitFor(() => expect(reads.health).toHaveBeenCalled());
+  });
+});
+
+/**
+ * Q04's seventh row (A-20): a daemon of this app's protocol at another
+ * version is used, and the window says so — both versions, and Stop then
+ * Start, never a restart of its own. The shell writes the sentence; the
+ * window carries it from the connection to the panel.
+ */
+describe("the note on a daemon of another version", () => {
+  const info = {
+    baseUrl: "http://127.0.0.1:51823",
+    token: "t",
+    instanceId: "i",
+    daemonPath: null,
+    version: "0.1.0",
+    protocol: 1,
+  };
+  const note =
+    "This daemon is version 0.1.0 and this app is 0.2.0; they speak the same protocol, so the app uses it. To run this app's own version, use Stop daemon…, then Start daemon.";
+
+  afterEach(() => {
+    resetConnection();
+    fixtureHost!.reset();
+  });
+
+  it("is the shell's sentence, from the connection", async () => {
+    fixtureHost!.answerConnection({ ...info, note });
+    await bootstrapConnection();
+    const { result } = renderHook(() => useConnectionStatus(), {
+      wrapper: makeWrapper(),
+    });
+    expect(result.current.note).toBe(note);
+  });
+
+  it("is null for a daemon of this app's version", async () => {
+    fixtureHost!.answerConnection({ ...info, note: null });
+    await bootstrapConnection();
+    const { result } = renderHook(() => useConnectionStatus(), {
+      wrapper: makeWrapper(),
+    });
+    expect(result.current.note).toBeNull();
   });
 });

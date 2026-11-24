@@ -63,7 +63,7 @@ export default function WorkView({ blockedRunId = null }: WorkViewProps) {
           title="Work"
           meta={`${partition.activeCount} active · ${partition.doneCount} done`}
         />
-        <div className="sc min-h-0 flex-1 overflow-y-auto p-[10px]">
+        <div className="min-h-0 sc flex-1 overflow-y-auto p-[10px]">
           <WorkList
             live={partition.live}
             completedToday={partition.completedToday}

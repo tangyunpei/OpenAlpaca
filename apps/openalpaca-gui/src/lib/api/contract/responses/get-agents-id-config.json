@@ -1,0 +1,43 @@
+{
+  "config": {
+    "agent": {
+      "description": "",
+      "icon": "",
+      "id": "",
+      "name": ""
+    },
+    "capabilities": {
+      "assigned": [
+        ""
+      ],
+      "denied": null
+    },
+    "constraints": {
+      "allowed_capabilities": [
+        ""
+      ],
+      "allowed_models": null,
+      "auto_approve": null,
+      "denied_capabilities": null,
+      "denied_models": null,
+      "denied_sections": null,
+      "max_context_tokens": null,
+      "max_cost_per_task": 0,
+      "max_rounds": 0,
+      "max_tool_calls": 0,
+      "require_confirmation_for": null,
+      "timeout_seconds": 0
+    },
+    "llm": {
+      "fallback_models": null,
+      "model": "",
+      "overrides": null
+    },
+    "preset": {
+      "persona": "",
+      "temperature": 0,
+      "verbosity": ""
+    }
+  },
+  "config_version": 0
+}

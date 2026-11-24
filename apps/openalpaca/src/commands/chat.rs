@@ -52,7 +52,7 @@ pub async fn run(args: ChatArgs) -> Result<()> {
     let stdout_is_terminal = std::io::IsTerminal::is_terminal(&std::io::stdout());
     let mut target = match args.project.as_deref() {
         Some(dir) => {
-            let client = DaemonClient::connect()?;
+            let client = DaemonClient::connect().await?;
             let project = choose_project(&client, dir).await?;
             eprintln!(
                 "{}",
@@ -64,7 +64,7 @@ pub async fn run(args: ChatArgs) -> Result<()> {
     };
 
     if args.resume || args.session.is_some() {
-        let client = DaemonClient::connect()?;
+        let client = DaemonClient::connect().await?;
         let lane_key = sessions::default_lane_key(&client).await?;
         let session_id = match args.session.as_deref() {
             Some(id) => named_session(&client, id, &lane_key).await?,
@@ -85,7 +85,7 @@ pub async fn run(args: ChatArgs) -> Result<()> {
         return single_message(msg, &args.files, &target).await;
     }
     if interactive {
-        let session = crate::repl::ReplSession::new(target)?;
+        let session = crate::repl::ReplSession::new(target).await?;
         return session.run().await;
     }
     pipe_mode(&target).await
@@ -201,7 +201,7 @@ fn resumed_target(target: ChatTarget, resumed: &SessionItem) -> ChatTarget {
 async fn resume(client: &DaemonClient, session_id: &str) -> Result<SessionItem> {
     let path = format!("/v1/sessions/{}/activate", urlencoding::encode(session_id));
     let session: SessionItem = client
-        .post(&path, &serde_json::json!({}))
+        .post(&path, &crate::client::empty_body())
         .await
         .with_context(|| format!("Could not resume conversation {session_id}"))?;
 
@@ -225,9 +225,14 @@ async fn resume(client: &DaemonClient, session_id: &str) -> Result<SessionItem> 
 /// A project as `POST /v1/workspaces` answers it — the two fields this
 /// command prints and sends.
 #[derive(Debug, serde::Deserialize)]
-struct ChosenProject {
+pub(crate) struct ChosenProject {
     root: String,
     name: String,
+}
+
+/// `POST /v1/workspaces`'s body, from `chat --project`.
+pub(crate) fn project_body(path: &str) -> serde_json::Value {
+    serde_json::json!({ "path": path })
 }
 
 /// `chat --project <dir>` (R10): the daemon resolves the folder — the git
@@ -237,22 +242,19 @@ async fn choose_project(client: &DaemonClient, dir: &std::path::Path) -> Result<
     let path = std::path::absolute(dir)
         .with_context(|| format!("Cannot make {} an absolute path", dir.display()))?;
     client
-        .post(
-            "/v1/workspaces",
-            &serde_json::json!({ "path": path.to_string_lossy() }),
-        )
+        .post("/v1/workspaces", &project_body(&path.to_string_lossy()))
         .await
         .with_context(|| format!("Could not use {} as this chat's project", path.display()))
 }
 
 #[derive(serde::Deserialize)]
-struct TranscriptMessage {
+pub(crate) struct TranscriptMessage {
     role: String,
     content: String,
 }
 
 #[derive(serde::Deserialize)]
-struct TranscriptPage {
+pub(crate) struct TranscriptPage {
     messages: Vec<TranscriptMessage>,
     /// Every message the conversation holds, not just this page's — the count
     /// the tail's offset is derived from. Defaulted so a daemon that predates
@@ -273,7 +275,7 @@ fn tail_offset(total: i64, limit: usize) -> usize {
 }
 
 /// One page of a conversation's messages.
-fn transcript_page_path(session_id: &str, limit: usize, offset: usize) -> String {
+pub(crate) fn transcript_page_path(session_id: &str, limit: usize, offset: usize) -> String {
     format!(
         "/v1/sessions/{}/messages?limit={limit}&offset={offset}",
         urlencoding::encode(session_id)
@@ -347,7 +349,7 @@ async fn single_message(
     files: &[std::path::PathBuf],
     target: &ChatTarget,
 ) -> Result<()> {
-    let client = DaemonClient::connect()?;
+    let client = DaemonClient::connect().await?;
 
     // Upload files and collect attachment refs
     let attachments = upload_files(&client, files, target).await?;
@@ -472,7 +474,7 @@ async fn pipe_mode(target: &ChatTarget) -> Result<()> {
         bail!("No input on stdin");
     }
 
-    let client = DaemonClient::connect()?;
+    let client = DaemonClient::connect().await?;
     let stdout_is_terminal = std::io::IsTerminal::is_terminal(&std::io::stdout());
     print!("{}", reply_prefix(stdout_is_terminal));
     std::io::stdout().flush()?;

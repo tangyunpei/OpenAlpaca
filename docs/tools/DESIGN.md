@@ -31,7 +31,7 @@ MCP server — that an agent may invoke during an agentic loop iteration.
 | 3 | **Extensibility without recompilation** | Users add tools via TOML config files, external MCP servers (`config/mcp.toml`), or out-of-process plugins; no Rust code required. |
 | 4 | **Two governance axes** | **ALLOW** is per agent (which capabilities a template or skill declares). **ENABLE** is per extension (one switch per MCP server and per plugin). Built-in tools are never switched off. |
 | 5 | **No silent degradation** | A tool that is withheld is refused with a message naming the extension that owns it, and the refusal is logged. A skill that lost a required tool is refused rather than run without it. |
-| 6 | **Parallel execution** | All tool calls within a single LLM round execute concurrently via `join_all`. |
+| 6 | **Parallel reads, ordered writes** | Within a single LLM round, consecutive read-only calls execute concurrently via `join_all`; every other call runs alone, in the model's order (N-TOOL-3, 2026-11-01). |
 | 7 | **Runtime registration** | The registry is lock-free and mutable: MCP and plugin tools register and unregister while the daemon runs. Per-request tools live in a per-request copy of the registry. |
 | 8 | **Owner-scoped data isolation** | Tools accessing user-specific data (memory, persona, artifacts) take identity only from a trusted per-invocation `ToolContext`, never from LLM-supplied arguments. |
 
@@ -120,7 +120,7 @@ directory name), never from the free-form `author` string.
 │  run_agentic_loop_routed()                                       │
 │  • Receives LLM response with tool_calls                         │
 │  • Enforces max_tools_per_round budget (overflow calls errored)  │
-│  • Executes tools in parallel via SandboxManager                 │
+│  • Runs tools via SandboxManager: reads together, others alone   │
 │  • Spills or cuts oversized results, feeds them back to the LLM  │
 ├──────────────────────────────────────────────────────────────────┤
 │                     SECURITY SANDBOX                             │
@@ -322,19 +322,27 @@ directory.
 - Non-BuiltIn backends (HTTP, Command, Plugin, MCP) never receive identity;
   the registry discards the context for them.
 
-### 4.5 Parallel Tool Execution
+### 4.5 Grouped Tool Execution
 
-**Decision:** All tool calls in a single LLM response execute concurrently
-via `futures::join_all()`, capped at `max_tools_per_round`; calls beyond
-the cap receive error results instead of executing.
+**Decision:** The tool calls in a single LLM response, capped at
+`max_tools_per_round` (calls beyond the cap receive error results instead
+of executing), run in groups, in the model's order: consecutive calls whose
+tool declares `read_only_hint` (an MCP tool also `idempotent_hint`), and
+the lead's `spawn_subagents_batch`, `check_subagent_status` and
+`wait_for_subagents` whatever they declare, run together via
+`futures::join_all()`; every other call runs alone; the groups run one
+after another (`ToolRegistry::runs_concurrently`; N-TOOL-3, 2026-11-01).
 
 **Rationale:**
 - LLMs often emit multiple independent tool calls (e.g., `web_search` +
-  `file_read`).  Sequential execution would be unnecessarily slow.
-- The security sandbox is stateless per-call (circuit breaker state is
-  shared but accessed atomically via `Mutex`), so parallel execution is safe.
-- The task's cancellation token is raced against `join_all` for responsive
-  cancellation.
+  `file_read`).  Running reads one after another would be needlessly slow.
+- Running every call together was not safe.  The sandbox keeps no state
+  between calls, but the file tools take no lock, and `file_edit` reads
+  the file and writes it with await points between: two edits of one file
+  let through together (an Always allow, `auto_approve`) both read the
+  original, and the later write dropped the earlier edit.
+- The task's cancellation token is raced against the whole round, every
+  group, for responsive cancellation.
 
 ### 4.6 Circuit Breaker Pattern
 
@@ -469,8 +477,8 @@ so `file_write` creates a new file but refuses to replace one, and
 names.  At startup the daemon collects the names of all registered
 built-ins *dynamically*, adds the four lead-agent coordination tools
 (`spawn_subagent`, `spawn_subagents_batch`, `check_subagent_status`,
-`wait_for_subagents`), and skips (with a warning) any TOML tool whose name
-collides.
+`wait_for_subagents`) and `submit_result` (a typed subagent's own tool,
+SA-4), and skips (with a warning) any TOML tool whose name collides.
 
 **Rationale:**
 - Prevents users from accidentally (or maliciously) replacing
@@ -676,7 +684,16 @@ Optional fields: `version` (default `"0.0.0"`), `author` (default
 virtual capabilities).  Validation rules enforced at load time:
 
 - HTTP URLs must start with `http://` or `https://`
-- `timeout_secs` must be in `[1, 300]` (default 30)
+- `timeout_secs` must be in `[1, 300]` (default 30). The sandbox is the
+  one clock for both (TIMEOUT-ONE-CLOCK): an `http` tool's call is cut at
+  it where it is below `[execution.agent_defaults] max_tool_runtime_secs`
+  (120 s), else at that bound; a `command` tool's is its calls' default: a
+  call that asks nothing is cut at it, below the bound as above it, clamped
+  to `max_tool_runtime_ceiling_secs` (600 s by default), and a call may
+  lift it with its own `timeout_secs`, up to that ceiling (CMD-TIMEOUT); a
+  call cut below the ceiling is told it may ask for more only where its
+  parameters name a `timeout_secs` (or it sent one), and a cut call is a
+  failed tool run with the reason `timeout`
 - Any `annotation:*` entries in `provides_capabilities` must be one of the
   eight known annotation capability names
 - Names colliding with protected tools are skipped (§4.10)
@@ -703,7 +720,6 @@ block and restart the daemon.
 1. Create a new file in `crates/openalpaca_core/src/tools/builtins/`.
 2. Implement the `BuiltInTool` trait:
    ```rust
-   #[async_trait]
    impl BuiltInTool for MyTool {
        async fn execute(&self, arguments: &serde_json::Value) -> Result<String, String> {
            // implementation
@@ -713,8 +729,9 @@ block and restart the daemon.
    }
    ```
 3. Create a factory function returning `RegisteredTool` — populate
-   `definition`, `backend`, `provides_capabilities`, `exempt_from_timeout`
-   (normally `false`), `annotations`, `version`, `author`, `created_at`.
+   `definition`, `backend` (`ToolBackend::built_in(MyTool)`),
+   `provides_capabilities`, `exempt_from_timeout` (normally `false`),
+   `annotations`, `version`, `author`, `created_at`.
 4. Add an annotation profile for the new name in `annotations_for_builtin()`
    if the tool should be classified (read-only vs destructive drives
    confirmation gating and virtual capabilities).
@@ -768,8 +785,13 @@ args = ["-y", "@modelcontextprotocol/server-filesystem", "/tmp"]
 - A server whose connection is lost for good is marked `failed`; its tools
   are refused with that reason until it is reloaded.
 - Tool-call errors (`is_error` results) surface as tool errors to the LLM.
-- **Limitations:** non-text MCP content (images, resources, audio) is
-  replaced with a bracketed placeholder; MCP *resources* and *prompts* are
+- Images, audio clips and embedded blobs in a result are kept as
+  by-products of the turn's project, or of none, within
+  `max_artifact_bytes` and never asked; the model reads a line naming the
+  artifact's id, path, MIME type and size, or why nothing was saved.
+- **Limitations:** the model never sees an image's content (it can name
+  and `send` the by-product; `artifact_read` returns text only); MCP
+  *resources* and *prompts* are
   not implemented — only tools are imported.  Server mode (exposing
   OpenAlpaca's tools over MCP) is a non-goal.
 
@@ -787,8 +809,9 @@ and the `/v1/extensions` routes.  See the *Extensions* section of
 
 From the tool system's perspective a plugin tool is another registry entry
 with author `plugin:<name>`.  Plugins can also contribute skills and agent
-templates.  Plugin *connector* and *LLM-provider* bridges exist in code but
-are not wired into the daemon — treat those plugin types as non-functional.
+templates.  The plugin *connector* bridge exists in code but is not wired
+into the daemon — treat that plugin type as non-functional.  The plugin
+*LLM-provider* type is removed (M86): `types.provider` contributes nothing.
 
 ### 7.5 Skill-Bundled Scripts
 
@@ -828,7 +851,7 @@ reference is [Skill_Template_Reference.md](../Skill_Template_Reference.md)
 |--------|--------------|------------|
 | **Chat main loop** | `start_workflow`, `task_status`, the memory tools (with a memory service: the four readers and three writers, and `memory_confirm` on an attended `gui` turn), `read_result` (with a session log), every tool of every enabled extension, `invoke_skill`, keyword-suggested built-ins; plus `steer_workflow` and `queue_followup` while the lane has a running workflow and steering is on | Exactly the surface it was handed |
 | **Lead agent** | `spawn_subagent`, `spawn_subagents_batch` (when `batch_spawn_enabled`, the default), `check_subagent_status`, `wait_for_subagents`, `post_update` and `queue_followup` (when steering is on), workspace tools, `memory_search`, `memory_read` and `memory_timeline`, `artifact_write` and `read_result` (when its template grants them), every tool of every enabled extension, `invoke_skill` | The template's capabilities plus the assembled surface; template denials still win |
-| **Subagents** | `resolve_agent_tools()` — the template's capabilities resolved to tools, plus the workspace tools | The template's capabilities plus the workspace tools, plus the surface those capabilities resolved to — a template that grants `web_access` admits `web_search` and `web_fetch`. The widening adds that surface and nothing else, and template denials still win — see [TECHNICAL.md §11.2](./TECHNICAL.md#112-sandboxpolicy) |
+| **Subagents** | `resolve_agent_tools()` — the template's capabilities resolved to tools, plus the workspace tools, plus `submit_result` for a child spawned with a `result_schema` | The template's capabilities plus the workspace tools, plus the surface those capabilities resolved to (with `submit_result` for a child spawned with a `result_schema`) — a template that grants `web_access` admits `web_search` and `web_fetch`. The widening adds that surface and nothing else, and template denials still win — see [TECHNICAL.md §11.2](./TECHNICAL.md#112-sandboxpolicy) |
 | **Skills** | `requires_capabilities` or `tools.allow` resolved to tools, minus `tools.deny`, plus the skill's own `skill_script:*` and `invoke_skill:*` | Exactly the resolved surface |
 
 `[orchestrator.routing] tool_selection = "full"` swaps the chat loop's
@@ -840,7 +863,11 @@ tools are registered into a per-run copy of the registry
 (`register_coordination_tools`), so they pass through the same
 sandbox/registry path as every other tool.  `check_subagent_status` and
 `wait_for_subagents` are flagged `exempt_from_timeout` — they manage their
-own deadlines and must not be killed by the per-tool sandbox timeout.
+own deadlines and must not be killed by the per-tool sandbox timeout.  So
+is `invoke_skill`, wherever it is registered (the main loop's per-request
+set, the lead's per-run copy), as a skill's nested `invoke_skill:<id>`
+calls are: a skill is bounded by its own loop — its rounds, its cost cap,
+and each of its tools under the per-tool timeout (SKILL-NO-CUT).
 
 ### 8.2 Budget Enforcement
 
@@ -849,8 +876,9 @@ own deadlines and must not be killed by the per-tool sandbox timeout.
 | `max_tools_per_round` | Per LLM round | 5 (subagent), 3 (lead), 3 (skill), 4 (chat) | `[execution.agent_defaults]`, `[execution.lead_agent_defaults]`, `[execution.skill_defaults]`, `[orchestrator.routing] main_loop_max_tools_per_round` |
 | `max_rounds` | Per agentic loop | 15 (subagent), 18 (lead), 6 (skill), 8 (chat) | Same sections; `main_loop_max_rounds` for chat; per template `max_rounds` |
 | `max_tool_calls` | Per agent run / skill invocation | Unset | Agent template frontmatter (`config/agents/*.md`); a skill's `tools.rate_limit.max_calls` |
-| `max_tool_runtime_secs` | Per individual tool | 60 s (300 s for the lead) | `daemon.toml`; per template `timeout_seconds` |
+| `max_tool_runtime_secs` | Per individual tool, every loop, but the exempt tools (§8.1): `check_subagent_status`, `wait_for_subagents`, `invoke_skill` and `invoke_skill:<id>` | 120 s, the sandbox's cut; a command's or a plugin tool's `timeout_secs` up to `max_tool_runtime_ceiling_secs`, 600 s. The one clock for a `Command`, `Http`, plugin or MCP tool (TIMEOUT-ONE-CLOCK): a `Command`-backend tool's TOML `timeout_secs` is its calls' default, cut there by the sandbox below the bound as above it, clamped to the ceiling, and one that sends `timeout_secs` runs under that figure; an `Http`-backend tool's TOML `timeout_secs` (30 s by default) and an MCP server's `request_timeout_secs` (30 s by default) are cut there where below the bound; each backend's own clock waits past the cut. A cut call is a failed tool run (`tool_executed`, `reason: "timeout"`), never a `security_violation`; below the ceiling it is told it may ask for more only where its parameters name `timeout_secs` (or it sent one). A builtin with a deadline of its own (`web_fetch`, a skill script) still stops at whichever comes first. A plugin tool waits for its plugin's answer past the sandbox's figure (PLUGIN-WAIT), and its request leaves the plugin's channel, no cancel sent (PLUGIN-WAIT-2); outside the sandbox it waits 60 s, set by no key | `[execution.agent_defaults]` (a template's `timeout_seconds` is not read for it) |
 | `confirmation_timeout_secs` | Per confirmation prompt | 300 s | `[execution.agent_defaults]` |
+| `max_subagents_per_run` | Per lead-agent run, every spawn (retries included) | 48 — the next spawn is refused, naming it | `[execution.lead_agent_defaults]` |
 | `max_cost` | Per agent run / per chat turn | $1.00 ($5.00 for a lead-agent workflow) | `daemon.toml`; per template `max_cost_per_task` |
 | `drain_timeout_secs` | In-flight calls at disable/reload | 10 s | `[extensions]` |
 
@@ -886,8 +914,8 @@ clients as `ServerEvent`s:
 
 | Event | When |
 |-------|------|
-| `ToolExecuted` | Every tool execution: `agent_id`, `tool_name`, `success`, `duration_ms`, `task_id`, `session_id`, `tool_use_id` |
-| `SecurityViolation` | A call the sandbox refused, with the reason |
+| `ToolExecuted` | Every tool execution: `agent_id`, `tool_name`, `success`, `duration_ms`, `task_id`, `session_id`, `tool_use_id`, and `reason` (`Timeout` for a call the sandbox's clock cut, TIMEOUT-ONE-CLOCK; else none) |
+| `SecurityViolation` | A call the sandbox refused, with the reason (never a timeout) |
 | `CircuitBreakerTripped` | A breaker opened |
 | `ToolConfirmationRequested` | A prompt was raised: request ID, tool name, arguments, `stream_id`/`lane_key`/`task_id` routing hints |
 | `ToolConfirmationResolved` | A prompt ended: `approved`, `denied`, `timed_out` or `cancelled` |
@@ -925,10 +953,10 @@ reset or a project purge.
 | Area | Current State | Potential Enhancement |
 |------|--------------|----------------------|
 | **MCP resources & prompts** | Stubbed (tools only) | Import server resources/prompts into agent context |
-| **Non-text MCP content** | Replaced with placeholder text | Surface images/resources to multimodal models |
+| **Non-text MCP content** | Kept as by-products, named in the result's text | Surface images/resources to multimodal models |
 | **Per-field authorization** | Tool-name granularity | JSON path-based argument restrictions |
 | **Hot-reload of TOML tools** | Startup-only load | Watch `config/tools/` and re-register at runtime |
 | **Result streaming** | Buffered, then spilled or cut | Streaming for long-running tools |
 | **Sandboxed execution** | Process-level timeout | Container/WASM isolation for command tools |
 | **`event_log` retention** | Grows without bound | A retention pass, if one is ever wanted |
-| **Plugin connector / LLM-provider types** | Bridges exist, not wired | Wire into the connector manager and the LLM router |
+| **Plugin connector type** | Bridge exists, not wired | Wire into the connector manager |

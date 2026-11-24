@@ -8,7 +8,7 @@
 //! start, and liveness is `kill -0` on those pids.
 //!
 //! The server is a POSIX `sh` script rather than a Node or Python one so the
-//! suite needs nothing a developer's or CI's machine does not already have.
+//! suite needs nothing a developer's machine does not already have.
 //! Its one program beyond `sh` and its utilities is `perl` — in macOS's base
 //! system, and essential on Debian and Ubuntu — for the `setpgrp` that `sh`
 //! cannot do: each server leads its own process group, so a stub's teardown
@@ -75,6 +75,15 @@ struct StubOpts {
     /// background, so [`Stub::kill_child`] no longer reaches what holds the
     /// pipe; a test of a signal kills a stub without this option.
     exit_on_trigger: Option<i32>,
+    /// `sh` run before the server reads its first request, after `forks` —
+    /// what it writes to its stderr (`>&2`) is the stderr a test reads back
+    /// (N-MCP-5).
+    stderr_snippet: &'static str,
+    /// Say nothing to the first `tools/call` and keep reading, so the
+    /// `notifications/cancelled` a dropped call sends reaches the sent log
+    /// ([`Self::hang_call`] holds the shell in `wait` instead); answer every
+    /// later one (M15).
+    silent_first_call: bool,
 }
 
 /// How a stub answers the `server/discover` probe.
@@ -118,6 +127,9 @@ struct Stub {
     /// While this exists, a server built with `StubOpts::exit_on_trigger`
     /// exits with that code; the incarnation that exits removes it first.
     exit_trigger: PathBuf,
+    /// While this exists, `tools/call` answers with its one line as the
+    /// result, in place of the `ok` text ([`Stub::set_call_result`], M85).
+    call_result: PathBuf,
 }
 
 impl Stub {
@@ -201,6 +213,13 @@ impl Stub {
     /// Replace the tool set the next `tools/list` will answer with.
     fn set_tools(&self, tools: &[&str]) {
         std::fs::write(&self.tools_file, tools_json(tools)).expect("write tools file");
+    }
+
+    /// Answer every later `tools/call` with `result`, a `CallToolResult` as
+    /// JSON on one line.
+    fn set_call_result(&self, result: &str) {
+        assert!(!result.contains('\n'), "one line: the server reads none");
+        std::fs::write(&self.call_result, result).expect("write call result");
     }
 
     /// Ask the server to push `notifications/tools/list_changed`.
@@ -309,6 +328,8 @@ fn stub_server(dir: &Path, tag: &str, opts: StubOpts) -> Stub {
     let sent_log = dir.join(format!("{tag}-sent.log"));
     let exit_trigger = dir.join(format!("{tag}-exit"));
     let listen_id = dir.join(format!("{tag}-listen-id"));
+    let call_result = dir.join(format!("{tag}-call-result.json"));
+    let first_call_seen = dir.join(format!("{tag}-first-call-seen"));
 
     std::fs::write(&pid_log, "").expect("create pid log");
     std::fs::write(&tools_file, tools_json(&["echo"])).expect("create tools file");
@@ -322,6 +343,14 @@ fn stub_server(dir: &Path, tag: &str, opts: StubOpts) -> Stub {
         "text=`printf '%s' \"$line\" | sed -n 's/.*\"name\":\"\\([^\"]*\\)\".*/\\1/p'`\n"
     } else {
         ""
+    };
+    let silent_first = if opts.silent_first_call {
+        format!(
+            "if [ ! -f '{mark}' ]; then : > '{mark}'; continue; fi\n      ",
+            mark = first_call_seen.display()
+        )
+    } else {
+        String::new()
     };
     let hang_call = if opts.hang_call {
         "hang\n".to_string()
@@ -457,7 +486,8 @@ hang() {{
   echo "$!" >> '{sleep_log}'
   wait "$!"
 }}
-{slow_start}{notifier}{forks}{serve_open}while IFS= read -r line; do
+{slow_start}{notifier}{forks}{stderr_snippet}
+{serve_open}while IFS= read -r line; do
   printf '%s %s\n' "$$" "$line" >> '{sent_log}'
   id=`printf '%s' "$line" | sed -n 's/.*"id":\([0-9][0-9]*\).*/\1/p'`
   case "$line" in
@@ -477,7 +507,11 @@ hang() {{
       ;;
     *'"method":"tools/call"'*)
       text=ok
-      {echo_name}{hang_call}printf '{{"jsonrpc":"2.0","id":%s,"result":{{"content":[{{"type":"text","text":"%s"}}],"isError":false}}}}\n' "$id" "$text"
+      {silent_first}{echo_name}{hang_call}if [ -f '{call_result}' ]; then
+        printf '{{"jsonrpc":"2.0","id":%s,"result":%s}}\n' "$id" "`cat '{call_result}'`"
+      else
+        printf '{{"jsonrpc":"2.0","id":%s,"result":{{"content":[{{"type":"text","text":"%s"}}],"isError":false}}}}\n' "$id" "$text"
+      fi
       ;;
     *'"method":"subscriptions/listen"'*)
       printf '%s' "$id" > '{listen_id}'
@@ -496,6 +530,8 @@ done
         break_list = break_list.display(),
         sent_log = sent_log.display(),
         listen_id = listen_id.display(),
+        call_result = call_result.display(),
+        stderr_snippet = opts.stderr_snippet,
     );
 
     std::fs::write(&script, body).expect("write stub server");
@@ -514,6 +550,7 @@ done
         escapee_log,
         sent_log,
         exit_trigger,
+        call_result,
     }
 }
 
@@ -546,15 +583,35 @@ impl Harness {
     /// `failed` event and T1 step 3's `ExtensionCapabilityWithdrawn`. The two
     /// dependent handles are installed the way `services/mcp.rs` installs them.
     fn new(drain_secs: u64) -> Self {
+        Self::build(drain_secs, None)
+    }
+
+    /// [`Self::new`] whose registry keeps an MCP tool's blocks of bytes in
+    /// `db`, under `max_artifact_bytes` — the sink `services/tools.rs` sets
+    /// (M85).
+    fn with_by_products(drain_secs: u64, db: openalpaca_storage::Database, cap: u64) -> Self {
+        Self::build(drain_secs, Some((db, cap)))
+    }
+
+    fn build(drain_secs: u64, by_products: Option<(openalpaca_storage::Database, u64)>) -> Self {
         let home = tempfile::tempdir().expect("home store");
         let env = HomeStoreGuard::set(home.path());
         let dir = tempfile::tempdir().expect("config dir");
         let config_path = dir.path().join("mcp.toml");
 
         let bus = EventBus::new(256);
-        let registry = Arc::new(ToolRegistry::with_event_bus(bus.clone()).expect("tool registry"));
         let mut cfg = DaemonConfig::default();
         cfg.extensions.drain_timeout_secs = drain_secs;
+        let mut registry = ToolRegistry::with_event_bus(bus.clone()).expect("tool registry");
+        if let Some((db, cap)) = by_products {
+            cfg.execution.artifacts.max_artifact_bytes = cap;
+            let config = Arc::new(ArcSwap::from_pointee(cfg.clone()));
+            registry.set_by_product_sink(openalpaca_core::tools::builtins::ByProductSink::new(
+                db,
+                Some(config),
+            ));
+        }
+        let registry = Arc::new(registry);
         let daemon_config = Arc::new(ArcSwap::from_pointee(cfg));
         let agents = Arc::new(AgentRegistry::new());
         let skills_dir = tempfile::tempdir().expect("skills dir");
@@ -595,7 +652,7 @@ impl Harness {
                     singleton: false,
                     capabilities: caps.iter().map(|c| c.to_string()).collect(),
                     denied_capabilities: vec![],
-                    temperature: 0.5,
+                    temperature: None,
                     verbosity: "normal".into(),
                     model: None,
                     fallback_models: vec![],
@@ -724,6 +781,21 @@ async fn failed_detail(h: &Harness, timeout: Duration) -> Option<String> {
         }) = h.state("srv")
         {
             return Some(detail);
+        }
+        if tokio::time::Instant::now() >= deadline {
+            return None;
+        }
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+}
+
+/// The reason and the detail of `srv`'s row once it reads `failed`, for any
+/// reason, waiting up to `timeout` for it. `None` when it never does.
+async fn failure_of(h: &Harness, timeout: Duration) -> Option<(FailureReason, String)> {
+    let deadline = tokio::time::Instant::now() + timeout;
+    loop {
+        if let Some(ExtensionState::Failed { reason, detail, .. }) = h.state("srv") {
+            return Some((reason, detail));
         }
         if tokio::time::Instant::now() >= deadline {
             return None;
@@ -891,7 +963,7 @@ fn ps_tree(pids: &[i32]) -> String {
         .args(["-o", "pid,ppid,pgid,command", "-p", &list])
         .output()
         .expect("run ps");
-    String::from_utf8_lossy(&out.stdout).into_owned()
+    String::from_utf8_lossy_owned(out.stdout)
 }
 
 /// **The forking server through the disable / re-enable path.** A stdio
@@ -1071,8 +1143,9 @@ command = "{}"
         .call_tool("echo", serde_json::json!({}), None)
         .await
         .expect_err("a sealed client must refuse");
-    assert!(
-        matches!(err, McpError::Closed),
+    std::assert_matches!(
+        err,
+        McpError::Closed,
         "expected Closed (not TransportClosed), got {err:?}"
     );
     assert!(!err.is_retriable(), "Closed must never be retriable");
@@ -1213,6 +1286,320 @@ command = "{}"
 }
 
 // ============================================================================
+// TIMEOUT-ONE-CLOCK — the sandbox is the one clock for an MCP call too
+// ============================================================================
+
+/// One call to `srv__echo` through a sandbox whose per-tool bound is
+/// `bound_secs`, on the harness's bus; what the bus carried for it after:
+/// each `ToolExecuted`'s success and reason, and the `SecurityViolation`s.
+async fn call_through_the_sandbox(
+    h: &Harness,
+    bound_secs: u64,
+) -> (
+    Result<String, String>,
+    Vec<(bool, Option<openalpaca_api::events::ToolFailureReason>)>,
+    usize,
+) {
+    let (answer, executed, violations) = call_through_the_sandbox_until(h, bound_secs, None).await;
+    (answer.expect("no cancel token"), executed, violations)
+}
+
+/// [`call_through_the_sandbox`], the sandboxed call raced against `cancel`
+/// as a run's tool round is (`runner::unless_cancelled`): a cancel drops
+/// it, and the answer is `None`.
+async fn call_through_the_sandbox_until(
+    h: &Harness,
+    bound_secs: u64,
+    cancel: Option<&tokio_util::sync::CancellationToken>,
+) -> (
+    Option<Result<String, String>>,
+    Vec<(bool, Option<openalpaca_api::events::ToolFailureReason>)>,
+    usize,
+) {
+    use openalpaca_core::events::SystemEvent;
+    use openalpaca_core::security::capabilities::Allowlist;
+    use openalpaca_core::security::sandbox::{SandboxManager, SandboxPolicy};
+
+    let mut events = h.bus.subscribe();
+    let sandbox = SandboxManager::with_defaults(Arc::clone(&h.registry), h.bus.clone());
+    let policy = SandboxPolicy {
+        agent_id: "one-clock".to_string(),
+        allowed_capabilities: Allowlist::Unrestricted,
+        denied_capabilities: vec![],
+        require_confirmation_for: vec![],
+        max_tool_calls: None,
+        max_tool_runtime_secs: bound_secs,
+        max_tool_runtime_ceiling_secs: 600,
+        stream_id: None,
+        lane_key: None,
+        confirmation_timeout_secs: None,
+        auto_approve: false,
+        unattended: false,
+    };
+    let call = openalpaca_llm::ToolCall {
+        id: "tc_clock".to_string(),
+        name: "srv__echo".to_string(),
+        arguments: serde_json::json!({}),
+    };
+    let ctx = openalpaca_core::tools::registry::ToolContext {
+        agent_id: Some("one-clock".to_string()),
+        ..Default::default()
+    };
+    let run = sandbox.execute_tool(&call, &policy, &ctx);
+    let answer = match cancel {
+        Some(token) => token.run_until_cancelled(run).await,
+        None => Some(run.await),
+    };
+    let (mut executed, mut violations) = (Vec::new(), 0);
+    while let Ok(event) = events.try_recv() {
+        match event {
+            SystemEvent::ToolExecuted {
+                tool_name,
+                success,
+                reason,
+                ..
+            } if tool_name == "srv__echo" => executed.push((success, reason)),
+            SystemEvent::SecurityViolation { tool_name, .. } if tool_name == "srv__echo" => {
+                violations += 1;
+            }
+            _ => {}
+        }
+    }
+    (answer, executed, violations)
+}
+
+/// A stub that hangs every call, declared with `request_timeout_secs`, up
+/// and `Enabled`.
+async fn hanging_server(h: &Harness, request_timeout_secs: u64) -> Stub {
+    let stub = stub_server(
+        h.path(),
+        "clock",
+        StubOpts {
+            hang_call: true,
+            ..StubOpts::default()
+        },
+    );
+    h.write_config(&format!(
+        r#"[defaults]
+connect_timeout_secs = 10
+request_timeout_secs = {request_timeout_secs}
+max_reconnect_attempts = 3
+reconnect_backoff_ms = 20
+
+[servers.srv]
+transport = "stdio"
+command = "{}"
+"#,
+        stub.script.display()
+    ));
+    h.supervisor.reconcile_all().await;
+    assert_eq!(h.state("srv"), Some(ExtensionState::Enabled));
+    stub
+}
+
+/// TIMEOUT-ONE-CLOCK: an MCP call whose server's `request_timeout_secs`
+/// (1 s) is below the bound (3 s) is cut by the sandbox at that figure — the
+/// client's own deadline no longer ends it first with "MCP server ...
+/// failed" — and is a failed tool run with the reason `timeout`, never a
+/// security violation. A cut is no crash: the row stays `Enabled`.
+#[tokio::test]
+async fn an_mcp_call_is_cut_by_the_sandbox_at_its_servers_figure() {
+    let h = Harness::new(1);
+    let stub = hanging_server(&h, 1).await;
+
+    let (answer, executed, violations) = call_through_the_sandbox(&h, 3).await;
+    let _hang = stub
+        .sleeps()
+        .into_iter()
+        .map(KillOnFail)
+        .collect::<Vec<_>>();
+    assert_eq!(
+        answer.as_ref().map_err(String::as_str),
+        Err("Tool 'srv__echo' timed out after 1s"),
+        "the sandbox cut the call at the server's figure"
+    );
+    assert_eq!(
+        executed,
+        vec![(
+            false,
+            Some(openalpaca_api::events::ToolFailureReason::Timeout)
+        )]
+    );
+    assert_eq!(violations, 0, "a timeout is no security violation");
+    assert_eq!(h.state("srv"), Some(ExtensionState::Enabled));
+}
+
+/// One whose server's figure (10 s) is above the bound (1 s) is cut at the
+/// bound, as before — and is now a failed tool run, not a violation.
+#[tokio::test]
+async fn an_mcp_call_past_the_bound_is_cut_at_the_bound_as_a_failed_run() {
+    let h = Harness::new(1);
+    let stub = hanging_server(&h, 10).await;
+
+    let (answer, executed, violations) = call_through_the_sandbox(&h, 1).await;
+    let _hang = stub
+        .sleeps()
+        .into_iter()
+        .map(KillOnFail)
+        .collect::<Vec<_>>();
+    assert_eq!(
+        answer.as_ref().map_err(String::as_str),
+        Err("Tool 'srv__echo' timed out after 1s")
+    );
+    assert_eq!(
+        executed,
+        vec![(
+            false,
+            Some(openalpaca_api::events::ToolFailureReason::Timeout)
+        )]
+    );
+    assert_eq!(violations, 0, "a timeout is no security violation");
+}
+
+/// A stub that says nothing to its first call and answers every later one,
+/// declared with a `request_timeout_secs` (10 s) past every bound here, up
+/// and `Enabled`.
+async fn silent_first_call_server(h: &Harness) -> Stub {
+    let stub = stub_server(
+        h.path(),
+        "drop",
+        StubOpts {
+            silent_first_call: true,
+            ..StubOpts::default()
+        },
+    );
+    h.write_config(&format!(
+        r#"[defaults]
+connect_timeout_secs = 10
+request_timeout_secs = 10
+max_reconnect_attempts = 3
+reconnect_backoff_ms = 20
+
+[servers.srv]
+transport = "stdio"
+command = "{}"
+"#,
+        stub.script.display()
+    ));
+    h.supervisor.reconcile_all().await;
+    assert_eq!(h.state("srv"), Some(ExtensionState::Enabled));
+    stub
+}
+
+/// The ids of the `tools/call`s the stub read, and the `requestId` of each
+/// `notifications/cancelled`, oldest first.
+fn calls_and_cancels(stub: &Stub) -> (Vec<serde_json::Value>, Vec<serde_json::Value>) {
+    let sent = stub.sent();
+    let of = |method: &str, id: fn(&serde_json::Value) -> serde_json::Value| {
+        sent.iter()
+            .filter(|(_, m)| m["method"] == method)
+            .map(|(_, m)| id(m))
+            .collect::<Vec<_>>()
+    };
+    (
+        of("tools/call", |m| m["id"].clone()),
+        of("notifications/cancelled", |m| {
+            m["params"]["requestId"].clone()
+        }),
+    )
+}
+
+/// M15's cancel contract on the sandbox's cut: the cut drops the call, and
+/// rmcp 3.9.0's guard on the request in flight sends exactly one
+/// `notifications/cancelled`, naming that request's id. A call answered
+/// after it sends none.
+#[tokio::test]
+async fn a_call_the_sandbox_cuts_is_cancelled_once_by_its_id_and_an_answered_one_is_not() {
+    let h = Harness::new(1);
+    let stub = silent_first_call_server(&h).await;
+
+    let (answer, executed, _) = call_through_the_sandbox(&h, 1).await;
+    assert_eq!(
+        answer.as_ref().map_err(String::as_str),
+        Err("Tool 'srv__echo' timed out after 1s"),
+        "the sandbox cut the silent call"
+    );
+    assert_eq!(
+        executed,
+        vec![(
+            false,
+            Some(openalpaca_api::events::ToolFailureReason::Timeout)
+        )]
+    );
+    let cancelled = || !calls_and_cancels(&stub).1.is_empty();
+    assert!(
+        eventually(Duration::from_secs(5), cancelled).await,
+        "the cut call is cancelled on the wire"
+    );
+    // Give a second notification the time it would take to land.
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    let (calls, cancels) = calls_and_cancels(&stub);
+    assert_eq!(calls.len(), 1, "the call reached the server once");
+    assert_eq!(
+        cancels,
+        [calls[0].clone()],
+        "one cancel, naming the cut call's id"
+    );
+
+    let (answer, _, _) = call_through_the_sandbox(&h, 3).await;
+    assert!(answer.is_ok(), "the next call is answered: {answer:?}");
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    let (calls, cancels) = calls_and_cancels(&stub);
+    assert_eq!(calls.len(), 2);
+    assert_eq!(
+        cancels,
+        [calls[0].clone()],
+        "the answered call is not cancelled"
+    );
+    assert_eq!(stub.spawn_count(), 1, "one child throughout");
+}
+
+/// The same on a run's `/cancel`: the run's token drops the sandboxed call
+/// once it has reached the server, and exactly one `notifications/cancelled`
+/// names its id.
+#[tokio::test]
+async fn a_call_a_runs_cancel_drops_is_cancelled_once_by_its_id() {
+    let h = Harness::new(1);
+    let stub = silent_first_call_server(&h).await;
+
+    let token = tokio_util::sync::CancellationToken::new();
+    let cancel = {
+        let token = token.clone();
+        let sent = stub.sent_log.clone();
+        async move {
+            let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
+            while !std::fs::read_to_string(&sent)
+                .unwrap_or_default()
+                .contains(r#""method":"tools/call""#)
+            {
+                assert!(
+                    tokio::time::Instant::now() < deadline,
+                    "the call reaches the server"
+                );
+                tokio::time::sleep(Duration::from_millis(20)).await;
+            }
+            token.cancel();
+        }
+    };
+    let ((answer, _, _), ()) =
+        tokio::join!(call_through_the_sandbox_until(&h, 5, Some(&token)), cancel);
+    assert!(answer.is_none(), "the cancel dropped the call: {answer:?}");
+    let cancelled = || !calls_and_cancels(&stub).1.is_empty();
+    assert!(
+        eventually(Duration::from_secs(5), cancelled).await,
+        "the dropped call is cancelled on the wire"
+    );
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    let (calls, cancels) = calls_and_cancels(&stub);
+    assert_eq!(calls.len(), 1, "the call reached the server once");
+    assert_eq!(
+        cancels,
+        [calls[0].clone()],
+        "one cancel, naming the dropped call's id"
+    );
+}
+
+// ============================================================================
 // N-MCP-4 — remote tool names in the providers' alphabet
 // ============================================================================
 
@@ -1302,6 +1689,170 @@ async fn a_refresh_maps_the_added_names_and_keeps_the_first_of_two_that_collide(
 }
 
 // ============================================================================
+// M85: images, audio and embedded blobs kept as by-products
+// ============================================================================
+
+/// RFC 4648 base64 with padding, written here because the daemon crate has
+/// no base64 dependency and a test adds none (no lock byte moves).
+fn standard_base64(bytes: &[u8]) -> String {
+    const ALPHABET: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+    let mut out = String::with_capacity(bytes.len().div_ceil(3) * 4);
+    for chunk in bytes.chunks(3) {
+        let n = chunk
+            .iter()
+            .enumerate()
+            .fold(0u32, |n, (i, b)| n | u32::from(*b) << (16 - 8 * i));
+        for i in 0..4 {
+            if i <= chunk.len() {
+                out.push(ALPHABET[(n >> (18 - 6 * i) & 63) as usize] as char);
+            } else {
+                out.push('=');
+            }
+        }
+    }
+    out
+}
+
+/// The plan's gate, end to end through a real stdio server and a per-request
+/// clone of the registry, as a turn calls it: an image, an audio clip and an
+/// embedded blob become three by-products whose bytes equal the decoded
+/// input; an over-limit image and invalid base64 become two "nothing was
+/// saved" lines; the Library lists the three, each announced once; and a
+/// call with no context saves nothing and says so.
+///
+/// No card: the save is not a tool call of its own, and the tool itself
+/// declares no `destructiveHint`, the one annotation an MCP tool asks on
+/// (`effective_confirmation_set`; T35 (iv) is taken, not built). The call
+/// here goes through the registry, not the sandbox, so the test asserts that
+/// annotation and that no `ToolConfirmationRequested` was published.
+#[tokio::test]
+async fn an_mcp_tools_images_audio_and_blobs_are_kept_as_by_products() {
+    use openalpaca_storage::{ArtifactQuery, ArtifactStore, Database};
+
+    let db_dir = tempfile::tempdir().expect("db dir");
+    let db = Database::open(&db_dir.path().join("test.db")).expect("database");
+    let h = Harness::with_by_products(1, db.clone(), 1024);
+    let stub = stub_server(h.path(), "by-products", StubOpts::default());
+    stub.set_tools(&["shoot"]);
+    let b64 = standard_base64;
+    let png: Vec<u8> = (0..200u8).map(|i| i | 0x80).collect();
+    let wav: Vec<u8> = (0..100u8).map(|i| i.wrapping_mul(7) | 0x80).collect();
+    let pdf: Vec<u8> = (0..50u8).map(|i| i.wrapping_mul(13) | 0x80).collect();
+    let too_big: Vec<u8> = vec![0xff; 1025];
+    let result = serde_json::json!({
+        "content": [
+            {"type": "image", "data": b64(&png), "mimeType": "image/png"},
+            {"type": "audio", "data": b64(&wav), "mimeType": "audio/wav"},
+            {"type": "resource", "resource": {
+                "uri": "file:///report.pdf", "mimeType": "application/pdf", "blob": b64(&pdf)
+            }},
+            {"type": "image", "data": b64(&too_big), "mimeType": "image/png"},
+            {"type": "image", "data": "not base64 at all!", "mimeType": "image/png"}
+        ],
+        "isError": false
+    });
+    stub.set_call_result(&result.to_string());
+    h.declare(&stub, true);
+    h.supervisor.reconcile_all().await;
+    assert_eq!(h.state("srv"), Some(ExtensionState::Enabled));
+    let registered = h.registry.get("srv__shoot").expect("the tool registers");
+    assert_eq!(
+        registered
+            .annotations
+            .as_ref()
+            .and_then(|a| a.destructive_hint),
+        None,
+        "the stub's tool declares no destructiveHint, so no card is derived for it"
+    );
+
+    let mut events = h.bus.subscribe();
+    let owner = "owner-mcp";
+    let ctx = openalpaca_core::tools::ToolContext {
+        owner_id: Some(owner.to_string()),
+        event_bus: Some(h.bus.clone()),
+        ..Default::default()
+    };
+    let per_request = (*h.registry).clone();
+    let out = per_request
+        .execute_with_context("srv__shoot", &serde_json::json!({}), &ctx)
+        .await
+        .expect("the call succeeds");
+    let lines: Vec<&str> = out.lines().collect();
+    assert_eq!(lines.len(), 5, "{out}");
+
+    let store = ArtifactStore::new(&db);
+    let mut kept = Vec::new();
+    for (line, input) in lines[..3].iter().zip([&png, &wav, &pdf]) {
+        let id = line
+            .split_once("saved as artifact \"")
+            .and_then(|(_, rest)| rest.split_once('"'))
+            .unwrap_or_else(|| panic!("not kept: {line}"))
+            .0;
+        let record = store.get(id, owner).expect("read").expect("the row");
+        assert!(line.contains(&record.storage_path), "{line}");
+        assert!(
+            line.contains(&format!("({}, {} bytes)", record.mime_type, input.len())),
+            "{line}"
+        );
+        assert_eq!(
+            &std::fs::read(&record.storage_path).expect("the file"),
+            input
+        );
+        kept.push(record.id);
+    }
+    assert_eq!(
+        lines[3],
+        "[image: nothing was saved: the image is 1025 bytes, over the 1024-byte limit for one \
+         artifact ([execution.artifacts] max_artifact_bytes)]"
+    );
+    assert!(
+        lines[4].starts_with("[image: nothing was saved: the image's data is not valid base64 ("),
+        "{}",
+        lines[4]
+    );
+
+    let (listed, total) = store.list(&ArtifactQuery::new(owner)).expect("list");
+    assert_eq!(total, 3, "the Library lists the three");
+    let mut listed: Vec<String> = listed.into_iter().map(|r| r.id).collect();
+    listed.sort();
+    let mut expected = kept.clone();
+    expected.sort();
+    assert_eq!(listed, expected);
+
+    let mut announced = Vec::new();
+    while let Ok(event) = events.try_recv() {
+        match event {
+            SystemEvent::ArtifactWritten { artifact_id, .. } => announced.push(artifact_id),
+            SystemEvent::ToolConfirmationRequested { .. } => panic!("no card is raised"),
+            _ => {}
+        }
+    }
+    assert_eq!(announced, kept, "each kept block announced once, in order");
+
+    // The same call with no context: nothing saved, and every block says so.
+    let bare = h
+        .registry
+        .execute("srv__shoot", &serde_json::json!({}))
+        .await
+        .expect("the call succeeds");
+    assert_eq!(bare.lines().count(), 5);
+    for (line, what) in bare
+        .lines()
+        .zip(["image", "audio", "embedded resource", "image", "image"])
+    {
+        assert_eq!(
+            line,
+            format!(
+                "[{what}: nothing was saved: the call carries no tool context, so the bytes have \
+                 no owner or store]"
+            )
+        );
+    }
+    assert_eq!(store.list(&ArtifactQuery::new(owner)).expect("list").1, 3);
+    h.supervisor.shutdown_all().await;
+}
+
+// ============================================================================
 // Write-first
 // ============================================================================
 
@@ -1332,8 +1883,9 @@ async fn a_store_that_cannot_be_written_makes_disable_a_500_and_changes_nothing(
     std::fs::set_permissions(h.path(), std::fs::Permissions::from_mode(0o755))
         .expect("restore the config dir");
 
-    assert!(
-        matches!(err, ExtensionError::WriteFailed(_)),
+    std::assert_matches!(
+        err,
+        ExtensionError::WriteFailed(_),
         "expected the 500 shape, got {err:?}"
     );
     let record = h.record("srv").expect("the row survives");
@@ -1374,14 +1926,12 @@ async fn enabling_an_unreachable_command_returns_the_row_with_the_bit_true_and_s
         .await
         .expect("enable returns the row, not an error");
     assert!(row.disposition.0, "the bit is durable");
-    assert!(
-        matches!(
-            row.state,
-            ExtensionState::Failed {
-                reason: FailureReason::Unreachable,
-                ..
-            }
-        ),
+    std::assert_matches!(
+        row.state,
+        ExtensionState::Failed {
+            reason: FailureReason::Unreachable,
+            ..
+        },
         "a command that will not spawn is unreachable, got {:?}",
         row.state
     );
@@ -1410,8 +1960,9 @@ async fn enabling_an_unreachable_command_returns_the_row_with_the_bit_true_and_s
         .record(&mcp("srv"))
         .expect("the restart built a row");
     assert!(after.disposition.0, "the restart read the bit as true");
-    assert!(
-        matches!(after.state, ExtensionState::Failed { .. }),
+    std::assert_matches!(
+        after.state,
+        ExtensionState::Failed { .. },
         "and tried again, got {:?}",
         after.state
     );
@@ -1733,14 +2284,12 @@ command = "{}"
         fourth.contains("reconnect attempts exhausted"),
         "expected ReconnectExhausted, got: {fourth}"
     );
-    assert!(
-        matches!(
-            h.state("srv"),
-            Some(ExtensionState::Failed {
-                reason: FailureReason::Crashed,
-                ..
-            })
-        ),
+    std::assert_matches!(
+        h.state("srv"),
+        Some(ExtensionState::Failed {
+            reason: FailureReason::Crashed,
+            ..
+        }),
         "the row now reads failed/crashed, got {:?}",
         h.state("srv")
     );
@@ -1978,6 +2527,570 @@ async fn a_close_the_daemon_makes_is_not_read_as_an_exit() {
 }
 
 // ============================================================================
+// A failed stdio server's stderr, kept as a bounded, redacted tail — N-MCP-5
+// ============================================================================
+
+/// The value a declaration hands its server, which the server then writes to
+/// its stderr.
+const SERVER_TOKEN: &str = "tok-5e3a9c1f-0b7d-4c2e";
+
+/// 10 KB of filler, then a line naming the server's token, then the last line
+/// — written before the server reads its first request.
+const TOKEN_AND_10_KB: &str = r#"head -c 10240 /dev/zero | tr '\000' 'x' >&2
+printf '\nthe token is %s\n' "$SERVER_TOKEN" >&2
+printf 'warn: a right-to-left override \342\200\256 and a zero-width space \342\200\213 here\n' >&2
+printf 'the last line before the exit\n' >&2
+"#;
+
+/// The tail a failed row's detail ends with: after the heading, at most
+/// 4 KB, ending with the stub's last line, the token masked.
+fn assert_tail(detail: &str) -> &str {
+    let (_, rest) = detail
+        .split_once("\nserver stderr (last ")
+        .unwrap_or_else(|| panic!("the detail carries the server's stderr: {detail}"));
+    let (count, tail) = rest
+        .split_once(" bytes, redacted):\n")
+        .unwrap_or_else(|| panic!("a heading naming the bytes: {detail}"));
+    assert_eq!(count.parse::<usize>().ok(), Some(tail.len()), "{detail}");
+    assert!(tail.len() <= 4096, "at most 4 KB of tail: {}", tail.len());
+    assert!(
+        tail.ends_with("the last line before the exit"),
+        "the detail ends with the stub's last line: {tail}"
+    );
+    assert!(
+        !detail.contains(SERVER_TOKEN),
+        "the token is masked: {detail}"
+    );
+    assert!(
+        tail.contains("the token is <masked>"),
+        "where it was written: {tail}"
+    );
+    tail
+}
+
+/// **A server that dies at its start leaves its stderr on the row** — the
+/// commonest failure: the client is gone with the failed connect, and the
+/// tail is still the supervisor's. Its token, a literal `env` value, is
+/// masked; 10 KB of stderr is cut to the last 4 KB.
+#[tokio::test]
+async fn a_server_that_dies_at_its_start_leaves_its_stderr_tail_redacted_on_the_row() {
+    let h = Harness::new(1);
+    let stub = stub_server(
+        h.path(),
+        "stderr-start",
+        StubOpts {
+            probe: Probe::Close,
+            stderr_snippet: TOKEN_AND_10_KB,
+            ..StubOpts::default()
+        },
+    );
+    h.write_config(&declaration(
+        &stub,
+        true,
+        &format!(r#"env = {{ SERVER_TOKEN = "{SERVER_TOKEN}" }}"#),
+    ));
+    h.supervisor.reconcile_all().await;
+    let (reason, detail) = failure_of(&h, Duration::from_secs(5))
+        .await
+        .unwrap_or_else(|| panic!("the row reads failed, got {:?}", h.state("srv")));
+    std::assert_matches!(
+        reason,
+        FailureReason::ProtocolNegotiationFailed | FailureReason::Unreachable,
+        "a death at the start: {reason:?}"
+    );
+    assert!(
+        detail.starts_with("connect: "),
+        "its own words first: {detail}"
+    );
+    assert_tail(&detail);
+
+    h.supervisor.shutdown_all().await;
+}
+
+/// **An exit after `Enabled` leaves its stderr on the row too**, after the
+/// exit's own words, its hidden characters escaped.
+#[tokio::test]
+async fn an_exit_after_enabled_leaves_its_stderr_tail_redacted_and_escaped_on_the_row() {
+    let h = Harness::new(1);
+    let stub = stub_server(
+        h.path(),
+        "stderr-exit",
+        StubOpts {
+            exit_on_trigger: Some(3),
+            stderr_snippet: TOKEN_AND_10_KB,
+            ..StubOpts::default()
+        },
+    );
+    h.write_config(&declaration(
+        &stub,
+        true,
+        &format!(r#"env = {{ SERVER_TOKEN = "{SERVER_TOKEN}" }}"#),
+    ));
+    h.supervisor.reconcile_all().await;
+    assert_eq!(h.state("srv"), Some(ExtensionState::Enabled));
+
+    stub.exit_now();
+    let detail = failed_detail(&h, Duration::from_secs(5))
+        .await
+        .unwrap_or_else(|| panic!("the row reads failed, got {:?}", h.state("srv")));
+    assert!(
+        detail.starts_with(
+            "the server's process exited (exit status: 3); the next call starts it again\n"
+        ),
+        "the exit's own words first: {detail}"
+    );
+    let tail = assert_tail(&detail);
+    assert!(
+        tail.contains("override <U+202E> and a zero-width space <U+200B> here"),
+        "hidden characters escaped: {tail}"
+    );
+    assert!(
+        !detail.contains('\u{202E}') && !detail.contains('\u{200B}'),
+        "none left raw"
+    );
+
+    h.supervisor.shutdown_all().await;
+}
+
+/// **A server flooding its stderr still answers** — 1 MB, far past a pipe's
+/// buffer. A REGRESSION GUARD, green before N-MCP-5 too: an inherited stderr
+/// never blocks; a piped one blocks the server once nothing reads it.
+#[tokio::test]
+async fn a_server_that_writes_1_mb_to_its_stderr_still_answers_tools_list() {
+    let h = Harness::new(1);
+    let stub = stub_server(
+        h.path(),
+        "stderr-flood",
+        StubOpts {
+            stderr_snippet: r"head -c 1048576 /dev/zero | tr '\000' 'x' >&2",
+            ..StubOpts::default()
+        },
+    );
+    h.declare(&stub, true);
+    h.supervisor.reconcile_all().await;
+    assert_eq!(
+        h.state("srv"),
+        Some(ExtensionState::Enabled),
+        "tools/list was answered"
+    );
+    let ok = h
+        .registry
+        .execute("srv__echo", &serde_json::json!({}))
+        .await
+        .expect("a call is answered");
+    assert_eq!(ok, "ok");
+
+    h.supervisor.shutdown_all().await;
+}
+
+/// **An exit followed at once by a call still reconnects once and answers**
+/// (D22): the ledger's `mark_exited` waits for the exited process's stderr —
+/// here held open by a process that left the group — and a call made at once
+/// takes its pre-send reconnect, the row ending `Enabled`. The respawn's
+/// fresh tail ends the old spawn's wait, so the wait does not run its whole
+/// 250 ms here and the queueing of a reconnect behind a waiting exit is not
+/// exercised (a mutation applying it at once still passes; the next test
+/// pins it). A REGRESSION
+/// GUARD of "an exit followed at once by a call reconnects once and
+/// answers", green before N-MCP-5 too.
+#[tokio::test]
+async fn an_exit_followed_at_once_by_a_call_still_reconnects_once_and_answers() {
+    let h = Harness::new(1);
+    // A `setsid` process holding the server's stderr — not its stdout, so the
+    // client still sees the exit — its pid written beside the script.
+    let stub = stub_server(
+        h.path(),
+        "stderr-race",
+        StubOpts {
+            exit_on_trigger: Some(3),
+            stderr_snippet: r#"perl -MPOSIX -e 'POSIX::setsid() or die "setsid: $!\n"; exec "sleep", "600" or die "exec: $!\n"' </dev/null >/dev/null &
+echo "$!" >> "$0.held"
+printf 'starting\n' >&2"#,
+            ..StubOpts::default()
+        },
+    );
+    let held_log = PathBuf::from(format!("{}.held", stub.script.display()));
+    let held = || -> Vec<i32> {
+        std::fs::read_to_string(&held_log)
+            .unwrap_or_default()
+            .lines()
+            .filter_map(|l| l.trim().parse().ok())
+            .collect()
+    };
+    struct Reap<F: Fn() -> Vec<i32>>(F);
+    impl<F: Fn() -> Vec<i32>> Drop for Reap<F> {
+        fn drop(&mut self) {
+            for pid in (self.0)() {
+                drop(KillOnFail(pid));
+            }
+        }
+    }
+    let _reap = Reap(&held);
+    h.declare(&stub, true);
+    h.supervisor.reconcile_all().await;
+    assert_eq!(h.state("srv"), Some(ExtensionState::Enabled));
+    let generation = h.record("srv").expect("record").generation;
+    assert!(
+        eventually(Duration::from_secs(5), || held().len() == 1).await,
+        "the process holding the stderr open is running"
+    );
+    let client = h.client_of("srv__echo").expect("the client");
+    let mut events = h.bus.subscribe();
+
+    stub.exit_now();
+    assert!(
+        transport_closed(&client, Duration::from_secs(5)).await,
+        "the client sees the exit"
+    );
+    let ok = h
+        .registry
+        .execute("srv__echo", &serde_json::json!({}))
+        .await
+        .expect("the call reconnects and is answered");
+    assert_eq!(ok, "ok");
+    assert_eq!(stub.spawn_count(), 2, "respawned once");
+    assert_eq!(
+        state_events(&mut events, Duration::from_millis(600)).await,
+        vec![
+            ("failed".to_string(), generation),
+            ("enabled".to_string(), generation)
+        ],
+        "the exit, then the return, in that order"
+    );
+    assert_eq!(
+        h.state("srv"),
+        Some(ExtensionState::Enabled),
+        "and it stays"
+    );
+
+    h.supervisor.shutdown_all().await;
+}
+
+/// **A reconnect reported while an exit still waits for its stderr goes
+/// after it** (D22's ordering): the exit's `mark_exited` waits for the
+/// exited spawn's stderr, and a `Reconnected` reported meanwhile is queued
+/// behind it, so the row ends `Enabled` — never a late exit turning a
+/// recovered row `Failed`. A real respawn ends the old spawn's wait before
+/// its handshake can report the reconnect (the exit-then-call test above), so
+/// the two events are handed to the load's receiver directly here, the
+/// exit's tail a live server's stderr, which has not ended: its wait runs the
+/// whole [`openalpaca_mcp::STDERR_SETTLE`].
+#[tokio::test]
+async fn a_reconnect_reported_while_an_exit_waits_for_its_stderr_is_applied_after_it() {
+    use std::os::unix::process::ExitStatusExt;
+
+    let h = Harness::new(1);
+    let stub = stub_server(h.path(), "order", StubOpts::default());
+    h.declare(&stub, true);
+    h.supervisor.reconcile_all().await;
+    assert_eq!(h.state("srv"), Some(ExtensionState::Enabled));
+    let generation = h.record("srv").expect("record").generation;
+    let client = h.client_of("srv__echo").expect("the client");
+    assert!(
+        !client.stderr_tail().current().snapshot().ended,
+        "the live server's stderr has not ended, so an exit's wait runs its bound"
+    );
+    let mut events = h.bus.subscribe();
+
+    let handler = connection_handler(
+        Arc::clone(h.ledger()),
+        mcp("srv"),
+        generation,
+        client.stderr_tail().clone(),
+    );
+    handler(ConnectionEvent::Exited(std::process::ExitStatus::from_raw(
+        3 << 8,
+    )));
+    handler(ConnectionEvent::Reconnected);
+
+    assert_eq!(
+        state_events(&mut events, Duration::from_millis(600)).await,
+        vec![
+            ("failed".to_string(), generation),
+            ("enabled".to_string(), generation)
+        ],
+        "the exit, then the reconnect reported while it waited"
+    );
+    assert_eq!(h.state("srv"), Some(ExtensionState::Enabled));
+    drop(handler);
+
+    h.supervisor.shutdown_all().await;
+}
+
+/// **A variable the server inherits with a secret-like name is masked too**
+/// (D20 (d)): every stdio child inherits the daemon's environment, and a
+/// server that prints its own is the commonest way a credential reaches a
+/// log. Set on the stub's command through the supervisor's test seam, never
+/// on this process's environment; the declaration names it nowhere.
+#[tokio::test]
+async fn an_inherited_variable_with_a_secret_like_name_is_masked_in_the_tail() {
+    const INHERITED: &str = "inh-77d0c3e2-secret-value";
+    let h = Harness::new(1);
+    h.supervisor
+        .inherit_for_tests("OTHER_SERVICE_API_KEY", INHERITED);
+    h.supervisor
+        .inherit_for_tests("PLAIN_SETTING", "plain-value-shown");
+    let stub = stub_server(
+        h.path(),
+        "stderr-inherited",
+        StubOpts {
+            probe: Probe::Close,
+            stderr_snippet: r#"printf 'env: %s %s\n' "$OTHER_SERVICE_API_KEY" "$PLAIN_SETTING" >&2"#,
+            ..StubOpts::default()
+        },
+    );
+    h.declare(&stub, true);
+    h.supervisor.reconcile_all().await;
+    let (_, detail) = failure_of(&h, Duration::from_secs(5))
+        .await
+        .unwrap_or_else(|| panic!("the row reads failed, got {:?}", h.state("srv")));
+    assert!(
+        detail.ends_with("\nenv: <masked> plain-value-shown"),
+        "the secret-named value masked, the other shown: {detail}"
+    );
+    assert!(!detail.contains(INHERITED));
+
+    h.supervisor.shutdown_all().await;
+}
+
+/// The `stderr_snippet` of a server whose respawns fail: once the file
+/// `<script>.doomed` exists, an incarnation writes the token and the last line
+/// to its stderr and exits before any handshake.
+const DOOMED_RESPAWN: &str = r#"if [ -f "$0.doomed" ]; then
+  printf 'the token is %s\nthe last line before the exit\n' "$SERVER_TOKEN" >&2
+  exit 1
+fi"#;
+
+/// Make every later incarnation of `stub` a [`DOOMED_RESPAWN`].
+fn doom_respawns(stub: &Stub) {
+    std::fs::write(format!("{}.doomed", stub.script.display()), "").expect("write doomed marker");
+}
+
+/// **A bring-up whose `tools/list` fails leaves its stderr on the row** — the
+/// `list_tools` arm of the supervisor's bring-up (writer (a)): the handshake
+/// succeeded, the fetch is refused, the handle is torn down, and the tail is
+/// still the supervisor's.
+#[tokio::test]
+async fn a_bring_up_whose_tools_list_fails_leaves_its_stderr_tail_on_the_row() {
+    let h = Harness::new(1);
+    let stub = stub_server(
+        h.path(),
+        "stderr-list",
+        StubOpts {
+            stderr_snippet: TOKEN_AND_10_KB,
+            ..StubOpts::default()
+        },
+    );
+    stub.break_next_list();
+    h.write_config(&declaration(
+        &stub,
+        true,
+        &format!(r#"env = {{ SERVER_TOKEN = "{SERVER_TOKEN}" }}"#),
+    ));
+    h.supervisor.reconcile_all().await;
+    let (_, detail) = failure_of(&h, Duration::from_secs(5))
+        .await
+        .unwrap_or_else(|| panic!("the row reads failed, got {:?}", h.state("srv")));
+    assert!(
+        detail.starts_with("list_tools: "),
+        "its own words first: {detail}"
+    );
+    assert_tail(&detail);
+
+    h.supervisor.shutdown_all().await;
+}
+
+/// **A call that exhausts the reconnects leaves the last spawn's stderr on the
+/// row** — the registry's dispatch (writer (d)): after the exit, each call's
+/// pre-send reconnect spawns an incarnation that writes to its stderr and
+/// exits; the fourth call finds the budget spent and fails the row with the
+/// client's state, then the tail of the last process the client spawned.
+#[tokio::test]
+async fn a_call_that_exhausts_the_reconnects_leaves_the_last_spawns_stderr_tail_on_the_row() {
+    let h = Harness::new(1);
+    let stub = stub_server(
+        h.path(),
+        "stderr-dispatch",
+        StubOpts {
+            stderr_snippet: DOOMED_RESPAWN,
+            ..StubOpts::default()
+        },
+    );
+    h.write_config(&declaration(
+        &stub,
+        true,
+        &format!(r#"env = {{ SERVER_TOKEN = "{SERVER_TOKEN}" }}"#),
+    ));
+    h.supervisor.reconcile_all().await;
+    assert_eq!(h.state("srv"), Some(ExtensionState::Enabled));
+    let client = h.client_of("srv__echo").expect("the client");
+
+    doom_respawns(&stub);
+    stub.kill_child();
+    assert!(
+        transport_closed(&client, Duration::from_secs(5)).await,
+        "the client sees the exit"
+    );
+    let mut last = String::new();
+    for _ in 0..4 {
+        last = h
+            .registry
+            .execute("srv__echo", &serde_json::json!({}))
+            .await
+            .expect_err("no respawn answers");
+    }
+    assert!(
+        last.contains("reconnect attempts exhausted"),
+        "the fourth call exhausts the budget: {last}"
+    );
+    assert!(
+        !last.contains("server stderr") && !last.contains("the last line"),
+        "the tail never enters the result the model reads: {last}"
+    );
+    let (reason, detail) = failure_of(&h, Duration::ZERO)
+        .await
+        .unwrap_or_else(|| panic!("the row reads failed, got {:?}", h.state("srv")));
+    assert_eq!(reason, FailureReason::Crashed);
+    assert!(
+        detail.starts_with("reconnect attempts exhausted"),
+        "the client's own state first: {detail}"
+    );
+    assert_tail(&detail);
+
+    h.supervisor.shutdown_all().await;
+}
+
+/// **A refresh that finds its client exhausted leaves the stderr on the row**
+/// — `on_tool_list_changed` (writer (c)): the client's reconnects were spent
+/// outside the registry, so no call wrote the row first, and the refresh's
+/// failed fetch fails it with the client's state, then the last spawn's tail.
+#[tokio::test]
+async fn a_refresh_that_finds_its_client_exhausted_leaves_the_stderr_tail_on_the_row() {
+    let h = Harness::new(1);
+    let stub = stub_server(
+        h.path(),
+        "stderr-refresh",
+        StubOpts {
+            stderr_snippet: DOOMED_RESPAWN,
+            ..StubOpts::default()
+        },
+    );
+    h.write_config(&declaration(
+        &stub,
+        true,
+        &format!(r#"env = {{ SERVER_TOKEN = "{SERVER_TOKEN}" }}"#),
+    ));
+    h.supervisor.reconcile_all().await;
+    assert_eq!(h.state("srv"), Some(ExtensionState::Enabled));
+    let generation = h.record("srv").expect("record").generation;
+    let client = h.client_of("srv__echo").expect("the client");
+
+    doom_respawns(&stub);
+    stub.kill_child();
+    assert!(
+        transport_closed(&client, Duration::from_secs(5)).await,
+        "the client sees the exit"
+    );
+    for _ in 0..8 {
+        if matches!(
+            client.connection_state().await,
+            openalpaca_mcp::ConnectionSnapshot::Failed { .. }
+        ) {
+            break;
+        }
+        let _ = client.list_tools(None).await;
+    }
+    std::assert_matches!(
+        client.connection_state().await,
+        openalpaca_mcp::ConnectionSnapshot::Failed { .. },
+        "the client's reconnects are spent"
+    );
+    assert!(
+        !failure_of(&h, Duration::ZERO)
+            .await
+            .is_some_and(|(_, d)| d.starts_with("reconnect attempts exhausted")),
+        "no call wrote the exhausted row first"
+    );
+
+    let refresh = h
+        .supervisor
+        .on_tool_list_changed(&mcp("srv"), generation, &client)
+        .await;
+    std::assert_matches!(
+        refresh,
+        ToolListRefresh::FetchFailed,
+        "the refresh's fetch fails"
+    );
+    let (reason, detail) = failure_of(&h, Duration::ZERO)
+        .await
+        .unwrap_or_else(|| panic!("the row reads failed, got {:?}", h.state("srv")));
+    assert_eq!(reason, FailureReason::Crashed);
+    assert!(
+        detail.starts_with("reconnect attempts exhausted"),
+        "the client's own state first: {detail}"
+    );
+    assert_tail(&detail);
+
+    h.supervisor.shutdown_all().await;
+}
+
+/// **An exit's detail waits for the stderr its server writes last** (D22):
+/// a process that left the group holds the server's stderr, waits for the
+/// server to be gone, and only then writes its last line and exits. The
+/// ledger's `mark_exited` waits for that stderr to end (at most 250 ms), so
+/// the row ends with the late line; read at once, it would not.
+#[tokio::test]
+async fn an_exits_detail_waits_for_the_stderr_its_server_writes_last() {
+    let h = Harness::new(1);
+    let stub = stub_server(
+        h.path(),
+        "stderr-late",
+        StubOpts {
+            exit_on_trigger: Some(3),
+            stderr_snippet: r#"PARENT=$$ perl -MPOSIX -e 'POSIX::setsid() or die "setsid: $!\n"; while (kill 0, $ENV{PARENT}) { select(undef, undef, undef, 0.02) } select(undef, undef, undef, 0.1); print STDERR "the late line, written after the exit\n"' </dev/null >/dev/null &
+echo "$!" >> "$0.held"
+printf 'starting\n' >&2"#,
+            ..StubOpts::default()
+        },
+    );
+    let held_log = PathBuf::from(format!("{}.held", stub.script.display()));
+    let held = || -> Vec<i32> {
+        std::fs::read_to_string(&held_log)
+            .unwrap_or_default()
+            .lines()
+            .filter_map(|l| l.trim().parse().ok())
+            .collect()
+    };
+    struct Reap<F: Fn() -> Vec<i32>>(F);
+    impl<F: Fn() -> Vec<i32>> Drop for Reap<F> {
+        fn drop(&mut self) {
+            for pid in (self.0)() {
+                drop(KillOnFail(pid));
+            }
+        }
+    }
+    let _reap = Reap(&held);
+    h.declare(&stub, true);
+    h.supervisor.reconcile_all().await;
+    assert_eq!(h.state("srv"), Some(ExtensionState::Enabled));
+    assert!(
+        eventually(Duration::from_secs(5), || held().len() == 1).await,
+        "the process holding the stderr open is running"
+    );
+
+    stub.exit_now();
+    let detail = failed_detail(&h, Duration::from_secs(5))
+        .await
+        .unwrap_or_else(|| panic!("the row reads failed, got {:?}", h.state("srv")));
+    assert!(
+        detail.ends_with("\nstarting\nthe late line, written after the exit"),
+        "the line written after the exit is on the row: {detail}"
+    );
+
+    h.supervisor.shutdown_all().await;
+}
+
+// ============================================================================
 // Reload
 // ============================================================================
 
@@ -2025,11 +3138,9 @@ async fn reload_bumps_the_generation_keeps_the_bit_and_staleifies_a_snapshot() {
 
     // `reload` is not the verb that turns things on.
     h.supervisor.disable(&mcp("srv")).await.expect("disable");
-    assert!(
-        matches!(
-            h.supervisor.reload(&mcp("srv")).await,
-            Err(ExtensionError::NotLoaded)
-        ),
+    std::assert_matches!(
+        h.supervisor.reload(&mcp("srv")).await,
+        Err(ExtensionError::NotLoaded),
         "reload from Disabled is not_loaded"
     );
 }
@@ -2099,8 +3210,9 @@ command = "/definitely/not/a/command/xyzzy"
 "#,
     );
     h.supervisor.reconcile_all().await;
-    assert!(
-        matches!(h.state("srv"), Some(ExtensionState::Failed { .. })),
+    std::assert_matches!(
+        h.state("srv"),
+        Some(ExtensionState::Failed { .. }),
         "the declared command does not exist"
     );
     let failed = h.record("srv").expect("record");
@@ -2221,8 +3333,9 @@ enabled = false
     // The route the GUI drives: W flips the bit on disk, then E0–E5 cannot
     // connect — the `Failed` row §3.4 trigger 2 would retry on a real change.
     let row = h.supervisor.enable(&mcp("srv")).await.expect("enable");
-    assert!(
-        matches!(row.state, ExtensionState::Failed { .. }),
+    std::assert_matches!(
+        row.state,
+        ExtensionState::Failed { .. },
         "the declared command does not exist: {:?}",
         row.state
     );
@@ -2244,8 +3357,9 @@ enabled = false
         after.generation, after_enable,
         "nothing about srv changed, so §3.4's trigger 2 must not fire"
     );
-    assert!(
-        matches!(after.state, ExtensionState::Failed { .. }),
+    std::assert_matches!(
+        after.state,
+        ExtensionState::Failed { .. },
         "and the row is where the enable left it"
     );
     assert!(!other.any_alive(), "the untouched disabled server never started");
@@ -2281,14 +3395,12 @@ async fn an_unparseable_store_keeps_the_server_up_and_parks_a_pseudo_record() {
     let pseudo = h
         .record(CONFIG_PSEUDO_ID)
         .expect("the whole-file pseudo-record appears");
-    assert!(
-        matches!(
-            pseudo.state,
-            ExtensionState::Failed {
-                reason: FailureReason::ConfigInvalid,
-                ..
-            }
-        ),
+    std::assert_matches!(
+        pseudo.state,
+        ExtensionState::Failed {
+            reason: FailureReason::ConfigInvalid,
+            ..
+        },
         "with the parse error, got {:?}",
         pseudo.state
     );
@@ -2301,18 +3413,14 @@ async fn an_unparseable_store_keeps_the_server_up_and_parks_a_pseudo_record() {
     //    its `disable` is not refused up front; it runs W, W cannot write into
     //    a file that does not parse, and that is the `500` write-first
     //    promises, with nothing torn down.
-    assert!(
-        matches!(
-            h.supervisor.disable(&mcp(CONFIG_PSEUDO_ID)).await,
-            Err(ExtensionError::StoreUnreadable(_))
-        ),
+    std::assert_matches!(
+        h.supervisor.disable(&mcp(CONFIG_PSEUDO_ID)).await,
+        Err(ExtensionError::StoreUnreadable(_)),
         "the pseudo-record row is 409 store_unreadable"
     );
-    assert!(
-        matches!(
-            h.supervisor.disable(&mcp("srv")).await,
-            Err(ExtensionError::WriteFailed(_))
-        ),
+    std::assert_matches!(
+        h.supervisor.disable(&mcp("srv")).await,
+        Err(ExtensionError::WriteFailed(_)),
         "a live server's disable is the write-first 500"
     );
     assert_eq!(
@@ -2766,8 +3874,9 @@ async fn a_bring_up_that_fails_after_the_handshake_tears_its_own_handle_down() {
 
     h.supervisor.reconcile_all().await;
 
-    assert!(
-        matches!(h.state("srv"), Some(ExtensionState::Failed { .. })),
+    std::assert_matches!(
+        h.state("srv"),
+        Some(ExtensionState::Failed { .. }),
         "the row reads failed, got {:?}",
         h.state("srv")
     );
@@ -2842,7 +3951,10 @@ Body.
 ";
 
 /// Every `ExtensionCapabilityWithdrawn` frame the bus holds.
-#[allow(clippy::type_complexity)]
+#[expect(
+    clippy::type_complexity,
+    reason = "the withdrawal frame's seven fields, read by position"
+)]
 fn withdrawn_frames(
     rx: &mut tokio::sync::broadcast::Receiver<openalpaca_core::events::SystemEvent>,
 ) -> Vec<(ExtensionId, ExtensionState, WithdrawalCause, Vec<String>, Vec<String>, Vec<String>, String)>
@@ -3005,8 +4117,9 @@ async fn a_reload_that_ends_failed_fires_the_cron_notice() {
 
     let mut events = h.bus.subscribe();
     h.supervisor.reload(&mcp("srv")).await.expect("reload");
-    assert!(
-        matches!(h.state("srv"), Some(ExtensionState::Failed { .. })),
+    std::assert_matches!(
+        h.state("srv"),
+        Some(ExtensionState::Failed { .. }),
         "got {:?}",
         h.state("srv")
     );
@@ -3015,7 +4128,7 @@ async fn a_reload_that_ends_failed_fires_the_cron_notice() {
     assert_eq!(frames.len(), 1, "one transition, one announcement: {frames:?}");
     let (_, state, cause, _, _, cron, _) = &frames[0];
     assert_eq!(*cause, WithdrawalCause::Reload);
-    assert!(matches!(state, ExtensionState::Failed { .. }));
+    std::assert_matches!(state, ExtensionState::Failed { .. });
     assert_eq!(
         cron,
         &vec!["nightly".to_string()],

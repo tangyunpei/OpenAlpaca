@@ -12,7 +12,7 @@
  * daemon cannot serve.
  *
  * Beside the pin: `Open` (the file in its default app, through the daemon) and
- * `Reveal in Finder` (the file in its folder, through the Tauri shell — drawn
+ * `Reveal in Finder` (the file in its folder, through the daemon too — drawn
  * only inside the app's window, `canReveal`), each only when the caller gives
  * it a handler.
  *
@@ -253,7 +253,7 @@ export function FilePanel({
             <div
               role="listbox"
               aria-label="Library files"
-              className="sc absolute top-[calc(100%-34px)] right-[12px] left-[12px] z-[31] max-h-[340px] overflow-y-auto rounded-2xl border border-line-popover bg-raised shadow-popover"
+              className="absolute top-[calc(100%-34px)] right-[12px] left-[12px] z-31 max-h-[340px] sc overflow-y-auto rounded-2xl border border-line-popover bg-raised shadow-popover"
             >
               <p className="m-0 border-b border-line-hair-2 px-[11px] pt-[8px] pb-[6px] font-mono text-[8.5px] tracking-eyebrow-w text-faint uppercase">
                 Library
@@ -299,7 +299,7 @@ export function FilePanel({
         )}
       </div>
 
-      <div className="sc min-h-0 flex-1 overflow-y-auto px-[14px] pt-[13px] pb-[18px]">
+      <div className="min-h-0 sc flex-1 overflow-y-auto px-[14px] pt-[13px] pb-[18px]">
         <div className="mb-[11px] flex flex-wrap items-center gap-[8px]">
           <span className="font-mono text-2xs-plus text-muted-fg">
             {[

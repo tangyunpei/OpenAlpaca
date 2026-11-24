@@ -113,11 +113,11 @@ export function RunReportCard({
       </header>
 
       <div className="px-[14px] py-[13px]">
-        <p className="mb-[6px] text-md-plus font-semibold [text-wrap:pretty]">
+        <p className="mb-[6px] text-md-plus font-semibold text-pretty">
           {title}
         </p>
         {body !== null && body !== "" && (
-          <p className="mt-0 mb-[11px] text-md-plus leading-[1.6] [text-wrap:pretty] whitespace-pre-line text-secondary">
+          <p className="mt-0 mb-[11px] text-md-plus leading-[1.6] text-pretty whitespace-pre-line text-secondary">
             {body}
           </p>
         )}

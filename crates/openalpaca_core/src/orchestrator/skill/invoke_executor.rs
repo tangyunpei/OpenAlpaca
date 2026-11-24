@@ -6,7 +6,6 @@ use crate::security::capabilities::Allowlist;
 use crate::security::sandbox::{SandboxManager, SandboxPolicy};
 use crate::tools::builtins::ScriptToolBuiltIn;
 use crate::tools::registry::{BuiltInTool, RegisteredTool, ToolBackend, ToolContext, ToolRegistry};
-use async_trait::async_trait;
 use openalpaca_llm::LlmRouter;
 use openalpaca_llm::{ChatMessage, ToolDefinition};
 use std::sync::Arc;
@@ -33,10 +32,18 @@ pub struct SkillInvocationToolExecutor {
     pub circuit_breaker: crate::daemon_config::CircuitBreakerConfig,
     /// From `execution.agent_defaults.confirmation_timeout_secs`.
     pub confirmation_timeout_secs: u64,
+    /// From `execution.agent_defaults.max_tool_runtime_secs`: the per-tool
+    /// bound every loop reads (N-TOOL-1b), this tier's included.
+    pub max_tool_runtime_secs: u64,
+    /// From `execution.agent_defaults.max_tool_runtime_ceiling_secs`.
+    pub max_tool_runtime_ceiling_secs: u64,
 }
 
 impl SkillInvocationToolExecutor {
-    #[allow(clippy::too_many_arguments)]
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "the catalog, shared handles and limits a nested skill runs under"
+    )]
     pub fn new(
         catalog: Arc<SkillCatalog>,
         tool_registry: Arc<ToolRegistry>,
@@ -51,6 +58,8 @@ impl SkillInvocationToolExecutor {
         auto_approve: bool,
         circuit_breaker: crate::daemon_config::CircuitBreakerConfig,
         confirmation_timeout_secs: u64,
+        max_tool_runtime_secs: u64,
+        max_tool_runtime_ceiling_secs: u64,
     ) -> Self {
         Self {
             catalog,
@@ -66,6 +75,8 @@ impl SkillInvocationToolExecutor {
             auto_approve,
             circuit_breaker,
             confirmation_timeout_secs,
+            max_tool_runtime_secs,
+            max_tool_runtime_ceiling_secs,
         }
     }
 
@@ -330,11 +341,12 @@ impl SkillInvocationToolExecutor {
 
             // Register script tools (file-based skills only)
             if let Some(ref skill_dir) = entry.skill_dir {
+                let roots = self.catalog.skill_roots();
                 for cfg in &skill_doc.frontmatter.scripts {
-                    let tool = ScriptToolBuiltIn::new(skill_dir, cfg)?;
+                    let tool = ScriptToolBuiltIn::new(skill_dir, cfg, roots.clone())?;
                     cloned.register(RegisteredTool {
                         definition: ScriptToolBuiltIn::tool_definition(&cfg.name),
-                        backend: ToolBackend::BuiltIn(Arc::new(tool)),
+                        backend: ToolBackend::built_in(tool),
                         provides_capabilities: vec![],
                         exempt_from_timeout: false,
                         annotations: None,
@@ -363,6 +375,8 @@ impl SkillInvocationToolExecutor {
                     self.auto_approve,
                     self.circuit_breaker.clone(),
                     self.confirmation_timeout_secs,
+                    self.max_tool_runtime_secs,
+                    self.max_tool_runtime_ceiling_secs,
                 ));
                 for dep_id in &skill_doc.frontmatter.depends_on {
                     if self.catalog.get(dep_id).is_some() {
@@ -384,10 +398,10 @@ impl SkillInvocationToolExecutor {
                                 strict: None,
                                 input_examples: None,
                             },
-                            backend: ToolBackend::BuiltIn(Arc::new(SkillInvocationBuiltInAdapter {
+                            backend: ToolBackend::built_in(SkillInvocationBuiltInAdapter {
                                 executor: child_executor.clone(),
                                 skill_id: dep_id.clone(),
-                            })),
+                            }),
                             provides_capabilities: vec![],
                             exempt_from_timeout: true,
                             annotations: None,
@@ -463,7 +477,8 @@ impl SkillInvocationToolExecutor {
                     .rate_limit
                     .max_calls
                     .map(|n| n as u32),
-                max_tool_runtime_secs: config.max_tool_runtime.as_secs(),
+                max_tool_runtime_secs: self.max_tool_runtime_secs,
+                max_tool_runtime_ceiling_secs: self.max_tool_runtime_ceiling_secs,
                 // Lane identity is inherited from the parent ToolContext when
                 // the invocation chain started on a conversational path.
                 // stream_id is not carried on ToolContext — nested loops stay
@@ -513,7 +528,6 @@ pub struct SkillInvocationBuiltInAdapter {
     pub skill_id: String,
 }
 
-#[async_trait]
 impl BuiltInTool for SkillInvocationBuiltInAdapter {
     async fn execute(&self, arguments: &serde_json::Value) -> Result<String, String> {
         self.executor
@@ -542,7 +556,6 @@ mod tests {
         requests: Mutex<Vec<Vec<ChatMessage>>>,
     }
 
-    #[async_trait]
     impl LlmProvider for MockProvider {
         fn name(&self) -> &str {
             "mock"
@@ -574,7 +587,7 @@ mod tests {
             Ok(ChatResponse {
                 content,
                 tool_calls,
-                model: "claude-sonnet-4-20250514".to_string(),
+                model: "claude-sonnet-4-6".to_string(),
                 usage: Usage {
                     input_tokens: 10,
                     output_tokens: 5,
@@ -582,6 +595,7 @@ mod tests {
                 },
                 finish_reason,
                 thinking: None,
+                echo: None,
                 parts: None,
             })
         }
@@ -591,7 +605,6 @@ mod tests {
         calls: Arc<AtomicUsize>,
     }
 
-    #[async_trait]
     impl BuiltInTool for EchoTool {
         async fn execute(&self, _arguments: &serde_json::Value) -> Result<String, String> {
             self.calls.fetch_add(1, Ordering::SeqCst);
@@ -645,9 +658,9 @@ Use echo_tool to answer.
                     strict: None,
                     input_examples: None,
                 },
-                backend: ToolBackend::BuiltIn(Arc::new(EchoTool {
+                backend: ToolBackend::built_in(EchoTool {
                     calls: calls.clone(),
-                })),
+                }),
                 provides_capabilities: vec![],
                 exempt_from_timeout: false,
                 annotations: None,
@@ -664,7 +677,7 @@ Use echo_tool to answer.
         let router = Arc::new(LlmRouter::single_provider(
             provider.clone(),
             ProviderType::Anthropic,
-            "claude-sonnet-4-20250514".to_string(),
+            "claude-sonnet-4-6".to_string(),
         ));
 
         // call_stack non-empty = we are inside a parent skill's loop, i.e. this
@@ -683,6 +696,8 @@ Use echo_tool to answer.
             false,
             crate::daemon_config::CircuitBreakerConfig::default(),
             300,
+            120,
+            600,
         );
 
         let result = executor
@@ -754,7 +769,7 @@ Read the file.
         let router = Arc::new(LlmRouter::single_provider(
             provider.clone(),
             ProviderType::Anthropic,
-            "claude-sonnet-4-20250514".to_string(),
+            "claude-sonnet-4-6".to_string(),
         ));
         let executor = SkillInvocationToolExecutor::new(
             catalog,
@@ -770,6 +785,8 @@ Read the file.
             false,
             crate::daemon_config::CircuitBreakerConfig::default(),
             300,
+            120,
+            600,
         );
 
         executor
@@ -836,7 +853,7 @@ Work on the file.
         let router = Arc::new(LlmRouter::single_provider(
             provider.clone(),
             ProviderType::Anthropic,
-            "claude-sonnet-4-20250514".to_string(),
+            "claude-sonnet-4-6".to_string(),
         ));
         let executor = SkillInvocationToolExecutor::new(
             catalog,
@@ -852,6 +869,8 @@ Work on the file.
             false,
             crate::daemon_config::CircuitBreakerConfig::default(),
             300,
+            120,
+            600,
         );
 
         executor
@@ -890,7 +909,7 @@ Work on the file.
         let router = Arc::new(LlmRouter::single_provider(
             provider,
             ProviderType::Anthropic,
-            "claude-sonnet-4-20250514".to_string(),
+            "claude-sonnet-4-6".to_string(),
         ));
         SkillInvocationToolExecutor::new(
             catalog,
@@ -906,6 +925,8 @@ Work on the file.
             false,
             crate::daemon_config::CircuitBreakerConfig::default(),
             300,
+            120,
+            600,
         )
     }
 

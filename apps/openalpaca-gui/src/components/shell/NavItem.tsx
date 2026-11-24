@@ -39,7 +39,7 @@ export function NavItem({
       onClick={onSelect}
       className={cn(
         "flex cursor-pointer items-center gap-[9px] rounded-lg border-none px-[10px] py-[8px] text-left font-sans text-md leading-[normal] font-medium",
-        "transition-[background-color,color] duration-[120ms]",
+        "transition-[background-color,color] duration-120",
         "focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-blue",
         active
           ? "bg-ink text-on-dark"

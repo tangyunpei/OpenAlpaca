@@ -2,7 +2,6 @@ use crate::daemon_config::{DaemonConfig, SessionsConfig};
 use crate::tools::registry::{BuiltInTool, RegisteredTool, ToolBackend, ToolContext};
 use crate::tools::working_folder::{WorkingFolder, WorkingFolderRefusal, working_folder};
 use arc_swap::ArcSwap;
-use async_trait::async_trait;
 use openalpaca_llm::ToolDefinition;
 use openalpaca_storage::hash::sha256_hex;
 use openalpaca_storage::store::{
@@ -49,7 +48,6 @@ fn told_what_is_there(refusal: String, in_folder: &Path) -> String {
 /// root of its own — the folder is the call's, read from its context.
 struct FileReadTool;
 
-#[async_trait]
 impl BuiltInTool for FileReadTool {
     /// R26: a call reached with no context names no folder, and is refused
     /// rather than read from the daemon's own directory.
@@ -151,7 +149,7 @@ pub(super) fn file_read_tool() -> RegisteredTool {
                 serde_json::json!({"path": "src/main.rs"}),
             ]),
         },
-        backend: ToolBackend::BuiltIn(Arc::new(FileReadTool)),
+        backend: ToolBackend::built_in(FileReadTool),
         provides_capabilities: vec!["file_read".into()],
         exempt_from_timeout: false,
         annotations: annotations_for_builtin("file_read"),
@@ -174,7 +172,6 @@ const FILE_LIST_MAX_ENTRIES: usize = 500;
 /// root, and in a project `.openalpaca` refused (R32).
 struct FileListTool;
 
-#[async_trait]
 impl BuiltInTool for FileListTool {
     async fn execute(&self, _arguments: &serde_json::Value) -> Result<String, String> {
         Err(WorkingFolderRefusal::NoContext.to_string())
@@ -306,7 +303,7 @@ pub(super) fn file_list_tool() -> RegisteredTool {
                 serde_json::json!({"path": "src"}),
             ]),
         },
-        backend: ToolBackend::BuiltIn(Arc::new(FileListTool)),
+        backend: ToolBackend::built_in(FileListTool),
         // R42: comes with `file_read`, so a template that reads files lists
         // them with no template edit — and one that denies `file_read` is
         // handed neither (`resolve_capabilities`' provided-capability filter).
@@ -589,7 +586,8 @@ impl FileWriteTool {
                 tool: "file_write",
                 name: &artifact_name(path),
                 kind: kind_for_file_name(path).unwrap_or(ArtifactKind::Code),
-                content,
+                content: content.as_bytes(),
+                mime_type: None,
                 note: None,
                 summary: Some(path),
                 metadata: None,
@@ -607,7 +605,6 @@ impl FileWriteTool {
     }
 }
 
-#[async_trait]
 impl BuiltInTool for FileWriteTool {
     async fn execute(&self, arguments: &serde_json::Value) -> Result<String, String> {
         self.write(arguments, &ToolContext::default()).await
@@ -724,7 +721,7 @@ pub(super) fn file_write_tool(
                 serde_json::json!({"path": "output/result.txt", "content": "Hello, world!"}),
             ]),
         },
-        backend: ToolBackend::BuiltIn(Arc::new(FileWriteTool { db, daemon_config })),
+        backend: ToolBackend::built_in(FileWriteTool { db, daemon_config }),
         provides_capabilities: vec!["file_write".into()],
         exempt_from_timeout: false,
         annotations: annotations_for_builtin("file_write"),
@@ -1084,7 +1081,6 @@ impl FileEditTool {
     }
 }
 
-#[async_trait]
 impl BuiltInTool for FileEditTool {
     /// R26: with no context there is no folder to edit in.
     async fn execute(&self, _arguments: &serde_json::Value) -> Result<String, String> {
@@ -1167,7 +1163,7 @@ pub(super) fn file_edit_tool(
                 "new_string": "let retries = 5;"
             })]),
         },
-        backend: ToolBackend::BuiltIn(Arc::new(FileEditTool { db, daemon_config })),
+        backend: ToolBackend::built_in(FileEditTool { db, daemon_config }),
         // R48: it comes with the file_write capability — a template that
         // grants file_write holds it, and one that denies file_write denies
         // it (`resolve_capabilities` leaves a tool off a surface when any

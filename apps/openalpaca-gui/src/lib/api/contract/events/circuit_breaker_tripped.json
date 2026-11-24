@@ -1,0 +1,10 @@
+{
+  "agent_id": "",
+  "consecutive_failures": 0,
+  "instance_id": "",
+  "reset_after_secs": 0,
+  "task_id": "",
+  "tool_name": "",
+  "ts": "",
+  "type": "circuit_breaker_tripped"
+}

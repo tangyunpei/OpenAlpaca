@@ -12,6 +12,7 @@ pub struct ConnectorArgs {
 }
 
 #[derive(Subcommand)]
+#[command(defer = true)]
 pub enum ConnectorCommands {
     /// List all connectors and their status
     List,
@@ -24,11 +25,14 @@ pub enum ConnectorCommands {
 }
 
 #[derive(Deserialize)]
-struct ConnectorStatus {
+pub(crate) struct ConnectorStatus {
     id: String,
     name: String,
     status: String,
-    #[allow(dead_code)]
+    #[expect(
+        dead_code,
+        reason = "sent in the daemon's row; the connector table does not show it"
+    )]
     configured: bool,
 }
 
@@ -42,7 +46,7 @@ pub async fn run(args: ConnectorArgs) -> Result<()> {
 }
 
 async fn list_connectors() -> Result<()> {
-    let client = DaemonClient::connect()?;
+    let client = DaemonClient::connect().await?;
     let connectors: Vec<ConnectorStatus> = client.get("/v1/connectors").await?;
 
     println!(
@@ -66,9 +70,15 @@ async fn list_connectors() -> Result<()> {
     Ok(())
 }
 
+/// `POST /v1/connectors/{id}/action`'s body (`enable`, `disable`, …), from
+/// `connector enable|disable`.
+pub(crate) fn action_body(action: &str) -> serde_json::Value {
+    serde_json::json!({ "action": action })
+}
+
 async fn perform_action(name: &str, action: &str) -> Result<()> {
-    let client = DaemonClient::connect()?;
-    let body = serde_json::json!({ "action": action });
+    let client = DaemonClient::connect().await?;
+    let body = action_body(action);
     let result: serde_json::Value = client
         .post(&format!("/v1/connectors/{}/action", name), &body)
         .await?;

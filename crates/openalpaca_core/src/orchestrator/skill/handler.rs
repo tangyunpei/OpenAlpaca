@@ -28,7 +28,10 @@ impl Orchestrator {
     /// Handle a skill invocation: load full SKILL.md, inject as context, run agentic loop.
     ///
     /// Mirrors `handle_simple_query()` with an extra `### SKILL CONTEXT ###` block.
-    #[allow(clippy::too_many_arguments)]
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "the turn's context and how the skill was chosen"
+    )]
     pub(in crate::orchestrator) async fn handle_skill_invocation(
         &self,
         request_id: Uuid,
@@ -141,8 +144,8 @@ impl Orchestrator {
                 },
                 route_score,
                 was_auto_selected,
-                repair_attempted: result.as_ref().ok().map(|r| r.repair_attempted).unwrap_or(false),
-                repair_succeeded: result.as_ref().ok().map(|r| r.repair_succeeded).unwrap_or(false),
+                repair_attempted: result.as_ref().is_ok_and(|r| r.repair_attempted),
+                repair_succeeded: result.as_ref().is_ok_and(|r| r.repair_succeeded),
                 timestamp: None,
             };
             if let Err(e) = SkillExecutionRepository::new(db).record(&entry) {
@@ -164,5 +167,7 @@ pub(crate) fn finish_reason_to_string(reason: &LoopFinishReason) -> &'static str
         LoopFinishReason::Truncated => "truncated",
         LoopFinishReason::Cancelled => "cancelled",
         LoopFinishReason::Error(_) => "error",
+        LoopFinishReason::ResultSubmitted => "result_submitted",
+        LoopFinishReason::ResultRejected => "result_rejected",
     }
 }

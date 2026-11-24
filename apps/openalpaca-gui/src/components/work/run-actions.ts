@@ -1,7 +1,8 @@
 /**
  * The run action catalogue (DESIGN_SPEC §3.19 action bar, §3.26 action group).
  *
- * Every one of the design's seven verbs is real now. `Start now` and `Re-run`
+ * Every one of the design's seven verbs is real now, and one, `Pause`, is
+ * withheld until a later design (PAUSE-OFF, below). `Start now` and `Re-run`
  * were the last two to arrive (Phase 5): what used to be GAP-06 — the action
  * route accepted exactly `cancel`, `pause`, `resume`, and nothing dispatched a
  * stored row — is served by `POST /v1/tasks/{id}/action {"action":"start"}`,
@@ -29,7 +30,13 @@
  * reason as its tooltip. That is a property of the run, not a missing API, so
  * it carries no `gap` and stays out of the unavailable-actions footnote.
  *
- * `Cancel` / `Pause` / `Resume` are real and wired to `POST /v1/tasks/{id}/action`.
+ * `Cancel` and `Resume` are real and wired to `POST /v1/tasks/{id}/action`.
+ *
+ * `Pause` is not offered (PAUSE-OFF): the daemon refuses `pause` until a later
+ * design — a pause never stopped a run, its work went on and its completion
+ * wrote over `paused` — so a running run's slot is empty rather than a button
+ * whose only answer is a `409`. `Resume` stays for a row an earlier build left
+ * paused.
  *
  * `Resume` is two controls sharing one id, because the daemon's verb is two
  * verbs sharing one word. On a **paused** run it is the plain transition back
@@ -48,14 +55,7 @@ import type { UiStatus } from "@/components/ui";
 import { GAPS, gapNote, type GapId } from "@/lib/unavailable";
 
 export type RunActionId =
-  | "pause"
-  | "resume"
-  | "start"
-  | "cancel"
-  | "steer"
-  | "queue"
-  | "jump"
-  | "rerun";
+  "resume" | "start" | "cancel" | "steer" | "queue" | "jump" | "rerun";
 
 export type RunActionTone = "secondary" | "danger";
 
@@ -118,10 +118,11 @@ const JUMP: RunActionDescriptor = {
 };
 
 /**
- * The pause control's label is status-derived (§3.19): `paused → "Resume"`,
- * `queued → "Start now"`, otherwise `"Pause"`.
+ * The pause slot is status-derived (§3.19): `paused → "Resume"`,
+ * `queued → "Start now"`, otherwise nothing — §3.19's `"Pause"` is withheld
+ * until a later design (PAUSE-OFF), since the daemon refuses it.
  */
-export function pauseAction(status: UiStatus): RunActionDescriptor {
+export function pauseAction(status: UiStatus): RunActionDescriptor | null {
   if (status === "paused") {
     return { id: "resume", label: "Resume", tone: "secondary", enabled: true };
   }
@@ -135,11 +136,12 @@ export function pauseAction(status: UiStatus): RunActionDescriptor {
       enabled: true,
     };
   }
-  return { id: "pause", label: "Pause", tone: "secondary", enabled: true };
+  return null;
 }
 
 /**
- * The live action bar, left to right, exactly as §3.19 orders it.
+ * The live action bar, left to right, as §3.19 orders it — the pause slot
+ * only when it holds `Resume` or `Start now`.
  *
  * `steerReason` is the run's own answer to "why not?" — `null` (the default)
  * leaves `Steer` enabled.
@@ -148,8 +150,9 @@ export function liveRunActions(
   status: UiStatus,
   steerReason: string | null = null,
 ): RunActionDescriptor[] {
+  const slot = pauseAction(status);
   return [
-    pauseAction(status),
+    ...(slot === null ? [] : [slot]),
     steerAction(steerReason),
     QUEUE,
     JUMP,
@@ -229,8 +232,6 @@ export function unavailableActionNotes(
  */
 export function actionToast(action: RunActionId, title: string): string | null {
   switch (action) {
-    case "pause":
-      return `${title} paused`;
     case "resume":
       return `${title} resumed`;
     case "cancel":

@@ -4,7 +4,7 @@
 
 ## Files
 
-- DB path resolver: `openalpaca_storage::paths::database_path()`
+- DB path resolver: `openalpaca_app_support::paths::database_path()`
 - Migrations entrypoint: `openalpaca_storage::migrations::MIGRATIONS`
 - Registered migrations: 4
 

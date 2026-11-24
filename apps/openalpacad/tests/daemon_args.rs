@@ -39,6 +39,11 @@ fn run_daemon(dir: &Path, args: &[&str]) -> Run {
         // without them pointing somewhere disposable.
         .env("OPENALPACA_HOME_STORE", dir)
         .env("OPENALPACA_CONFIG_DIR", dir.join("config"))
+        // A daemon that boots must find no user's home either, and its log
+        // lines must be plain text for the asserts that read them.
+        .env("HOME", dir)
+        .env("NO_COLOR", "1")
+        .env_remove("RUST_LOG")
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
@@ -158,4 +163,74 @@ fn an_unknown_argument_is_refused_with_exit_2() {
     );
     assert!(run.stdout.is_empty(), "nothing on stdout: {:?}", run.stdout);
     assert_nothing_was_created(tmp.path());
+}
+
+/// M17 (D27): a second daemon on a store whose singleton lock is held exits
+/// 1 at the lock, says why on stdout (where the daemon's log goes), and opens
+/// no database.
+///
+/// Regression guard: the exit and the absent database hold on the parent
+/// build too (a `flock` lock taken here excludes that build's `fcntl` lock on
+/// macOS); only the sentence naming the lock is new.
+///
+/// The lock is taken by path, not through `acquire_single_instance_lock`,
+/// which reads this process's own `OPENALPACA_HOME_STORE`. The child's
+/// `llm.toml` switches credential discovery and both CLI backends off and its
+/// `HOME` is the tempdir, so a daemon that wrongly booted past the lock would
+/// still reach no credential; [`run_daemon`] kills it at the deadline.
+#[cfg(unix)]
+#[test]
+fn a_second_daemon_exits_on_the_held_lock_and_opens_no_database() {
+    use std::os::unix::fs::DirBuilderExt;
+
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let state = tmp.path().join("state");
+    std::fs::DirBuilder::new()
+        .mode(0o700)
+        .create(&state)
+        .expect("create state/");
+    let config = tmp.path().join("config");
+    std::fs::create_dir(&config).expect("create config/");
+    std::fs::write(
+        config.join("llm.toml"),
+        "[credential_discovery]\nclaude_code = false\ncodex = false\n\n\
+         [cli_backends.claude_code]\nenabled = false\n\n\
+         [cli_backends.codex]\nenabled = false\n",
+    )
+    .expect("write llm.toml");
+
+    let held = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(state.join("openalpacad.lock"))
+        .expect("open the lock file");
+    held.try_lock().expect("take the singleton lock");
+
+    let run = run_daemon(tmp.path(), &[]);
+    drop(held);
+
+    assert!(
+        !run.timed_out,
+        "a second daemon booted past a held lock; stdout: {}",
+        run.stdout
+    );
+    assert_eq!(
+        run.code,
+        Some(1),
+        "stdout: {}\nstderr: {}",
+        run.stdout,
+        run.stderr
+    );
+    assert!(
+        run.stdout
+            .contains("Another daemon instance is already running")
+            && run.stdout.contains("state/openalpacad.lock")
+            && run.stdout.contains("is held by another process"),
+        "the refusal names the held lock, on stdout: {:?}",
+        run.stdout
+    );
+    assert!(
+        !state.join("openalpaca.db").exists(),
+        "a daemon refused at the lock opened the database"
+    );
 }

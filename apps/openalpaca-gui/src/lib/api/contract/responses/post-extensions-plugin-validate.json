@@ -1,0 +1,23 @@
+{
+  "installed": false,
+  "manifest": {
+    "capabilities": [
+      ""
+    ],
+    "description": "",
+    "entry": "",
+    "name": "",
+    "required_config_keys": [],
+    "sensitive_config_keys": [],
+    "types": {
+      "agent": false,
+      "connector": false,
+      "provider": false,
+      "skill": false,
+      "tool": false
+    },
+    "version": "",
+    "virtual_capabilities": [],
+    "warnings": []
+  }
+}

@@ -31,10 +31,15 @@ pub(super) fn parse_response(
     let usage = Usage {
         input_tokens: body["usage"]["prompt_tokens"].as_u64().unwrap_or(0) as u32,
         output_tokens: body["usage"]["completion_tokens"].as_u64().unwrap_or(0) as u32,
+        // CACHE-WRITE: the tokens written to the cache, "The unadjusted
+        // number of prompt tokens written to cache" (the chat completions
+        // reference, read 2026-11-14), priced at the row's write rate.
+        cache_creation_input_tokens: body["usage"]["prompt_tokens_details"]["cache_write_tokens"]
+            .as_u64()
+            .unwrap_or(0) as u32,
         cache_read_input_tokens: body["usage"]["prompt_tokens_details"]["cached_tokens"]
             .as_u64()
             .unwrap_or(0) as u32,
-        ..Default::default()
     };
 
     let choice = &body["choices"][0];
@@ -88,6 +93,7 @@ pub(super) fn parse_response(
         usage,
         finish_reason,
         thinking: reasoning_text(message),
+        echo: None,
         parts,
     })
 }

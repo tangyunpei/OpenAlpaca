@@ -1440,7 +1440,7 @@ fn resolve_content_on_a_deleted_file_marks_missing_and_returns_artifact_gone() {
         .downcast_ref::<ArtifactError>()
         .unwrap_or_else(|| panic!("not an ArtifactError: {err}"));
     assert_eq!(typed.code(), "ARTIFACT_GONE");
-    assert!(matches!(typed, ArtifactError::Gone { id, .. } if *id == record.id));
+    std::assert_matches!(typed, ArtifactError::Gone { id, .. } if *id == record.id);
 
     let after = f.store().get(&record.id, OWNER).unwrap().unwrap();
     assert!(after.missing(), "missing_since is stamped");
@@ -3408,11 +3408,9 @@ fn a_result_file_found_again_clears_its_missing_mark() {
     fs::rename(&path, &aside).unwrap();
 
     let err = f.store().resolve_content(&row.id, None).unwrap_err();
-    assert!(
-        matches!(
-            err.downcast_ref::<ArtifactError>(),
-            Some(ArtifactError::Gone { .. })
-        ),
+    std::assert_matches!(
+        err.downcast_ref::<ArtifactError>(),
+        Some(ArtifactError::Gone { .. }),
         "{err:#}"
     );
     assert!(f.store().get(&row.id, OWNER).unwrap().unwrap().missing());
@@ -3438,11 +3436,9 @@ fn a_result_file_has_no_older_version_to_read_or_diff() {
         f.store().resolve_content(&row.id, Some(2)).unwrap_err(),
         f.store().diff_paths(&row.id, 1, 2).unwrap_err(),
     ] {
-        assert!(
-            matches!(
-                err.downcast_ref::<ArtifactError>(),
-                Some(ArtifactError::VersionNotFound { version: 2, .. })
-            ),
+        std::assert_matches!(
+            err.downcast_ref::<ArtifactError>(),
+            Some(ArtifactError::VersionNotFound { version: 2, .. }),
             "{err:#}"
         );
     }
@@ -3539,4 +3535,64 @@ fn a_result_file_of_a_project_moved_behind_a_link_is_not_read_through_its_old_ro
     let back = f.store().get(&row.id, OWNER).unwrap().unwrap();
     assert!(!back.missing(), "found again");
     assert_eq!(back.sha256, sha256_hex(b"# Plan, moved and edited\n"));
+}
+
+/// Step 9's golden (M28): each variant's text byte for byte, under `{}` and
+/// `{:#}`, with no `source()` — written against the hand-written `Display`
+/// and kept on the derive. The `match` has no `_` arm, so a new variant does
+/// not compile without its row.
+#[test]
+fn every_artifact_error_prints_its_text_whole_and_has_no_source() {
+    let rows = [
+        ArtifactError::NotFound {
+            id: "a1".to_string(),
+        },
+        ArtifactError::Gone {
+            id: "a1".to_string(),
+            path: "/s/\u{202e}a\u{200b}.md".to_string(),
+        },
+        ArtifactError::ProjectMissing {
+            id: "a1".to_string(),
+            root: "/w/app".to_string(),
+        },
+        ArtifactError::VersionNotFound {
+            id: "a1".to_string(),
+            version: 3,
+        },
+        ArtifactError::NotDiffable {
+            id: "a1".to_string(),
+            kind: "image",
+        },
+        ArtifactError::DiffTooLarge {
+            id: "a1".to_string(),
+            version: 2,
+            size_bytes: 5_000_000,
+            limit: 1_048_576,
+        },
+        ArtifactError::NameTaken {
+            path: "/s/plan.md".to_string(),
+        },
+    ];
+    for error in rows {
+        let want = match &error {
+            ArtifactError::NotFound { .. } => "artifact a1 not found",
+            ArtifactError::Gone { .. } => {
+                "artifact a1 is gone: /s/\u{202e}a\u{200b}.md no longer exists"
+            }
+            ArtifactError::ProjectMissing { .. } => {
+                "/w/app: this project's folder is gone or has moved; re-point the project to read its files."
+            }
+            ArtifactError::VersionNotFound { .. } => "artifact a1 has no version 3",
+            ArtifactError::NotDiffable { .. } => "artifact a1 of kind image is not diffable",
+            ArtifactError::DiffTooLarge { .. } => {
+                "artifact a1 version 2 is 5000000 bytes, above the 1048576-byte diff limit; its stored line counts are the summary"
+            }
+            ArtifactError::NameTaken { .. } => {
+                "no free name in 32 tries from /s/plan.md: each is held by a file this store will not replace; move them aside and write again"
+            }
+        };
+        assert_eq!(error.to_string(), want);
+        assert_eq!(format!("{error:#}"), want);
+        assert!(std::error::Error::source(&error).is_none(), "{want}");
+    }
 }

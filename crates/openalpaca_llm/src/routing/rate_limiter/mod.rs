@@ -74,7 +74,7 @@ impl TokenBucket {
                     Duration::from_secs_f64(deficit / inner.refill_rate)
                 } else {
                     // Zero refill rate — would wait forever; cap at 60s
-                    Duration::from_secs(60)
+                    Duration::from_mins(1)
                 }
             };
 
@@ -233,8 +233,7 @@ impl CircuitBreaker {
                 // prevents both the thundering herd and a permanent wedge.
                 let stale = inner
                     .probe_started
-                    .map(|t| t.elapsed() >= inner.recovery_timeout)
-                    .unwrap_or(true);
+                    .is_none_or(|t| t.elapsed() >= inner.recovery_timeout);
                 if inner.probe_in_flight && !stale {
                     return Err(CircuitState::HalfOpen);
                 }
@@ -373,12 +372,13 @@ pub struct RateLimitConfig {
     pub default_tpm: u32,
 
     /// Maximum concurrent requests per key.
-    /// Default: 2.
+    /// Default: 8 — a full batch of subagents, more than the lead's stock
+    /// concurrency bound of six with the lead beside them (N-LLM-1).
     #[serde(default = "default_per_key_concurrency")]
     pub per_key_concurrency: usize,
 
     /// Global maximum concurrent LLM API calls.
-    /// Default: 4.
+    /// Default: 10.
     #[serde(default = "default_global_concurrency")]
     pub global_concurrency: usize,
 
@@ -416,7 +416,7 @@ fn default_tpm() -> u32 {
     40_000
 }
 fn default_per_key_concurrency() -> usize {
-    5
+    8
 }
 fn default_global_concurrency() -> usize {
     10

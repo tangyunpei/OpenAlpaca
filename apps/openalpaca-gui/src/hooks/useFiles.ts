@@ -53,15 +53,16 @@ export function useOpenFile(): UseMutationResult<
  * words.
  *
  * `open` is the daemon's route, so the file opens in its default app on the
- * daemon's host. `reveal` is the Tauri shell's `reveal_path` (`lib/reveal.ts`):
- * Finder comes forward with the file selected, so success needs no toast, and
- * a refusal is the shell's own sentence. Every toast quotes a path an agent
+ * daemon's host. `reveal` is the daemon's `POST /v1/files/{id}/reveal`
+ * (`lib/reveal.ts`, Q06), by the artifact's id: Finder comes forward with the
+ * file selected, so success needs no toast, and a refusal is the daemon's own
+ * sentence. Every toast quotes a path an agent
  * may have chosen, so the name and each refusal are escaped — each hidden
  * character as `<U+XXXX>` (d7-app-3).
  */
 export function useArtifactFileActions(): {
   open: (artifact: { id: string; name: string }) => void;
-  reveal: (path: string) => void;
+  reveal: (id: string) => void;
 } {
   const openFile = useOpenFile();
   const showToast = useUiStore((s) => s.showToast);
@@ -74,8 +75,8 @@ export function useArtifactFileActions(): {
           showToast(`Could not open — ${escapeHiddenLine(error.message).text}`),
       });
     },
-    reveal: (path) => {
-      revealInFolder(path).catch((error: unknown) =>
+    reveal: (id) => {
+      revealInFolder(id).catch((error: unknown) =>
         showToast(
           escapeHiddenLine(
             error instanceof Error ? error.message : String(error),

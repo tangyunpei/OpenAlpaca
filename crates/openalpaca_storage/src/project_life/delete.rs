@@ -15,7 +15,6 @@
 //! the user's, in their own folder, and is never kept, copied or removed. It
 //! is neither an upload nor a by-product, so no count names it.
 
-use std::fmt;
 use std::fs;
 use std::path::{Path, PathBuf};
 
@@ -82,24 +81,15 @@ pub struct DeleteOutcome {
 /// for runs before it waits for the project's memory slot; this is the check
 /// a run started meanwhile cannot slip past. Returned inside the
 /// `anyhow::Error`: nothing was deleted, and the copies were taken back.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
+#[error(
+    "{runs} run(s) of {root} are queued, running or paused; nothing was deleted — delete its \
+     data once they finish"
+)]
 pub struct RunsInFlight {
     pub root: String,
     pub runs: usize,
 }
-
-impl fmt::Display for RunsInFlight {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(
-            f,
-            "{} run(s) of {} are queued, running or paused; nothing was deleted — delete its \
-             data once they finish",
-            self.runs, self.root
-        )
-    }
-}
-
-impl std::error::Error for RunsInFlight {}
 
 /// A file step 1 keeps, as its row names it.
 #[derive(Debug, Clone)]

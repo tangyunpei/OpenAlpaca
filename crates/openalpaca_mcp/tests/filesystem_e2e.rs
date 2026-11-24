@@ -36,6 +36,7 @@ fn mk_config(tmp: &std::path::Path) -> McpClientConfig {
         request_timeout: Duration::from_secs(30),
         max_reconnect_attempts: 1,
         reconnect_backoff_ms: 100,
+        stderr_tail: Default::default(),
     }
 }
 
@@ -108,10 +109,7 @@ async fn filesystem_call_tool_cancellation_returns_cancelled() {
         .await
         .expect_err("expected error");
 
-    assert!(
-        matches!(err, McpError::Cancelled),
-        "expected Cancelled, got {err:?}"
-    );
+    std::assert_matches!(err, McpError::Cancelled, "expected Cancelled, got {err:?}");
 
     client.disconnect().await.expect("disconnect");
 }

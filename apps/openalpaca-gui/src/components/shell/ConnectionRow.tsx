@@ -7,6 +7,10 @@
  * (`lib/events.ts`), so nothing here is invented — and the instance id is the
  * real `instanceId`, cut to four characters exactly as the design shows.
  *
+ * Two states are the shell's answers (Q04): `daemon is starting` in gold, a
+ * daemon that is up and not answering yet, which the window waits for; and
+ * `version mismatch` in red, a daemon this app cannot use.
+ *
  * A **stopped** daemon is a fourth state, and deliberately not an error: the
  * dot takes the neutral muted token and the word says `stopped` (this window
  * stopped it) or `stopped elsewhere` (the daemon said it was going away and
@@ -32,7 +36,9 @@ export function connectionTone(
 ): ConnectionTone {
   if (intent !== null) return "stopped";
   if (status === "connected") return healthy ? "up" : "pending";
-  if (status === "connecting" || status === "idle") return "pending";
+  if (status === "connecting" || status === "idle" || status === "starting") {
+    return "pending";
+  }
   return "down";
 }
 
@@ -68,6 +74,10 @@ export function connectionLabel(
       return "disconnected";
     case "error":
       return "connection error";
+    case "starting":
+      return "daemon is starting";
+    case "mismatch":
+      return "version mismatch";
   }
 }
 

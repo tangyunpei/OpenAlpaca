@@ -65,6 +65,83 @@ Remember everything.
 
 // --- Dispatch tests ---
 
+/// Each target's `PersonaHandler` variant reaches its own handler (M55b: an
+/// enum over the closed set of three, not a `&dyn` trait object).
+#[test]
+fn each_target_variant_dispatches_to_its_handler() {
+    let (tool, dir) = make_persona_tool();
+    let cases = [
+        (PersonaHandler::Soul(&tool.soul), "soul", "SOUL", "SOUL.md"),
+        (PersonaHandler::User(&tool.user), "user", "USER", "USER.md"),
+        (
+            PersonaHandler::Identity(&tool.identity),
+            "identity",
+            "IDENTITY",
+            "IDENTITY.md",
+        ),
+    ];
+    for (handler, name, prefix, file) in cases {
+        assert_eq!(handler.target_name(), name);
+        assert_eq!(handler.backup_prefix(), prefix);
+        assert_eq!(handler.tmp_filename(), format!(".{file}.tmp"));
+        assert_eq!(handler.document_path(), dir.path().join(file));
+        assert_eq!(handler.backup_dir(), dir.path().join("backups"));
+        assert_eq!(handler.max_backups(), None);
+    }
+}
+
+/// Each `target` string reaches its own document through `execute`: the
+/// string -> variant match M55b rewrote. A valid USER or SOUL document also
+/// passes IDENTITY's validation (it needs only `summary` and `read_when`),
+/// so a mis-paired arm can still answer `applied`: the test asserts the file
+/// written, the other two untouched, and the event published.
+#[tokio::test]
+async fn each_target_string_writes_its_own_document() {
+    let soul = "---\ntitle: \"Routed\"\nsummary: \"Routed soul\"\nread_when:\n  - always\n---\n\n## Core Truths\n\nRoute.\n\n## Boundaries\n\n- Stay.\n\n## Vibe\n\nCalm.\n\n## Continuity\n\nKeep.\n";
+    let user = "---\ntitle: \"Routed User\"\nsummary: \"Routed user\"\nread_when:\n  - always\n---\n\n## Identity\n\n* Name: Routed\n\n## Communication Style\n\nBrief.\n\n## Expertise & Background\n\nRust.\n\n## Projects & Context\n\nNone.\n\n## Preferences\n\nNone.\n\n## Notes\n\nNone.\n";
+    let identity = "---\nsummary: \"Routed identity\"\nread_when:\n  - always\n---\n\n# IDENTITY.md - Who Am I?\n\n- Name: Routed\n";
+    let cases = [
+        ("soul", soul, "SOUL.md"),
+        ("user", user, "USER.md"),
+        ("identity", identity, "IDENTITY.md"),
+    ];
+    for (target, content, file) in cases {
+        let (tool, dir) = make_persona_tool();
+        let original_soul = std::fs::read_to_string(dir.path().join("SOUL.md")).unwrap();
+        let mut rx = tool.soul.bus.subscribe();
+        let b64 = base64::engine::general_purpose::STANDARD.encode(content);
+        let result = tool
+            .execute(&serde_json::json!({"target": target, "mode": "replace", "content_b64": b64}))
+            .await
+            .unwrap_or_else(|e| panic!("{target}: replace should succeed: {e}"));
+        let json: serde_json::Value = serde_json::from_str(&result).unwrap();
+        let written = dir.path().join(file);
+        assert_eq!(json["path"], written.display().to_string(), "{target}");
+        let on_disk = std::fs::read_to_string(&written).unwrap();
+        assert_eq!(on_disk, content, "{target}");
+        for other in ["SOUL.md", "USER.md", "IDENTITY.md"] {
+            if other == file {
+                continue;
+            }
+            let path = dir.path().join(other);
+            if other == "SOUL.md" {
+                let now = std::fs::read_to_string(&path).unwrap();
+                assert_eq!(now, original_soul, "{target} must leave SOUL.md alone");
+            } else {
+                assert!(!path.exists(), "{target} must not write {other}");
+            }
+        }
+        let event = rx.try_recv().expect("an update event");
+        let routed = match event {
+            crate::events::SystemEvent::SoulUpdated { .. } => "soul",
+            crate::events::SystemEvent::UserProfileUpdated { .. } => "user",
+            crate::events::SystemEvent::IdentityUpdated { .. } => "identity",
+            other => panic!("{target}: unexpected event {other:?}"),
+        };
+        assert_eq!(routed, target, "{target}: event of another document");
+    }
+}
+
 #[tokio::test]
 async fn test_missing_target_returns_error() {
     let (tool, _dir) = make_persona_tool();

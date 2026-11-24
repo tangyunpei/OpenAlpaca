@@ -36,15 +36,16 @@ use clap::Subcommand;
 use colored::Colorize;
 use futures_util::StreamExt;
 use openalpaca_core::utils::text::{Escaped, escape_hidden, escape_hidden_line, hidden_notice};
-use openalpaca_storage::discovery;
 use serde::{Deserialize, Serialize};
 use std::io::{IsTerminal, Write};
 use tokio_tungstenite::{connect_async, tungstenite::Message};
 
 use crate::client::DaemonClient;
 use crate::output::{OutputFormat, TableRow, json_with_hidden_escaped, table_header_lines};
+use crate::reuse;
 
 #[derive(Subcommand)]
+#[command(defer = true)]
 pub enum ConfirmationCommands {
     /// List the approval prompts a run is waiting on, oldest first
     List {
@@ -112,7 +113,7 @@ pub struct PendingPrompt {
 }
 
 #[derive(Debug, Deserialize)]
-struct PendingPrompts {
+pub(crate) struct PendingPrompts {
     #[serde(default)]
     confirmations: Vec<PendingPrompt>,
 }
@@ -170,7 +171,7 @@ fn listing_note(count: usize) -> String {
 }
 
 async fn list(format: OutputFormat) -> Result<()> {
-    let client = DaemonClient::connect()?;
+    let client = DaemonClient::connect().await?;
     let page: PendingPrompts = client.get("/v1/chat/confirmations").await?;
     print!(
         "{}",
@@ -386,7 +387,7 @@ fn refusal_line(request_id: &str, error: &str) -> String {
 }
 
 async fn answer(request_id: &str, approved: bool, entire_tool: bool) -> Result<()> {
-    let client = DaemonClient::connect()?;
+    let client = DaemonClient::connect().await?;
     if approved && entire_tool {
         let page: PendingPrompts = client.get("/v1/chat/confirmations").await?;
         let prompts = pending_prompts(page);
@@ -415,7 +416,7 @@ async fn answer(request_id: &str, approved: bool, entire_tool: bool) -> Result<(
 
 /// One `tool_confirmation_requested` frame off `/v1/events`.
 #[derive(Debug, Deserialize)]
-struct ConfirmationFrame {
+pub(crate) struct ConfirmationFrame {
     request_id: String,
     tool_name: String,
     #[serde(default)]
@@ -508,17 +509,23 @@ fn watch_prompt_text(frame: &ConfirmationFrame, tty: bool) -> String {
 /// connector's turn — and this window is a responder for all of them. Ctrl+C
 /// leaves every unanswered prompt exactly as it was.
 async fn watch() -> Result<()> {
-    let disc = discovery::read_discovery()?
-        .ok_or_else(|| anyhow::anyhow!("Daemon is not running (no discovery file)"))?;
-    discovery::ensure_not_expired(&disc)?;
-    let info = discovery::ConnectionInfo::from(&disc);
+    watch_with(&mut reuse::RealWorld, &reuse::THIS_CLI).await
+}
+
+/// [`watch`] over `world`, judged as `cli`: its events socket is the daemon
+/// every answer it sends connects to, through the same check (123-3 (b)),
+/// so one of another protocol is refused before the socket is opened.
+pub(crate) async fn watch_with<W: reuse::World>(
+    world: &mut W,
+    cli: &openalpaca_app_support::protocol::ClientBuild,
+) -> Result<()> {
+    let info = reuse::connection_with(world, cli).await?;
     let ws_url = format!(
         "{}/v1/events?token={}",
         info.base_url.replace("http", "ws"),
         urlencoding::encode(&info.token)
     );
 
-    let client = DaemonClient::connect()?;
     let (ws_stream, _) = connect_async(&ws_url).await?;
     println!(
         "{}",
@@ -529,8 +536,7 @@ async fn watch() -> Result<()> {
 
     let tty = std::io::stdout().is_terminal();
     let (_, mut read) = ws_stream.split();
-    let ctrl_c = tokio::signal::ctrl_c();
-    tokio::pin!(ctrl_c);
+    let mut ctrl_c = std::pin::pin!(tokio::signal::ctrl_c());
 
     loop {
         tokio::select! {
@@ -539,13 +545,7 @@ async fn watch() -> Result<()> {
                     let Some(frame) = confirmation_frame(&text) else { continue };
                     print!("{}", watch_prompt_text(&frame, tty));
                     let (approved, entire_tool) = ask(frame.per_call);
-                    match client
-                        .post_raw(
-                            &answer_path(&frame.request_id),
-                            &answer_body(approved, entire_tool),
-                        )
-                        .await
-                    {
+                    match send_watch_answer(&frame.request_id, approved, entire_tool).await {
                         Ok(_) => println!(
                             "{}",
                             answered_line(approved, entire_tool, Some(&frame.tool_name))
@@ -574,6 +574,23 @@ async fn watch() -> Result<()> {
         }
     }
     Ok(())
+}
+
+/// Sends one answer of `watch`'s. It reads `discovery.json` again for each:
+/// the daemon rotates its token while it runs (T21 (2)) and honours the one
+/// it replaced only until that one's expiry, and a watch can wait for days.
+async fn send_watch_answer(
+    request_id: &str,
+    approved: bool,
+    entire_tool: bool,
+) -> Result<reqwest::Response> {
+    DaemonClient::connect()
+        .await?
+        .post_raw(
+            &answer_path(request_id),
+            &answer_body(approved, entire_tool),
+        )
+        .await
 }
 
 /// The answers, read from the terminal. Anything else is a denial —
@@ -611,6 +628,56 @@ fn read_answer(input: &str, per_call: bool) -> (bool, bool) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use openalpaca_app_support::discovery;
+
+    /// T21: `confirmations watch` waits for days; each answer reads
+    /// `discovery.json` again, so it carries the token the daemon names now,
+    /// not the one the watch started with.
+    #[tokio::test]
+    async fn each_answer_carries_the_token_discovery_names_now() {
+        use crate::test_util::{
+            EnvSandbox, bearer_of, discovery_of_a_daemon_up_for, ok_json, serve,
+        };
+        let tmp = tempfile::tempdir().unwrap();
+        let _env = EnvSandbox::enter(tmp.path());
+        // Each answer's connect asks health first (CLI-PROTOCOL).
+        let health = serde_json::json!({
+            "status": "ok",
+            "version": crate::reuse::THIS_CLI.version,
+            "instance_id": "instance-t21",
+            "protocol": openalpaca_app_support::protocol::PROTOCOL,
+        })
+        .to_string();
+        let (addr, server) = serve(vec![
+            ok_json(&health),
+            ok_json("{}"),
+            ok_json(&health),
+            ok_json("{}"),
+        ]);
+        let first = discovery_of_a_daemon_up_for(addr.port(), 13);
+
+        send_watch_answer("req-1", true, false)
+            .await
+            .expect("the first answer");
+        let later = first.with_rotated_auth(chrono::Utc::now());
+        discovery::write_discovery_atomic(&later).unwrap();
+        send_watch_answer("req-2", false, false)
+            .await
+            .expect("the second answer");
+
+        let requests = server.join().expect("the server finishes");
+        assert!(requests[0].starts_with("GET /v1/health "));
+        assert!(requests[1].starts_with("POST /v1/chat/confirmations/req-1 "));
+        assert_eq!(
+            bearer_of(&requests[1]).as_deref(),
+            Some(first.auth.token.as_str())
+        );
+        assert!(requests[3].starts_with("POST /v1/chat/confirmations/req-2 "));
+        assert_eq!(
+            bearer_of(&requests[3]).as_deref(),
+            Some(later.auth.token.as_str())
+        );
+    }
 
     fn page(confirmations: serde_json::Value) -> PendingPrompts {
         serde_json::from_value(serde_json::json!({ "confirmations": confirmations }))

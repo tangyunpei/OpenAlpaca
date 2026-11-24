@@ -3,7 +3,7 @@
 `openalpacad` is the local control plane for OpenAlpaca, serving HTTP APIs, streaming events, orchestration runtime, connectors, and storage.
 
 Related docs:
-- [API Docs index](api/README.md) (generated from source by `python3 scripts/gen_api_docs.py`)
+- [API Docs index](api/README.md) (generated from source by `python3.11 scripts/gen_api_docs.py`)
 - [CLI Manual](CLI_Manual.md)
 - [GUI Manual](GUI_Manual.md)
 - [Agent Loop reference](agent-loop.md) — how one turn or one agent runs: rounds, exits, guards, compaction, steering
@@ -63,7 +63,14 @@ Install package (target machine):
 
 Runtime paths after installer-based startup. Everything lives under one root,
 `~/.openalpaca` (`OPENALPACA_HOME_STORE` overrides it; absolute paths only, an
-empty or relative value is rejected and the daemon refuses to start). The
+empty or relative value is rejected and the daemon refuses to start). Without
+the override `~` is your home as the system reports it (`HOME`, else your
+account's entry), and only an absolute home counts: a relative `HOME` (or an
+empty home field) is no home, so the daemon refuses to start with "Failed to
+determine the home directory" rather than make a store relative to its working
+directory, and nothing else is looked for under it — the credential files
+discovery reads, iMessage's `chat.db`, the CLI's `~/Applications` app, the
+app's `~/.cargo/bin` fallback entry. The
 organising rule is that `state/` is the machine's and everything else at the
 root is the human's:
 - config base dir: `~/.openalpaca/config`
@@ -107,9 +114,13 @@ root is the human's:
   reports the path for a daemon either of them launched; a daemon started by
   hand (a bare `cargo run`, or `openalpacad` in a terminal) writes to its
   terminal instead and reports `null`, even when an older `daemon.log` is still
-  there. When `openalpaca gui start`
-  launches the GUI from a source checkout (`bun run tauri dev`), its output
-  goes beside it as `gui.log`.
+  there.
+- GUI logs: beside it, `~/.openalpaca/state/logs/gui.log` is the GUI app's
+  own log — its shell's lines, its start-up marks, a panic, and the window's
+  web content process ending — written by the app alone and appended across
+  launches; `gui-dev.log` is the output of `bun run tauri dev` when
+  `openalpaca gui start` launches the GUI from a source checkout, appended.
+  Each is rotated at launch under `daemon.log`'s caps.
 
 ## Startup and Lifecycle
 
@@ -142,18 +153,29 @@ drain — what it does not finish, the next start learns); stop the background j
 finished run's task extraction and learning — within 3 seconds; flush the cost
 tracker to the database; flush every session log; close every MCP connection
 and kill every plugin child; stop the connectors; stop the wake scheduler and
-file watchers; remove `discovery.json`.
+file watchers; wait, until one second before the window ends, for attachment
+extractions already running; remove `discovery.json`.
 
-A watchdog bounds all of it at **10 seconds** from the cancellation. The
+A watchdog bounds the tail at **10 seconds** from the cancellation. The
 session-log flush and the extension sweep each take only what is left of that
-window, and each connector's stop and the wake scheduler's what is left of it
-less one second: a stop that does not return in time is logged and left
-behind, and the steps after it still run within that last second, so
-`discovery.json` is removed even when a connector hangs. If the window runs
+10-second window, and each connector's stop, the wake scheduler's and the
+wait for attachment extractions what is left of it less one second: a stop
+that does not return in time is logged and left behind, and the steps after
+it still run within the window's last second,
+so `discovery.json` is removed even when a connector hangs. If the window runs
 out all the same, the watchdog removes `discovery.json` and the process exits
 with code 1, skipping whatever else of the tail had not run — possibly
 unflushed spend, dropped session-log records, orphaned MCP and plugin children
-and connectors that never deregistered. A workflow that finishes once the shutdown has begun
+and connectors that never deregistered. Once the tail has run, work still
+running on the daemon's blocking threads gets at most **one second** more,
+and the process then exits, cutting what is left of it: a memory index
+rebuild or a learning write is redone at the next start; an attachment's text
+extraction still running then, which the tail waited for until one second
+before the window ended, is cut, its result not kept, and counted as an
+interrupted attempt (see [Background Tasks](#background-tasks)); and a
+file a tool was still writing is left as the cut leaves it, as a stop could
+already leave it. A stop
+therefore ends at most about 11 seconds after it is asked for. A workflow that finishes once the shutdown has begun
 starts no queued follow-up: the follow-up stays queued on its lane.
 
 Open connections no longer run that window out. An open
@@ -166,7 +188,9 @@ but it stayed open and silent until the process died under it; it now gets a
 [WebSocket Events](#websocket-events)). Work that is still running — a chat
 turn, a workflow, a follow-up, a scheduled skill — is not drained: it stops
 when the process does, and a run left in flight is marked `interrupted` on the
-next boot (step 8).
+next boot (step 8). An attachment's text extraction is the exception: it is
+given the rest of the window, as above, and one that finishes by then keeps
+its result.
 
 ## Config Resolution
 
@@ -182,20 +206,22 @@ Important runtime files:
 - `config/llm.toml`
 - `config/daemon.toml`
 - `config/mcp.toml` (MCP server declarations)
-- `config/agents/*.md` (Markdown with YAML frontmatter; legacy `.toml` agent files still load with a deprecation warning)
-- `config/skills/*/SKILL.md`
+- `config/agents/*.md` (Markdown with YAML frontmatter: your own templates and overrides of the nine built-in ones; legacy `.toml` agent files still load with a deprecation warning)
+- `config/skills/*/SKILL.md` (your own skills and overrides of the four built-in ones)
 - `config/tools/*.toml`
 - orchestrator persona docs under `config/orchestrator/`
 
 ## Secrets and First Run
 
 - On first startup the daemon seeds missing `llm.toml`, `daemon.toml` and `mcp.toml` from templates embedded in the binary (sourced from `scripts/release/templates/config/`).
-- The same step seeds the **content** the daemon also carries in its binary: `config/agents/` (the nine templates), `config/skills/` (helper scripts included, written executable) and `config/tools/`. The rule is per directory:
+- The same step seeds the **content** the daemon also carries in its binary: `config/tools/`, and creates `config/agents/` and `config/skills/` empty. The rule is per directory:
   - a directory that already exists is skipped whole, including one the owner emptied;
   - inside a directory being filled, an existing file is never overwritten;
   - one `INFO` line per directory names the count and the path, and a per-file failure is a `WARN` that does not stop the rest.
-- A workflow is led by an agent template: one with the `orchestration` capability when there is one, otherwise any template that can be spawned. When no agent templates are loaded at all, the workflow request fails with "No agent templates are installed…" and names the `config/agents` directory. That is a different message from "All agents are busy", which clears by itself.
-- The AES-256-GCM master key lives at `~/.openalpaca/state/.master_key` (`store::master_key_dir()`). The daemon reads it at boot and keeps it in its own process memory: it does not export `OPENALPACA_MASTER_KEY`, and removes one it inherited from the shell or launcher that started it, so no program it spawns — a shell command, a skill script, an MCP server, a plugin, a CLI model backend — receives the key. That keeps the key out of a child's environment, not out of its reach: the key file itself stays readable to any program running as you, a shell command you approve included, since the shell is not confined in this version. Startup fails hard if the key cannot be ensured. The variable is read only by the CLI and the test harnesses, where it overrides the file.
+- The nine agent templates are **built in**: registered from the binary at every start, never written to disk. `general_agent` is the default subagent — a lead's spawn that names no `agent_id` runs it — and the specialists are capability profiles, each description saying what it can do and each persona how to work. A template may set `temperature`; it is accepted and not sent — no lead or subagent turn sends a temperature to the model, which answers at its own default — so the built-in templates set none, and `GET /v1/agent-templates` leaves `temperature` out for a template that sets none. A `config/agents/*.md` whose `id` is a built-in template's overrides it; one byte-identical to a version OpenAlpaca shipped (an earlier build's seeded copy, or a copy of the repository's `config/agents/`) is set aside — not read, not touched — and the built-in template runs. One that does not parse withholds the `id` it names rather than letting the built-in template stand in. A plugin's template never takes a built-in `id`. A file whose frontmatter says `disabled: true` switches off the `id` it names (its `id:` line, else its file name; `id:` and `disabled:` are enough, and a full template saying it is switched off whole): no template of that `id` runs — neither the built-in one nor a plugin's — the lead is not offered it, a spawn of it is refused naming the file, and its `agent` row, where it has one, reads `disabled` until the file goes (an `id` switched off before any template of it ran here has none). At each start one `INFO` line counts the built-in templates, the files read (naming those that override a built-in one) and the copies set aside (naming the earlier versions), then one line per override and one per file that switches a template off (`INFO`); a `require_confirmation_for` naming no tool is a `WARN` (that list replaces the default prompts; a plugin's `<plugin>::<tool>` is not checked, since plugins load after the templates). `GET /v1/agent-templates` carries the same facts per row: `source` (`bundled`, `file`, `plugin`), `plugin`, `path`, `overrides_bundled`, `state` (`ready`, `withheld`, `disabled`), `not_used` (with `reason` `unedited_copy`, `overridden`, `duplicate`, `does_not_parse` or `plugin_refused`, and an unedited copy's `version` and manual `edit`) and `warnings`. `POST` or `PUT` of a built-in `id` writes an override (`overrides_bundled: true` in the answer); `DELETE` archives the file that holds the `id`, whatever it is called, and of a built-in template with no file answers `409 {"error":"bundled"}`; of a switched-off `id` it archives the switching file, and the template is back; of a plugin's template it answers `409 {"error":"plugin"}`, naming the plugin in `plugin` and in its sentence, and changes nothing — disabling or uninstalling the plugin takes its templates out, and a file of the same `id` overrides it or switches it off.
+- The four skills are **built in** too: at every start the daemon writes them, whole, into `state/cache/bundled-skills/` (files read-only, scripts `0555`; a leftover `bundled-skills.new/` removed first) and runs them from there — rewritten if that folder is deleted while the daemon runs, before a built-in skill runs; a pack that cannot be written leaves no built-in skill, with one `WARN`. A `config/skills/<id>/` named like a built-in skill overrides it; one whose every file is byte-identical to a version OpenAlpaca shipped at its path (a `.DS_Store` aside; a missing file allowed) is set aside — not read, not touched — and the built-in skill runs; one whose `SKILL.md` says `invoke.mode: disabled`, or does not parse, holds the id with nothing runnable. A plugin's skill still goes over both. At each start one `INFO` line counts the built-in skills (and where they run from), the folders read (naming those that override a built-in one) and the copies set aside (naming the earlier versions), then one line per override; an override holding a file an earlier build shipped, which the built-in skill has since changed, is a `WARN` and a `stale_shipped_file` diagnostic. `GET /v1/skills` rows carry `author: "file:bundled"` for a built-in skill, `overrides_bundled` and `not_used` (`unedited_copy` with its `version`, or the built-in skill `overridden`). A skill script is told `OPENALPACA_SKILLS_DIR` (`<config>/skills`) and `OPENALPACA_BUNDLED_SKILLS_DIR`.
+- A workflow is led by an agent template: one with the `orchestration` capability when there is one, otherwise any template that can be spawned. Both are tried in one order — your `config/agents` files, then the built-in templates, then a plugin's, each by id, so your own `my_lead` comes before the built-in `lead_agent` — and the same lead is chosen from start to start. The fallback tries `general_agent` last, so a borrowed lead (`code_agent` on a stock store) leaves its run the default subagent. When no template can be spawned at all — only files that withhold the built-in ones can bring that about — the workflow request fails with "No agent template can act as Lead Agent…", naming the `config/agents` directory and `daemon.log`. That is a different message from "All agents are busy", which clears by itself.
+- The AES-256-GCM master key lives at `~/.openalpaca/state/.master_key` (`openalpaca_app_support::paths::master_key_dir()`). The daemon reads it at boot and keeps it in its own process memory: it does not export `OPENALPACA_MASTER_KEY`, and removes one it inherited from the shell or launcher that started it, so no program it spawns — a shell command, a skill script, an MCP server, a plugin, a CLI model backend — receives the key. That keeps the key out of a child's environment, not out of its reach: the key file itself stays readable to any program running as you, a shell command you approve included, since the shell is not confined in this version. Startup fails hard if the key cannot be ensured. The variable is read only by the CLI and the test harnesses, where it overrides the file.
 - Persona documents (`SOUL.md`, `USER.md`, `IDENTITY.md`, and conditionally `BOOTSTRAP.md`) are written into `<config>/orchestrator/` from templates if absent.
 
 ## Hot Reload
@@ -204,7 +230,8 @@ A file watcher reloads configuration without restart:
 
 - `config/orchestrator/SOUL.md`, `USER.md`, `IDENTITY.md`, `BOOTSTRAP.md` (parse failures keep the last valid version)
 - `config/llm.toml` and `config/daemon.toml`. An `llm.toml` edit reloads the runtime config first and **then** registers every provider the file enables that the router does not already hold — the same registration, discovery included, that the toggle route performs — so turning a provider on by hand needs no restart. Nothing is unloaded on this path: a disable arrives through the toggle. The daemon's own writes are swallowed by a hash ring.
-- the `config/skills/` and `config/agents/` directories
+- the `config/skills/` directory: a change reloads its skill folder and classifies it again. A folder deleted, or turned back into an unedited copy of a shipped version, brings the built-in skill of its name back without a restart; a new or edited folder over a built-in name overrides it; one saying `invoke.mode: disabled` switches the built-in skill off. An edit that no longer parses leaves the skill listed and failing until fixed, as before; a folder that never loaded holds its name.
+- the `config/agents/` directory: any change rereads every top-level `.md` in it (legacy `.toml` agents are read at start only), setting aside again each unedited copy of a shipped version. A file deleted or renamed, or given another `id:`, takes its template out without a restart — or, for an override, brings the built-in template back; of two files claiming one `id` the first by file name is used and a `WARN` names both. A file that no longer parses withholds the `id` it names — its `id:` line, else its file name — when a template held that `id` before, and a spawn of that template is refused naming the file and the error, rather than the previous copy running on. It never takes an `id` from a file that parses, whichever sorts first: that file is used and a `WARN` names both. A file whose `id` nothing held before is skipped with a `WARN`, as at start. A file saying `disabled: true` switches its `id` off at once, and deleting it, or removing the line, brings the template back. An edit naming an unknown `annotation:` capability withholds that template with a `WARN` (a start still refuses to boot on such a file). The idle instance each template answers to follows, so the singleton lead's next run uses the edit (the lead, busy at the time, picks it up when its run ends), and the template's `agent` row is rewritten — with any set stored for the `id` over the edit, whose fields keep the set's values. The lead's instance stays between runs, so `GET /v1/agents/lead_agent/config` and `openalpaca agents config lead_agent` find it before its first run and after each; a lead switched off has none. `POST`, `PUT` and `DELETE /v1/agent-templates` reread the directory the same way, so their change is in effect when the call returns.
 - `config/mcp.toml` — that file **is** the MCP declaration and toggle store, so a hand edit is authoritative: the supervisor diffs desired against actual on presence, the `enabled` bit and a config fingerprint, and loads or unloads only what changed. An unparseable save keeps the last good set rather than tearing servers down, and the daemon's own writes are swallowed by a hash ring so a toggle does not reconcile twice.
 
 ## LLM Providers and Local Models
@@ -216,6 +243,13 @@ field: `PUT /v1/settings/llm/providers/{provider}/enabled` (the GUI's switch),
 `ai.*` key, backend `llm.toml`), and a hand edit the watcher picks up. When the
 daemon writes `llm.toml` it edits the file in place: comments, key order and
 keys it does not know are kept.
+
+The provider names are `anthropic`, `openai` and `ollama`. An enabled section
+under any other name is refused when the daemon starts
+(`Unknown provider: <name>`): the daemon logs that it failed to build the LLM
+router, and no model answers. The exception is a `[providers."plugin:<name>"]`
+section left from the removed plugin provider type: it is skipped, with one
+warning in the log when the daemon starts.
 
 Every provider in the seeded `llm.toml` starts with `enabled = false`, and
 adding a key does not turn an existing provider section on. A cloud provider
@@ -260,10 +294,29 @@ registered with:
 - `discovered = true`
 
 A model whose capabilities omit `completion` — embedding-only — is not
-registered. A tag that disappears from `/api/tags` is withdrawn at the next
+registered. A tag whose `/api/show` fails (a busy server, its deadline, an
+error) stays listed with what an earlier answer gave it — a tag with no
+`[models]` row keeps its first answer's, a row's left-out flags the latest's
+— or, if none has, with 8192, no image support and tools assumed, which the
+next answer replaces. A tag withdrawn and pulled again while `/api/show`
+fails starts from those defaults until the next answer.
+A tag that disappears from `/api/tags` is withdrawn at the next
 refresh; a row the owner declared in `[models]` only stops being offered —
 the declaration itself is left alone, so a later `ollama pull` of that tag
-brings it back with the owner's own fields. Discovery needs no key, is not gated on
+brings it back with the owner's own fields. A `[models]` row that leaves out
+`context` keeps the window of the built-in row for that id, else the one
+discovery gave the tag, else none (a run is then budgeted at 200,000 tokens),
+whether the row was read before discovery or after it; it never sets a window
+of its own. A capability flag it leaves out is taken the same way, field by
+field: the built-in row's, else what discovery read (`vision` for
+`supports_image`, `tools` for `supports_tools`), else the default; a flag it
+states is its own. Only Ollama's `/api/show` reads a model: a provider's
+list of ids (Anthropic's, OpenAI's, an OpenAI-compatible server's) reads
+none, so a tag Ollama reads keeps Ollama's reading when such a server
+lists it too, whichever was asked last. A model that an
+OpenAI-compatible server other than OpenAI's own — on this machine, the
+home network or elsewhere — lists with no window, and that no row sizes, is
+named once in `daemon.log` with the row that sizes it. Discovery needs no key, is not gated on
 the key pool, and runs whenever the provider is registered (boot, the enable
 toggle, a hot reload) and on `POST /v1/models/refresh`. An Ollama that cannot
 be reached leaves the provider registered with zero models, one `WARN`, and the
@@ -271,25 +324,48 @@ reason on its discovery status — never a boot failure. `PUT
 /v1/settings/llm/providers/{provider}/enabled` answers with
 `discovered_models` and `discovery_error` so a zero always has a stated cause.
 
+Anthropic and OpenAI are listed with an API-compatible key (an OAuth or managed
+key does not count), through each provider's own models list — for Anthropic
+every page of it (up to 1,000 ids a page, the next asked for after the last
+while `has_more` holds; a later page that fails keeps the ids read).
+An id the catalogue already holds keeps its row; one it lacks is registered
+routable, with tool support assumed and **no price** — the daemon's
+`GET /v1/models` and `llm models` show `0` for it, which is the absence of a price (see
+[Cost](#cost)).
+
 ### The effective model
 
 A requested model that is not routable (unknown id, provider not loaded,
-provider disabled) walks a ladder instead of failing: the request's
+provider disabled, a built-in OpenAI row on an OpenAI-compatible server that
+neither lists it nor has a `[models]` row of yours naming it) walks a ladder
+instead of failing: the request's
 `fallback_models` → the model's own chain → `[orchestrator] fallback_models` →
 the **effective default** — the configured default when it is routable,
 otherwise the default model of the first loaded provider that has a routable
 one. Providers are walked in the built-in order (anthropic, openai, ollama,
 then anything else by name); `llm.toml` is parsed into a map, so its own
 declaration order is not recoverable. For a provider whose `default_model` is
-empty or names a tag that is not installed, "its default" is the first
-discovered model, preferring one that can use tools and then the lowest id, so
-the answer does not move between runs. Every substitution is announced — one `WARN`
+empty or names a model that is not there, "its default" is a model the
+provider's own list confirmed when there is one, and among those (or among
+the built-in rows, when nothing was listed) the provider's `fast` model when
+the router has it (`claude-haiku-5-5` on Anthropic, `gpt-6-luna` on OpenAI,
+not a flagship that sorts first by name), then one that can use tools and
+then the lowest id, so the answer does not move between runs. The
+exception is an `openai` provider whose `base_url` is not OpenAI's own
+(llama.cpp, LM Studio, vLLM, a gateway): the built-in rows are not
+candidates there unless the server lists them or a `[models]` row names
+them, so its default is one the server listed or one of your `[models]`
+rows, and while the server has listed nothing (its list could not be
+read, or was empty) only your `[models]` rows stand — with none, the
+provider offers no default, and on an install with nothing else loaded
+nothing is routable (the refusal, `No model is available`, names that
+row as the way out). Every substitution is announced — one `WARN`
 per distinct (requested → effective) pair, and the call log carries the model
 actually used. `GET /v1/status` serves the pair:
 
 ```jsonc
 "llm": {
-  "default_model": "claude-haiku-4-5-20251001",
+  "default_model": "claude-haiku-5-5",
   "default_model_routable": false,
   "effective_default_model": "qwen3:8b"   // null = nothing is routable
 }
@@ -310,13 +386,379 @@ it answers before the turn runs: it echoes the model named in the body, or the
 effective default for a turn that names none, and `null` when nothing is
 routable.
 
+### Model aliases
+
+`fast`, `balanced` and `strong` are model aliases: each names one model per
+provider. The router resolves one against the model of the agent that asks
+(its parent) before any call, so the call itself names a routable model.
+
+**What the shipped agent templates name.** `lead_agent` names `strong`;
+`explore_agent`, `research_agent` and `system_agent` name `fast`
+(`research_agent` so that a round or two on the lead's model does not spend
+its $0.35 cap); the other five (`general_agent`, `code_agent`,
+`planning_agent`, `review_agent`, `writing_agent`) name `inherit`, and none
+keeps a `fallback_models` list.
+`inherit` — also a template with no `model:` line, your own included — means,
+for a subagent, the model that answered its lead (after any substitution),
+read when it is spawned; for the lead, the model a request naming none
+reaches (the main loop's). A template that is not an orchestrator, borrowed
+as a lead (a second workflow while `lead_agent` is busy), follows
+`lead_agent`'s choice instead, a set stored for it (`openalpaca agents set
+lead_agent llm.model …`) included. A model id in a template is kept as written and,
+when it is not routable, walks the substitution ladder at the call,
+announced, as it always has. The lead can also name a model for one spawn:
+`spawn_subagent` and each `spawn_subagents_batch` entry take an optional
+`model` — `inherit`, an alias or a routable id — which outranks the
+template's; one that is not routable is refused, listing what can be
+chosen, and never substituted, and the template's `max_cost_per_task` still
+caps the subagent. A plugin's template refuses a `model`: it runs on its
+plugin's own model. The spawn's reply names the model the subagent runs on,
+what chose it, and that the lead stays on its own; the lane's
+`subagent_open` record carries `model_choice` and `model`. A model the
+agent's own model constraints deny (a set's `denied_models`, or one missing
+from its `allowed_models`) is still accepted, and the subagent is sent to the
+router default in its place, as it always has; its constraints may refuse
+that one in turn, at its first round. Where they allow it, the reply names it
+and says it replaced the one chosen, and `subagent_open`'s `model` is that
+model, with `model_replaced` naming the denied one. Where they deny the
+router default too, the subagent is still started, sends its first request
+there, and is refused when that answer arrives ("Model access denied", in
+what `wait_for_subagents` reports): the reply says the constraints deny the
+model chosen and the default, and that the subagent will be refused at its
+first round, and `subagent_open` adds `model_refused: true`, its `model`
+being the default (with `model_replaced` naming the chosen one where the two
+differ). Where nothing is routable the reply says the subagent will fail at
+its first round, `model` is null and `model_refused` is true. A subagent sent to the default is
+budgeted on that model's context window.
+
+| Alias | Anthropic | OpenAI (its own API) | Ollama, an OpenAI-compatible server, or any provider with no row |
+|---|---|---|---|
+| `fast` | `claude-haiku-5-5` | `gpt-6-luna` | the parent's model |
+| `balanced` | `claude-sonnet-5-5` | `gpt-6.1-terra` | the parent's model |
+| `strong` | `claude-opus-5-5` | `gpt-6.1-sol` | the parent's model |
+
+Resolution, in order: the parent's provider's pin; that provider's built-in
+row; the parent's model itself (with no parent, or a parent that is not
+routable, the model a request naming none reaches); nothing, when no model
+is routable. An alias never moves a
+run to another provider by itself: on a machine whose main model is a local
+Ollama model, `strong` stays on that model even with an Anthropic key
+loaded, unless you pin it elsewhere.
+
+OpenAI's built-in row, and its built-in `gpt-*` models, are OpenAI's own
+API's: they count only where the `openai` provider calls
+`https://api.openai.com` or one of OpenAI's regional hosts, such as
+`https://eu.api.openai.com`. With its `base_url` at another server
+(llama.cpp, LM Studio, vLLM, a gateway), the built-in row is skipped, as
+for a provider with no row, so every alias is the parent's model unless
+you pin one; a built-in `gpt-*` id is routable there only when the
+server lists it or one of your `[models]` rows names it; and where the configured main model is not routable, the
+main model is a model the server lists, or one of your
+`[models]` rows. The spawn tools offer what the server lists, and a
+per-call `model` it does not list is refused.
+
+A pin is yours, per provider, under `[providers.<name>.model_aliases]` in
+`llm.toml`, with the keys `fast`, `balanced` and `strong`:
+
+```toml
+[providers.anthropic.model_aliases]
+strong = "claude-sonnet-5-5"
+
+[providers.ollama.model_aliases]
+fast = "qwen3:4b"
+```
+
+A pin may name any routable model, another provider's included. It is read
+at start and on every hot reload. A key that is not one of the three words,
+or a pin that names no model, is logged as a `WARN` and ignored. A pin or a
+built-in id that is not routable right now is passed over, and `daemon.log`
+says so once per (model, answer) pair at `WARN`: `Model alias 'fast' would
+use <id>, which is not available — answering with <model>.` When the
+parent's provider has no model for an alias and another loaded provider has
+one, the alias still runs on the parent's model, and that is said once per
+alias and provider at `INFO`; if the parent's model is not available either
+(its provider is off), the line says so and names the default model the
+alias runs on instead. Both lines come from a run that used the alias, never
+from the list of aliases a workflow's lead is shown. The seeded `llm.toml` carries a commented-out
+example; an existing `llm.toml` is never rewritten, so the built-in rows
+reach it with the release. At start, a key of your own `[fallback_chains]`
+table that names `claude-sonnet-4-6`, `claude-haiku-4-5-20251001` or
+`claude-opus-4-6` — written once to steer the shipped templates, which named
+those ids — is named at `INFO` when it is not routable and no template names
+it: it no longer steers them.
+
+The lead can also ask a subagent for a result of a stated shape:
+`spawn_subagent` and each `spawn_subagents_batch` entry take an optional
+`result_schema`, a JSON object in a small subset of JSON Schema that
+OpenAlpaca checks itself. It may use `type`, `enum`, `const`, `anyOf`,
+`properties`, `required`, `additionalProperties` (true or false), `items`
+(one schema), `minItems`, `maxItems`, `minimum`, `maximum`,
+`exclusiveMinimum` and `exclusiveMaximum`; `format` and annotations such as
+`title` and `description` are let through unchecked; any other keyword —
+`pattern`, `$ref` and `$defs` among them — refuses the spawn, as does a
+schema over 16,384 bytes, 64 levels of nesting or 10 object levels, each
+with `result_schema is not usable: <reason>.` and nothing spawned. A plugin's
+template refuses a schema. `null`, or a schema that asks for nothing
+(`{}`), is an ordinary spawn, the reply saying so for the latter. Such a
+subagent delivers its result by calling its own `submit_result` tool, which
+counts against its template's `max_tool_calls` like any call: a result that
+does not match is answered with what is wrong, four submissions in all, and
+a result is at most 65,536 bytes. The lead then reads either
+`result (matches result_schema): <the value as compact JSON>` or a failure
+that begins "ended without a result matching its result_schema" or "ended
+without submitting a result", the lane `failed` and its usage row
+`result_rejected`; the lane's `subagent_open` record carries `typed`.
+
+### What a model's API refuses
+
+Some models refuse parts of a request that others take. The router holds
+each request to the model it is sent to, after the ladder has picked it,
+by the rules of that model's built-in row (as the providers' pages gave
+them on 2026-11-14):
+
+- Every built-in row refuses the sampling parameters — `temperature`,
+  `top_p` and `top_k` on Anthropic's four, `temperature`, `top_p` and
+  `top_logprobs` on OpenAI's — so no request to one carries them (of
+  these the daemon only ever sends `temperature`). On OpenAI's four that
+  is because each reasons on every request the daemon sends (it sends no
+  reasoning effort, so each runs at its default) and OpenAI's GPT-6 guide
+  says to remove them while a model reasons.
+- `claude-fable-5-2`, `claude-opus-5-5` and `claude-sonnet-5-5` refuse
+  turning thinking off and a forced tool choice. A request that turns
+  thinking off goes without that field, and the model thinks; a round that
+  forces the `send` tool (the main loop's send hint, or a skill with `send`)
+  goes with `tool_choice` `auto`, and `daemon.log` says so once per model
+  at `INFO`: `claude-opus-5-5 refuses a forced tool choice: a call that asks
+  for the tool 'send' is sent with tool_choice auto, here and on every later
+  call to claude-opus-5-5`. Sonnet 5.5 offers its own way to think less
+  (`between_tools`), which the daemon does not send.
+- `claude-haiku-5-5` takes both: a request that turns thinking off goes as
+  asked, and a forced `send` reaches it (its answer then starts with the
+  tool call and carries no thinking).
+- The four Claude rows refuse a thinking budget, which would go as adaptive
+  thinking, though no request this build makes sends one.
+
+That covers the conversation summary, the episode summary and the memory
+and task-output extraction, which ask for temperature 0 with thinking off:
+on Haiku 5.5, the seeded main model, they run without `temperature` and
+with thinking off; on Fable 5.2, Opus 5.5 or Sonnet 5.5, set as their
+model, they also think, inside their `max_tokens`; on an OpenAI row they
+reason at the model's default effort, also inside their `max_tokens`. A
+`[models."<id>"]` row of yours for a built-in id keeps these rules. A model
+that only discovery lists carries none. Thinking text comes back as a
+summary, since every request to a Claude row asks for one (below).
+
+`claude-fable-5-2`, catalogued but named by no default and no alias,
+reaches you only if you name it; Anthropic's migration guide says it needs
+30-day data retention (not available under zero data retention unless
+Anthropic allows it) and returns a 400 when its prefix check fails.
+
+A round on a model that thinks — every built-in Claude row (Haiku 5.5 unless
+the request turns thinking off) — can spend its whole `max_tokens` (16,000
+unless set; a store seeded before this build keeps the 4096 its `llm.toml`
+says, see *Timeouts and output ceiling*) thinking, before any text or tool
+call. A streamed round continues such a turn as it continues any truncated
+answer, at most twice at the same cap, its thinking sent back; every lead
+round and every round of a built-in template's subagent is streamed, and so
+is a main-loop or skill turn streamed to its chat. A round asked without
+streaming (a main-loop or skill turn with no chat stream: a connector's, a
+scheduled skill's, the follow-up runner's, a nested `invoke_skill`'s) ends it
+as an empty completion, an error that is not retried: the run stops there.
+So does such a round that ends its turn on thinking alone, with no text and
+no tool call, not cut: its thinking now has text, and a round that reasoned
+instead of answering is an empty completion, as on every model that shows
+its thinking by default. A lead's or a subagent's round that ends so is the
+same error though it is streamed; only a main-loop or skill turn streamed to
+its chat completes with an empty answer.
+
+Within one run, a model's thinking goes back to it unchanged in the next
+request of a tool loop: every thinking block, its signature and its order,
+as Anthropic's pages ask. The same holds after a truncated answer, after a
+steering message that arrived at the end of a round, and after the answer
+guard's corrective round. When the run compacts its history, every kept
+block is left out from then on: never some of them. The budget notice
+(shown only with `[experimental] ephemeral_pressure_layer` on, one per
+round from 80% of a run's rounds or cost) is the last message of the
+request it is sent with, never part of the system prompt, and it stays in
+the run where it was sent, so every later request of the run carries each
+notice in its place and a turn the model produced while a notice showed
+goes back with its thinking too. Thinking is never written to the session
+log, the database or a conversation's history; nor is a notice as sent,
+though a compaction's working state may sum one up with the rest.
+
+The loop's `context_management` asks the API to keep the thinking of
+every turn (`clear_thinking_20251015` with `keep` `"all"`), so the model
+reads every block that is sent; the request carries the beta header
+Anthropic's context-editing page names, `context-management-2025-06-27`
+(read 2026-11-14). The four built-in Claude rows hide their thinking text
+unless asked (their `display` defaults to `"omitted"`, Anthropic's
+thinking page, read 2026-11-14), so every request to one that thinks asks
+for `"summarized"`: the reasoning stream shows a readable summary of the
+model's thinking, billed the same. A request to Haiku 5.5 that turns
+thinking off is not asked.
+
+### OpenAI's Responses API
+
+A request that uses tools, sent to OpenAI's own API, goes to OpenAI's
+Responses API (`/v1/responses`). "Uses tools" means the request offers the
+model tools, or its history holds a tool call or a tool result. "OpenAI's
+own API" means a `base_url` of `https://api.openai.com/...`, the default,
+or of one of the regional hosts OpenAI's data-residency page lists
+(`https://us.api.openai.com/...`, `eu.`, `au.`, `ca.`, `jp.`, `in.`,
+`sg.`, `kr.`, `gb.` and `ae.`; read 2026-11-12). OpenAI's current
+reasoning models take tool calls with reasoning only there: `gpt-6.1-sol`'s
+page says "Tool calling requires the Responses API" (read 2026-11-12). So
+the main loop, a skill, a lead and its subagents on any OpenAI model use
+it. Every other request keeps `/v1/chat/completions`: the conversation
+summary, the episode summary and the memory and task-output extraction,
+which offer no tools. On OpenAI's own API those Chat Completions requests
+also ask OpenAI not to store them (`store: false`): OpenAI's migration
+guide says Chat Completions are "stored by default for new accounts",
+though its Chat Completions reference gives the field's default as
+`false` (both read 2026-11-14), so the daemon says it either way. The
+reference says `store` keeps output for OpenAI's distillation and evals
+products; OpenAI's abuse-monitoring logs, 30 days by default for both APIs
+by its data-controls guide (read the same day), are apart. Ollama and any
+other OpenAI-compatible server (llama.cpp, LM Studio, a gateway at
+another address) are sent exactly what they were sent before, with no
+`store`.
+
+On the Responses API each request:
+
+- carries the whole conversation, as before, and asks OpenAI to store
+  nothing (`store: false`). Left out, the API keeps a response for at least
+  30 days;
+- names `max_output_tokens` (`default_max_tokens`, 16,000 unless set),
+  which counts the model's reasoning as well as its answer. OpenAI's
+  reasoning guide advises reserving at least 25,000. A reasoning model can
+  therefore spend the whole cap before any text or tool call. A streamed
+  round (every lead round, every round of a built-in template's subagent,
+  and a main-loop or skill turn streamed to its chat) continues such a
+  turn as it continues any truncated answer, at most twice at the same
+  cap. A round asked without streaming (a main-loop or skill turn with no
+  chat stream) ends it as an empty completion, an error that is not
+  retried: the run stops there;
+- sends each tool with `strict` written out: `true` where Chat Completions
+  sends it, `false` everywhere else, since on this API a tool without the
+  field is made strict wherever the API can;
+- sends a reasoning model's reasoning back to it within one run: the
+  turn's items, encrypted as OpenAI returned them, before the tool results
+  they led to. A compaction leaves them out from then on, as it leaves out
+  Anthropic's thinking. A budget notice (shown only with
+  `[experimental] ephemeral_pressure_layer` on, from 80% of a run's rounds
+  or cost) is the last item of the request it is sent with and stays in
+  the run where it was sent, so the history before a turn's reasoning is
+  what the turn saw and a turn produced while a notice shows goes back with
+  its reasoning too. They are never written to the session log, the
+  database or a conversation's history.
+
+The usage is read as on Chat Completions: input tokens, output tokens
+(reasoning included, which OpenAI bills as output), cached input and the
+input written to the cache. A
+`temperature` a request names is sent, but never to a built-in row (above):
+OpenAI's GPT-6 guide says to remove it while a model reasons, on either
+API, and each of the four always reasons here.
+
 ### Cost
 
 The cost tracker prices from the router's live registry — compiled defaults
 plus `[models]` rows plus discovered models — so a discovered local model costs
-`0`, a declared price is honoured, and a registry reload reaches the tracker.
-An unknown model is free only where every model on the daemon is local;
-otherwise the conservative cloud fallback still applies.
+`0`, a declared price is honoured (a `[models]` row at `0` included), and a
+registry reload reaches the tracker. An unknown model is free only where every
+model on the daemon is local; otherwise the conservative cloud fallback
+applies: $3 per million input tokens, $15 per million output. The same
+fallback counts a model Anthropic's or OpenAI's discovery registered with no
+price: it still runs, its spend counts against the caps below, and
+`daemon.log` says once per id that it is counted at the fallback. A
+`[models."<id>"]` row with its `input_price` and `output_price` counts it at
+its own rate. A price the row leaves out is no price: for an id with a
+built-in row, that row's price; for any other, the same fallback and the
+same one line in `daemon.log` ($3 / $15; `0` for Ollama, and on a server on
+this machine or your home network, below). An explicit `0` is a price and stays `0`. A
+row written before this build that gives no prices for a model on a server
+elsewhere was counted at `0` and is now counted at $3 / $15. A non-streaming OpenAI
+answer, on either of its APIs, is counted by the model its body names,
+which may be a dated snapshot of the
+id asked for (such as `gpt-4o-mini-2024-07-18`): a snapshot the catalogue
+lacks meets the same fallback. The four built-in OpenAI rows' pages list no
+snapshot but the id itself. A
+streamed round is counted by the id it was routed to. An OpenAI-compatible
+server of your own, such as llama.cpp or LM Studio set up as the `openai`
+provider with a key, is local though it is keyed when its `base_url` names
+this machine — `localhost`, `127.0.0.0/8` or `::1` — or another computer
+on your home network: an IPv4 private address (`10.0.0.0/8`,
+`172.16.0.0/12`, `192.168.0.0/16`) or link-local one (`169.254.0.0/16`), an
+IPv6 unique-local (`fc00::/7`) or link-local (`fe80::/10`) one, or a name
+ending in `.local`. The models its discovery lists are counted at `0`, as
+Ollama's are, and are not announced. A `[models."<id>"]` row's price still
+wins, and a built-in row keeps its own price wherever it is served from.
+The provider must be built at that address: a `base_url` changed on a
+running daemon counts once the provider is rebuilt (a restart, or switching
+it off and on), and the Anthropic provider, which always calls Anthropic's
+API, never counts as local. Any other host name — `gpu-box`, `gpu-box.lan`,
+a name with a trailing dot — is not looked up and is not local, whatever it
+resolves to, and neither is any other address: such a server is counted
+like a cloud one, and a `[models."<id>"]` row with `input_price = 0` and
+`output_price = 0` keeps such a model at `0`. A local `base_url` that
+forwards to a paid service (a gateway, a tunnel) has the models its
+discovery lists that nothing prices counted at `0` too, and so is a price
+a `[models]` row leaves out there; a built-in row it serves keeps its
+price, and so does a `[models]` row naming that built-in id.
+
+A model whose provider prices a long prompt higher carries that second rate
+in its built-in row: `gpt-6.1-sol` costs $2 / $10 per million tokens, and a
+request whose prompt is longer than 272,000 input tokens (cached ones
+included) is counted whole at $4 / $15; the other three OpenAI rows double
+their input rate and take 1.5x their output rate past the same line, and
+`claude-haiku-5-5`, $0.10 / $0.50, is counted at $0.50 / $2.50 once a
+request's prompt passes 100,000 tokens, cache reads and writes included. Each request is priced on its own,
+and a chat turn's or a chat skill's spend in the usage figures
+(`GET /v1/usage/summary`) is the sum of its requests' costs as the caps
+counted them, cache rates included: a turn of several requests is counted
+at the long rate only for a request that passed the threshold itself.
+The built-in rows are the providers' latest models, as their pages gave
+them on 2026-11-14, each undated (an undated id is one fixed snapshot,
+not a pointer that moves): `claude-fable-5-2` ($8 / $40),
+`claude-opus-5-5` ($4 / $20), `claude-sonnet-5-5` ($2 / $10) and
+`claude-haiku-5-5`, each with a 1,000,000-token window; `gpt-6-astra`
+($10 / $50), `gpt-6.1-sol` ($2 / $10), `gpt-6.1-terra` ($1 / $5) and
+`gpt-6-luna` ($0.10 / $0.50), each with a 1,050,000-token window. The
+rows of older models are gone: those the providers have shut down or
+retired (`o1`, `o1-mini`, `o3-mini`, `claude-opus-4-20250514`,
+`claude-sonnet-4-20250514`), and the nine this build retires though some
+still answer until their providers' dates (`claude-opus-4-6`,
+`claude-sonnet-4-6`, `claude-sonnet-4-5-20250929`,
+`claude-haiku-4-5-20251001`, `gpt-5.2`, `gpt-5-mini`, `gpt-5-nano`,
+`gpt-4o-mini`, `o3`). A template or a setting that names one walks the
+substitution ladder before the call, announced, instead of failing at the
+provider, unless your own `[models."<id>"]` row or the provider's model
+list still names it: then it stays routable and the call goes to the
+provider, priced by your row, or at the $3 / $15 fallback when only the
+list names it, with none of a built-in row's rules. Each of the nine that
+a provider's list names is said in `daemon.log`, one `WARN` per id ("a
+model retired in the catalogue"), at every discovery pass (start, the
+enable toggle, `POST /v1/models/refresh`) and every hot reload of
+`llm.toml`. An `llm.toml` seeded before this build keeps naming the ids
+it was seeded with; nothing rewrites it, and its naming one does not by
+itself warn, at start or on a reload (only a provider's list naming one
+does). A `[models."<id>"]`
+row naming a built-in id keeps that row's prices where it leaves them out,
+its cache rates always (a row has no cache keys), and its long-prompt rate
+for each price it leaves out: a price the row gives is counted at that
+price at any length, and one it leaves out at the built-in row's, its long
+rate past the threshold included.
+
+Cached input is counted at each built-in row's own rates, as the
+providers' pages gave them on 2026-11-14. A cache read costs 0.025x the
+input rate on `claude-fable-5-2`, 0.05x on `claude-opus-5-5`,
+`claude-sonnet-5-5`, `gpt-6.1-sol` and `gpt-6.1-terra`, and 0.1x on
+`claude-haiku-5-5`, `gpt-6-astra` and `gpt-6-luna`. A cache write costs
+1.25x on every built-in row: the 5-minute cache on Anthropic's, the one the
+daemon asks for, and OpenAI's default 30-minute cache. The
+OpenAI provider reads the written count from the usage on both of its
+APIs. A model with no built-in row — a discovered one, an unknown id, or
+a `[models]` row for an id with no built-in row — is counted at 0.1x for a read and 1.25x
+for a write. On a long prompt both scale with the long rate.
 
 | Cap | Default | Key in `daemon.toml` |
 |---|---|---|
@@ -355,8 +797,8 @@ shipped `lead_agent` template sets `3.0`). At price `0` none of the caps bite.
 | Key | Default | Scope |
 |---|---|---|
 | `[timeouts] llm_request_timeout_secs` | 120 | Wall clock for one **non-streaming** LLM call, any provider that sets no override. Clamped to 1…86400 s with a `WARN`. |
-| `[providers.<name>] request_timeout_secs` | unset | Per-provider override of the above. The seeded template sets **600** for Ollama. |
-| `[providers.<name>] default_max_tokens` | 4096 (8192 for the seeded Ollama) | Output ceiling for one answer; a request-level `max_tokens` still wins. |
+| `[providers.<name>] request_timeout_secs` | unset | Per-provider override of the above. The seeded template sets **3600** for Ollama: a call to a local model may run up to an hour, and one that uses up its whole figure is not asked again (below). |
+| `[providers.<name>] default_max_tokens` | 16,000 (8192 for the seeded Ollama) | Output ceiling for one answer, thinking and reasoning included; a request-level `max_tokens` still wins. A store seeded before this build says 4096 for Anthropic and OpenAI and keeps it: no build rewrites a written `llm.toml`, so set 16000 by hand. A configuration reset (`openalpaca config reset`, or `--factory`) leaves the key unset, so the compiled 16,000 applies, but it also clears every provider setting and API key in the file. |
 
 The HTTP client carries **no total deadline**: it bounds the connect (30 s,
 never longer than the budget) and the idle gap between reads, so a healthy long
@@ -365,21 +807,49 @@ request instead. Both provider-construction paths — the boot builder and the
 registration a toggle or a hot reload performs — resolve the budget through the
 same function, so they cannot disagree.
 
-Three bounds sit over a **streamed** turn, and it is worth knowing which one
-fires:
+Every lead round, and every round of a subagent on a built-in template (a
+plugin's agent runs its plugin's own loop), is streamed with nothing
+watching it (its events are collected and forwarded nowhere), so these
+bounds, not the non-streaming 120 s, hold a long answer; a main-loop or
+skill turn is streamed only to its chat. Three bounds sit over a
+**streamed** turn, and it is worth knowing which one fires:
 
 | Bound | Value | Where | What happens |
 |---|---|---|---|
-| Idle between SSE chunks | **90 s**, not configurable | `STREAM_IDLE_TIMEOUT`, `crates/openalpaca_llm/src/streaming.rs` | The stream errors, the loop logs it and **retries the turn without streaming**. |
-| Streaming wall clock | 600 s, not configurable | `LoopConfig::max_stream_duration` | Same fallback: the collection is cancelled and the turn is retried non-streaming. |
-| HTTP read gap | `request_timeout_secs` (600 s for the seeded Ollama, else `[timeouts] llm_request_timeout_secs`) | `build_http_client` | The request fails at the transport. |
+| Idle between stream events | **90 s**, not configurable; a turn streamed to its chat only — a lead's or subagent's round has none | `STREAM_IDLE_TIMEOUT`, `crates/openalpaca_llm/src/streaming.rs` | The stream errors, the loop logs it and **retries the turn without streaming**. A `ping` and a reasoning step that streams no text are not events and do not reset it. |
+| Streaming wall clock | 600 s, or 3,600 s when the provider serving the round needs no key (Ollama); not configurable | `LoopConfig::max_stream_duration`, `LoopConfig::max_keyless_stream_duration` | Same fallback: the collection is cancelled and the turn is retried non-streaming — but not a local round that ran its whole hour (below). |
+| HTTP read gap | `request_timeout_secs` (3,600 s for the seeded Ollama, else `[timeouts] llm_request_timeout_secs`) | `build_http_client` | The request fails at the transport. |
 
-The first is by far the tightest, so on a local model it is the one that fires,
-and the symptom is a turn that stalls and then answers un-streamed rather than
-one that fails. The case that reaches it in practice is a model still being
-loaded into memory: warm the tag once before a long run. The read timeout at
-600 s is ten minutes of silence and is effectively unreachable while the loop
-is the consumer.
+On a turn streamed to its chat the first is by far the tightest, so it is the
+one that fires, and the symptom is a turn that stalls and then answers
+un-streamed rather than one that fails. It is reached by a local model still
+being loaded into memory (warm the tag once before a long run), by a local
+model building a tool call it sends in one piece, and by a reasoning model
+that streams no reasoning text (an OpenAI Responses turn asks for no
+reasoning summary). A lead's or subagent's round has no idle clock: silence
+there is bounded by the HTTP read gap, `request_timeout_secs` (120 s on a
+cloud provider unless set, the hour for the seeded Ollama), past which the
+request fails at the transport and the round is asked again without
+streaming; bytes the provider sends while silent, such as Anthropic's `ping`,
+reset that gap. The read timeout at 3,600 s for the seeded Ollama is an hour
+of silence and is effectively unreachable while the loop is the consumer.
+
+**A local call that uses up its whole timeout is not asked again.** For a
+provider that needs no key (Ollama), a non-streaming call that ran its whole
+`request_timeout_secs` (the seeded 3,600 s or your own figure), a streamed
+request that waited out the same figure as its read gap before its stream
+opened, and a streamed round that ran its whole hour each end that model's part
+of the turn: the router does not try it again, does not walk the fallback chain
+to another model of the same provider, and the agentic loop does not retry it
+after a backoff. A model in the chain on another provider (a cloud model you
+listed) may still answer; when none does, the turn ends with the error, which
+names the model and the timeout. When the turn is a subagent's, its lead is
+told that a retry will not help, so it is not invited to start the subagent
+again to wait out the same timeout. A stream that opened and then fell silent
+is still asked again once without streaming. A cloud provider's timeout keeps
+its retries: the chain, then up to three loop retries — unless a local model on
+its chain used up its own whole timeout in that call; the turn then ends naming
+the local model, since a retry would ask it again.
 
 Streaming for Ollama is real (the provider forwards to the OpenAI-compatible
 streaming client), and every OpenAI-compatible base is asked for
@@ -392,19 +862,25 @@ Servers declared in `config/mcp.toml` are connected at boot; per-server failures
 
 Each connection opens with the `server/discover` probe of MCP `2026-07-28`. A server that answers it is served in that version's lifecycle; one that rejects it as an unknown method — or, over HTTP, answers it with a 4xx other than 401/403 before a session exists — is legacy, and the same connection is then sent the `initialize` handshake offering `2025-11-25`. A server served in the `2026-07-28` lifecycle announces that its tools changed only on a `subscriptions/listen` stream, so the daemon opens one for the list changes the server declares and picks up a tool the server adds or drops as it does a legacy server's; when the server acknowledges the stream the daemon lists its tools once more (a change made before the stream opened is announced nowhere), and a stream that ends while the connection lives is opened once more. A second end, a stream that fails or a refused one is named in a log warning, and the server's changes then go unnoticed until it is reloaded; a stream acknowledged for less than the server declares is warned about too. A server that ignores the probe is reached only after a 10-second wait, on every connect — the daemon's start, an enable, a reload — so a `connect_timeout_secs` of 10 or less fails it (the default is 30; the daemon logs a warning, and still connects, when a server under `"auto"` has 10 or less); a 401/403, a 5xx, a transport failure or a malformed 2xx in answer to the probe fails the connect with no fallback. A child respawned within a session — the reconnect made before a call, after the child exited — opens in the version its connect negotiated and is not probed again: `initialize` for a legacy server, `server/discover` at the negotiated version for a modern one. Each connection names itself `openalpaca-mcp` with the daemon's version and declares no client capabilities. A stdio server runs as the leader of its own process group, and the group ends with its connection — a disable, a reload or the daemon's shutdown ends every process the server started, those it left running included (a shutdown that runs out its 10-second window skips this; see [Startup and Lifecycle](#startup-and-lifecycle)). Being its own group, it no longer receives the Ctrl+C typed in the daemon's terminal; the daemon's shutdown closes it instead.
 
+A stdio server's raw stderr no longer reaches the daemon's log (`state/logs/daemon.log`, what "Show daemon log" reads), and a healthy server's stderr is shown nowhere and written to no log: the daemon reads it as the server writes, keeps the last 4 KB of each start of the server in memory, and shows them only when the server fails: at the end of its row's `detail`, under a line `server stderr (last N bytes, redacted):` — the detail the daemon's warning about the failure carries into that log too. What is shown is masked first — the value of each `env` and `env_from` entry of the server, of each argument that carries a credential, and of each variable of the daemon's own environment whose name contains `TOKEN`, `KEY`, `SECRET`, `PASSWORD` or `CREDENTIAL`, and the usual shapes of a credential (a bearer token, an `Authorization` or `Cookie` header, a `name=value` or `"name": "value"` with such a name, a URL's `user:password@`, an access query parameter) — each shown as `<masked>`, and every hidden character as `<U+XXXX>`.
+
 A server's `protocol` key chooses that lifecycle: `"auto"`, the default, is the probe and the fallback above; `"legacy"` sends `initialize` at `2025-11-25` at once and never the probe — for a server that ignores it; `"2026-07-28"` sends only the probe and never falls back, so a server older than that version does not connect. A connection that cannot agree a lifecycle — the server supports no version the client offers, answers the probe or the handshake with something else, closes the connection while the probe waits, fails the `initialize` that follows a legacy answer, or, under `"2026-07-28"`, rejects the probe as a legacy server does — leaves the row `Failed` with reason `protocol_negotiation_failed`, which the owner can act on: its detail is rmcp's error and the `protocol` value to set (it read `unreachable` before). Under `"2026-07-28"` a modern server's own refusal of the probe — a client capability it requires, a mismatched header — reads `unreachable`, as under `"auto"`. A stdio server that exits while the probe waits — a crash at start, a package `npx` cannot find — also reads `protocol_negotiation_failed`, with no Retry, though its `protocol` is not at fault; one already gone when the probe is written reads `unreachable`. A changed `protocol` is a changed declaration, so the server reloads.
 
-A stdio server's `command` is looked up on the daemon's `PATH`, which comes from whatever started the daemon. `openalpaca daemon start` in a terminal passes your shell's; the desktop app, opened from the Finder or the Dock, passes the minimal one macOS gives apps, so `npx`, `uvx`, Homebrew's `node` or `claude` may be found in the first case and not in the second (reasoned from how macOS starts apps, not measured). Write an absolute `command` (`command = "/opt/homebrew/bin/npx"`), or set `PATH` in the server's `env` — the child's `PATH` is also the one its `command` is looked up on — or start the daemon from a terminal before opening the app, which then uses it.
+A stdio server's `command` is looked up on the daemon's `PATH`, which comes from whatever started the daemon. `openalpaca daemon start` in a terminal passes your shell's. The desktop app passes your login shell's: when it starts it asks the shell your account names, as a login shell — zsh and bash as an interactive one (`-i -l -c`), so zsh reads `~/.zshrc` too — for its `PATH`, once, within 3 seconds of its start, and stops whatever the shell left running once it has answered; when an interactive profile ends the shell before it has answered (an `exit` in `~/.zshrc`, or an `exec` of a program that then exits), it asks the same shell once more as a plain login shell (`-l -c`: your login files without `~/.zshrc`, and for bash a `~/.bashrc` your `~/.bash_profile` sources read only up to its interactive check) in what is left of the 3 seconds; when that fails, or an interactive profile waits past the 3 seconds, it passes a fixed list instead (`/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin` and `~/.cargo/bin`), never the minimal one macOS gives apps. A login bash never reads `~/.bashrc` itself, so a folder added to `PATH` only there (`nvm`'s, or the one the installer adds for `~/.local/bin`) reaches the app's daemon only when `~/.bash_profile` sources `~/.bashrc`; otherwise it is in a terminal's daemon's `PATH` and not in the app's. The daemon's boot line says which it got — `PATH source: login-shell`, `login-shell-noninteractive` (the second run's) or `fallback-list` with the app's capture time, or `inherited` for a daemon started any other way — never the `PATH` itself; the daemon then removes the app's word (`OPENALPACA_PATH_SOURCE`) from its environment, so a daemon one of its commands starts logs `inherited`. Nothing else your profile exports reaches the app's daemon this way unless `daemon.toml` names it: `[daemon.env] passthrough_keys = ["AWS_PROFILE", "KUBECONFIG"]` (names only, never values, empty by default) has the app pass each listed variable your login shell exports — a credential pointer an MCP server or a shell command needs; a passed variable is in the daemon's whole environment, visible to every command, MCP server and plugin it runs, and no `OPENALPACA_` name is ever passed — and the boot line goes on `; also passed from the login shell, as [daemon.env] passthrough_keys lists: AWS_PROFILE, KUBECONFIG`, by name. The app reads the list when it opens and hands it only to a daemon it spawns; a daemon still running keeps the environment it started with, and a reopened app uses it as it is, so an edit reaches the daemon once it is stopped (`openalpaca daemon stop`, or Settings → Connection → `Stop daemon…`) and the app opened again. The daemon itself does not read the list. "Only when `daemon.toml` names it" holds for an app opened from the Finder or the Dock: a daemon started from a terminal, or by an app started from one, inherits that terminal's environment whatever the list says. Write an absolute `command` (`command = "/opt/homebrew/bin/npx"`), or set `PATH` in the server's `env` — the child's `PATH` is also the one its `command` is looked up on — or start the daemon from a terminal before opening the app, which then uses it.
 
 There is **no per-tool switch**: a whole server (or plugin) is turned off with `openalpaca ext disable mcp <server>` — see Extensions below. A disabled server's tools leave every surface and the gate refuses them.
 
-A streamable-HTTP server (`transport = "http"`) is bounded by idleness, never by a total deadline: a streamed answer is no longer cut at 30 s by the connection — it runs until the call's own deadline, the server's `request_timeout_secs` (default 30), so raise that for a long-running tool. The connection itself is given up only when nothing at all arrives for five minutes, or for `request_timeout_secs` when that is longer, so a stream the server holds open between events is not cut either. A redirect is followed only on the server's own origin (scheme, host and port), for up to ten hops, and only for a server given no credentials: a server with `auth` or `extra_headers` (`extra_headers_from` included) follows no redirect at all, since the credential and every extra header would travel with the request. So a server whose `url` relies on a redirect — `http://` to `https://` included, or any redirect when credentials are configured — stops connecting: its row reads `Failed` with reason `config_invalid`, its detail saying ``server redirected to <origin>; set `url` to the canonical endpoint``, and it connects again once `url` is the endpoint the server redirected to. A call that meets such a redirect mid-session returns the same message and is never retried.
+A streamable-HTTP server (`transport = "http"`) is bounded by idleness, never by a total deadline: a streamed answer is no longer cut at 30 s by the connection — it runs until the call's own limit, the server's `request_timeout_secs` (default 30), so raise that for a long-running tool — up to `[execution.agent_defaults] max_tool_runtime_secs` in `config/daemon.toml` (120 by default), and an MCP call may not ask for more. The sandbox is the one clock for an MCP call (TIMEOUT-ONE-CLOCK): it cuts the call at the lower of the two figures, with `Tool '<server>__<tool>' timed out after <n>s`, and the call is a failed tool run (`tool_executed`, `success: false`, `reason: "timeout"`), never a `security_violation`; the client's own deadline waits past that cut, and a reconnect before the call keeps `request_timeout_secs`. The connection itself is given up only when nothing at all arrives for five minutes, or for `request_timeout_secs` when that is longer, so a stream the server holds open between events is not cut either. A redirect is followed only on the server's own origin (scheme, host and port), for up to ten hops, and only for a server given no credentials: a server with `auth` or `extra_headers` (`extra_headers_from` included) follows no redirect at all, since the credential and every extra header would travel with the request. So a server whose `url` relies on a redirect — `http://` to `https://` included, or any redirect when credentials are configured — stops connecting: its row reads `Failed` with reason `config_invalid`, its detail saying ``server redirected to <origin>; set `url` to the canonical endpoint``, and it connects again once `url` is the endpoint the server redirected to. A call that meets such a redirect mid-session returns the same message and is never retried.
 
 ## Extensions (MCP servers + plugins)
 
 The ENABLE axis is one toggle per install unit: per MCP server (`config/mcp.toml`'s `enabled`) and per plugin (`enabled` in the plugins root's `.permissions.toml`). Builtins are never toggled, and there is no per-tool toggle or deny list. Disabled means unloaded: the plugin child is killed, the MCP connection dropped — a stdio server's whole process group with it — and no reconnect is attempted. A tool whose extension is disabled is refused at the gate, with a warning in the log and — where a surface asked for it — in the run.
 
-A stdio MCP server whose process exits while it is enabled — by itself, or killed from outside — is known at once: its row reads `failed`, reason `crashed`, the detail naming the exit status (`exit status: 3`, `signal: 15 (SIGTERM)`), and one `extension_state_changed` is published, with no call needed to find out. Nothing is torn down: its tools stay on every surface, and the next call to one of them is let through — the reconnect made before that call starts the server again, and once it has, the row reads `enabled` again (announced the same way) and the call goes ahead. The row's `version`, `protocol_version`, `connect_ms` and `list_ms` stay the ones its load's handshake recorded — the exited process's, not `null` — and the restart does not refresh them, as no reconnect does. If the server cannot be started again, each of the next three calls fails with that start's own error and the fourth with `reconnect attempts exhausted`; the row then stays `failed` with that detail, its tools leave every surface, and Retry (an `enable`) is the way back. A close the daemon makes itself — a disable, a reload, its own shutdown — is not reported as an exit. An HTTP server's end is still found by the next call or the idle bound.
+A plugin is an ordinary program running as you. Once it is approved (and on), the daemon starts its `entry` with the plugin's own directory as the working directory and the daemon's own environment — from which the daemon took `OPENALPACA_MASTER_KEY` at boot (see [Secrets and First Run](#secrets-and-first-run)), so any other credential held there is in it too, an LLM key `llm.toml` reads through `secret_env` or a variable an MCP server's `env_from` names — plus the variables its `[plugin] env` sets. Nothing confines it: it can read and write whatever your account can and reach the network. The capabilities its manifest lists (`capabilities.provides`, what consent is recorded for) name what its tools contribute to agents, not what the program can do. Every approve preview says so in one line, our own words: in the CLI `ext install --dry-run`, `ext install`, and `ext update` and `ext info` when the plugin is awaiting consent; in the app, the consent row in Settings → Extensions.
+
+The daemon speaks JSON-RPC 2.0 to a plugin over its stdin and stdout, each message framed by a `Content-Length` header. Its first request opens the plugin, waiting 10 seconds for the answer, and a plugin that fails it does not load. A plugin's manifest chooses how it is opened. By default the request is OpenAlpaca's own `initialize`, which carries the plugin's id, version, granted capabilities and its `[config]` values, and the plugin answers `{"ready": true}`. A plugin with `mcp_compatible = true` in `[plugin]` is opened the way an MCP client opens a server: `initialize` offering MCP `2025-11-25`, naming the client `openalpaca-mcp` with the daemon's version and declaring no client capabilities, then the `notifications/initialized` notification, and only then `tools/list` and its other requests. The `server/discover` probe of MCP `2026-07-28` is not sent. An answer that names no `protocolVersion` is accepted. Such a plugin is sent no configuration, since MCP's `initialize` has no place for it, and the manifest's warnings say so when it declares `[config]` keys. A required one still has to be set before the plugin loads. The framing is still the plugin channel's `Content-Length`, not the newline-delimited JSON of an MCP stdio server, so a stock MCP server is added in `config/mcp.toml`, not as a plugin.
+
+A stdio MCP server whose process exits while it is enabled — by itself, or killed from outside — is known at once: its row reads `failed`, reason `crashed`, the detail naming the exit status (`exit status: 3`, `signal: 15 (SIGTERM)`) and ending with the last of what the process wrote to its stderr (see [MCP Servers](#mcp-servers); the daemon waits up to a quarter of a second for it), and one `extension_state_changed` is published, with no call needed to find out. Nothing is torn down: its tools stay on every surface, and the next call to one of them is let through — the reconnect made before that call starts the server again, and once it has, the row reads `enabled` again (announced the same way) and the call goes ahead. The row's `version`, `protocol_version`, `connect_ms` and `list_ms` stay the ones its load's handshake recorded — the exited process's, not `null` — and the restart does not refresh them, as no reconnect does. If the server cannot be started again, each of the next three calls fails with that start's own error and the fourth with `reconnect attempts exhausted`; the row then stays `failed` with that detail, its tools leave every surface, and Retry (an `enable`) is the way back. A close the daemon makes itself — a disable, a reload, its own shutdown — is not reported as an exit. An HTTP server's end is still found by the next call or the idle bound.
 
 Verbs (`openalpaca ext …`, and `POST /v1/extensions/{kind}/{id}/{verb}`):
 
@@ -422,11 +898,11 @@ Install, update and uninstall are their own routes rather than verbs:
 |---|---|
 | `POST /v1/extensions/plugin` | Copies the directory at `{"source":"path","path":"/abs/dir"}` into `~/.openalpaca/plugins/`. It grants nothing — the row lands unapproved and `approve` is the one action that starts it. `source: "url"` is declined by name. |
 | `POST /v1/extensions/mcp` | Writes a `[servers.<name>]` block into `config/mcp.toml`. A declaration handing the daemon a literal secret is refused `422` (`secret_literal_refused`) — use the `env_from` / `bearer_env` / `extra_headers_from` indirections. |
-| `POST /v1/extensions/plugin/validate` | Reads a candidate directory's `plugin.toml` and answers what it would install. Copies nothing. Its `manifest.warnings` — also in the install and update responses, on the row an install, update or approve returns, standing as `declared.warnings` on every listed plugin row, and in the daemon's log at each load — names each key the manifest sets that nothing reads (with the key it likely meant: a top-level `tool` is `types.tools`) and says that `types.connector` and `types.provider` contribute nothing while their bridges are not wired. A warning never refuses. |
+| `POST /v1/extensions/plugin/validate` | Reads a candidate directory's `plugin.toml` and answers what it would install. Copies nothing. Its `manifest.warnings` — also in the install and update responses, on the row an install, update or approve returns, standing as `declared.warnings` on every listed plugin row, and in the daemon's log at each load — names each key the manifest sets that nothing reads (with the key it likely meant: a top-level `tool` is `types.tools`), says that `types.connector` contributes nothing while its bridge is not wired, says that `types.provider` contributes nothing because the plugin provider type is removed (LLM providers are the built-in ones, configured in `llm.toml` or in Settings → Models & keys; the row's `provider` field reads `null`), and says that a `[config]` on a plugin with `mcp_compatible = true` is never sent to it. A warning never refuses. |
 | `PUT /v1/extensions/plugin/{id}` | Replaces an installed plugin's tree with the one at a given path, through the same drain-and-unload a disable uses. The swap writes `plugins/.staging/<id>.swap` (where the incumbent went in `.trash/`) before it moves the incumbent and removes it after the rename into place: a rename that fails moves the incumbent back before the error returns, with the consent decision a capability change had dropped, and a daemon that dies between the two moves puts it back at its next start (the tree only: a decision dropped before the crash stays dropped), which also sweeps the staging copies an earlier process left. An uninstall or an orphan row's removal drops the plugin's marker. |
 | `DELETE /v1/extensions/{kind}/{id}?uninstall=true` | The real removal. A plugin's directory is **moved to `~/.openalpaca/plugins/.trash/`**, never deleted, and the response says where; `&keep_data=false` sends its `.data/<name>/` to the trash too. An MCP server must be `Disabled` first, and its `[servers.<name>]` block is what goes. Nothing auto-purges `.trash/`. |
 
-An MCP row also carries, while its connection is live, `protocol_version` (the version negotiated), `connect_ms` and `list_ms` (how long the connect and the first `tools/list` took, in milliseconds), and `null` for each otherwise; a connect of about 10 000 ms is a server that ignored the probe. `openalpaca ext list` / `info` render the same rows the GUI's Extensions view uses; `openalpaca ext list --include-orphaned` adds plugins whose directory has disappeared. `openalpaca ext install|update|uninstall` and `openalpaca ext mcp add|remove` cover the routes above. `openalpaca plugin …` remains as the plugin-shaped shortcut over the same routes, including `plugin config get|set` (values stored as secret references read back `<redacted>`). `GET /v1/tools` lists the tool catalog read-only — each row carries its `origin` (`kind`, `id`, `enabled`, `state`) for extension tools and `null` for builtins; there is no per-tool write.
+An MCP row also carries, while its connection is live, `protocol_version` (the version negotiated), `connect_ms` and `list_ms` (how long the connect and the first `tools/list` took, in milliseconds), and `null` for each otherwise; a connect of about 10 000 ms is a server that ignored the probe. `openalpaca ext list` / `info` render the same rows the GUI's Extensions view uses; `openalpaca ext list --include-orphaned` adds plugins whose directory has disappeared. `openalpaca ext install|update|uninstall` and `openalpaca ext mcp add|remove` cover the routes above. `openalpaca plugin …` remains as the plugin-shaped shortcut over the same routes, including `plugin config get|set` (values stored as secret references read back `<redacted>`). `GET /v1/tools` lists the tool catalog read-only — each row carries its `origin` (`kind`, `id`, `enabled`, `state`) for extension tools and `null` for builtins, and `output_schema`, an MCP tool's declared output schema (`null` when it declared none and for every other tool); there is no per-tool write.
 
 ## Discovery and Auth Model
 
@@ -439,9 +915,23 @@ Daemon writes discovery object including:
 - build metadata
 
 The token is generated at every start and its `expires_at` is 24 hours later.
-The expiry is checked by the clients that read `discovery.json` (the CLI and
-the GUI refuse an expired file); the daemon's own middleware compares the token
-and nothing else. The file is removed on a clean shutdown.
+While the daemon runs it rewrites `discovery.json` with a new token and a new
+`expires_at` 12 hours after the token's issue (T21): it reads the wall clock
+every minute, so after a sleep past the expiry the file is renewed within a
+minute of the wake, and a wall clock set back before the issue renews it at
+once. Only `auth` changes; the instance id, pid, start time, address and build
+stay. The daemon accepts the token the file names now, and the one it replaced
+until that one's own `expires_at` (or until the next rotation, which comes
+before then only after the wall clock is set back; a client refused then
+reads the file again); the new token is accepted before the file
+names it, and a write that fails leaves the old token in the file and in force
+and is tried again a minute later (`daemon.log` says so, never the token). The
+expiry is still checked by the clients that read `discovery.json` (the CLI and
+the GUI refuse an expired file), which a running daemon's file no longer meets;
+a client holding a token past its life reads the file again when refused (the
+GUI on a `401`, `confirmations watch` for each answer, the chat REPL). The
+rotation stops when shutdown begins, and the file is removed on a clean
+shutdown after it has stopped.
 
 Auth behavior:
 
@@ -480,7 +970,7 @@ extension routes differ by design: they answer a flat `{"error": "<word>"}`.
 | Method and path | Purpose |
 |---|---|
 | `GET /` | Name and version. Public. |
-| `GET /v1/health` | Liveness: status, version, pid, instance id. Public. |
+| `GET /v1/health` | Liveness: status, version, pid, instance id, and `protocol`, the wire protocol the daemon speaks, which the app judges it by (Q04). Public. |
 | `GET /v1/status` | Where the daemon keeps things and how it is doing: store root, state dir, database path, project root, start time and uptime, schema version, `log_path` (only when a launcher — `openalpaca daemon start` or the GUI app — manages the log), upload and artifact bytes, the session-log limits and the last boot sweep, `routing.resume_enabled`, the `llm` block described under [The effective model](#the-effective-model), and `busy` — what the daemon has in flight right now, as three counts and never contents: `running_tasks` (runs queued, running or paused, which a stop would leave `interrupted`), `pending_confirmations` (approval prompts nobody has answered) and `connected_clients` (open `/v1/events` sockets, the caller's own included). `busy` is `null` on a daemon with no confirmation broker, rather than a block with a guessed zero in it. |
 | `GET /v1/me` | The local user id, the default lane key, and the sources this user has conversations under. |
 | `POST /v1/command` | Daemon commands: `echo`, `process` (runs a full turn), `link_generate`, `link_consume`, `shutdown`. Takes `unattended`. |
@@ -560,7 +1050,7 @@ bookkeeping. `DELETE /v1/sessions/{id}` takes the transcript with the rows:
 | `POST /v1/tasks` | Create a run. Takes `unattended`. |
 | `GET /v1/tasks/{id}` | One run. |
 | `GET /v1/tasks/{id}/timeline` | One lane per spawned subagent (label, template, state, start and end). This is where a run's agents are reported. |
-| `POST /v1/tasks/{id}/action` | `cancel`, `pause`, `resume` or `start`. Takes an optional `unattended`. |
+| `POST /v1/tasks/{id}/action` | `cancel`, `resume` or `start`. Takes an optional `unattended`. `pause` is refused until a later design: `409` with `{"error": "<the chat's /pause sentence>"}`, and nothing moves (no status, no `TaskUpdated`). `resume` still un-pauses a row an earlier build left `paused`. |
 | `POST /v1/tasks/{id}/steer` | Push a message into the run's steering inbox. `404` on a run that is not yours. |
 | `POST /v1/tasks/{id}/rerun` | Answers `201` with a **new** id, copied from a finished run's goal. Takes an optional `unattended`. |
 | `GET\|POST /v1/lanes/{lane_key}/followups` | Read or add to a lane's follow-up queue. The `POST` takes `unattended`. |
@@ -576,10 +1066,10 @@ lane never posts its completion report or its confirmation prompts there.
 
 | Method and path | Purpose |
 |---|---|
-| `GET\|POST /v1/agents` | List or create agents. |
+| `GET\|POST /v1/agents` | List or create agents. A `POST` with the `id` of a template that has an agent (every template but a plugin's, or one a file withholds or switches off) is refused (`400`), naming the template. |
 | `POST /v1/agents/from-toml` | Create an agent from a TOML definition. |
 | `GET\|DELETE /v1/agents/{id}` | Read or delete one. |
-| `GET\|PUT /v1/agents/{id}/config` | Read or update its config. |
+| `GET\|PUT /v1/agents/{id}/config` | Read or update its config. On a template's `id` the `GET` is what its next run gets, and the `PUT` (a set, `openalpaca agents set`) never changes a running agent: it is stored as the fields it changes over the template, in the template's `agent` row, and loaded for every new run of it and after a restart; `GET /v1/agents/{id}` reads the same definition. A `PUT` on a run's own `<template>::<id>` while it runs is `409` `AGENT_RUNNING`, naming the template. |
 | `POST /v1/agents/{id}/action` | `pause` or `resume`. |
 | `GET\|POST /v1/agent-templates` | List or create agent templates. |
 | `GET\|PUT\|DELETE /v1/agent-templates/{id}` | Read, update or delete one template. |
@@ -593,6 +1083,7 @@ lane never posts its completion report or its confirmation prompts there.
 | `GET /v1/files/{id}` | Upload metadata. |
 | `GET /v1/files/{id}/content` | The bytes. Query token or bearer header. A result file in the project is read through its project's folder: `410 ARTIFACT_GONE` when the file is no longer there, `410 ARTIFACT_PROJECT_MISSING` when its project is missing (*Where an agent's files land*, below). |
 | `POST /v1/files/{id}/open` | Open the file with the OS default application. An upload is opened from a copy under the name it was uploaded with, staged in `~/.openalpaca/state/cache/open/<id>/`; those copies are removed at the daemon's next start, and with their rows when a project's data is deleted. A result file in the project is opened only when the artifact store keeps its extension — text, Markdown or PDF, code or config, a table, a raster image, HTML, an archive or an office document; anything else (`.sh`, `.command`, `.svg`, `.exe`, `Makefile`, a dotfile such as `.env`) is `409 OPEN_NOT_OFFERED`: show it in its folder instead. That is decided again on what the file resolves to when it is opened, so a result file replaced since by a folder, or by a link to a script or an app in the project, is `409 OPEN_NOT_OFFERED` too, and the default application is never asked. An openable result file of a missing project is `410 ARTIFACT_PROJECT_MISSING`, and one no longer there in its project `410 ARTIFACT_GONE`. A by-product is opened at its file in the store, resolved inside its own folder there: a stored file replaced since by a link out of that folder is refused, one that is not a regular file — or whose own name, any link inside the folder followed, has no extension the store keeps: a link to a script there, or a by-product stored under the fallback extension `.bin` — is `409 OPEN_NOT_OFFERED`, and one gone from the store is `410 ARTIFACT_GONE` — the default application is asked in none of these. |
+| `POST /v1/files/{id}/reveal` | Show the file in its folder on the daemon's machine — Finder with it selected on macOS — and answer `{ id, status: "revealed" }`, never a path (the app's `Reveal in Finder`). The id's stored file is checked first, symlinks resolved: only a regular file in the home store or under one of your projects' folders is shown, whatever its kind. Anything else is `409 REVEAL_REFUSED` with one sentence (not there, not a file, or in no store or project), a file of a missing project `410 ARTIFACT_PROJECT_MISSING`, an unknown id `404`, and a reveal the system could not do `500 REVEAL_FAILED`. Nothing is copied, opened or changed. |
 | `GET /v1/artifacts` | List produced artifacts (filters and paging). Each row carries `in_project` — a result file an agent wrote into the project, which points at the real file — and `openable`, whether `Open` is offered for it — a result file by its name, a by-product by its stored file's (one stored under the fallback `.bin` is not), an upload always. `in_project=true` lists only the project's result files, `in_project=false` only by-products; absent, both. A row whose file was not there the last time it was read carries `missing: true` and is listed only with `include_missing=true`; a result file's mark goes when a later read finds the file again. |
 | `GET /v1/artifacts/{id}` | One artifact. |
 | `GET /v1/artifacts/{id}/versions` | Its versions. A result file in the project has none and answers an empty list: what OpenAlpaca keeps of it is the content it had before `file_write` or `file_edit` replaced or edited it, in the conversation's log (`~/.openalpaca/sessions/<id>/snapshots/`; a shell command's changes keep no copy), and any longer history is the project's own — git's, where the project is a repository. |
@@ -636,9 +1127,10 @@ works in).
   at its old path — is never read through that path: the content routes and
   Open answer `410 ARTIFACT_PROJECT_MISSING` with the sentence
   `<root>: this project's folder is gone or has moved; re-point the project to read its files.`,
-  the app's `Reveal in Finder` refuses it with the same sentence, and the
-  file reads again once the project is re-pointed. The tool's result names the
-  file's absolute path and tells the model to give the user that path; if the
+  `POST /v1/files/{id}/reveal` (the app's `Reveal in Finder`) refuses it with
+  the same sentence, and the file reads again once the project is re-pointed.
+  The tool's result names the file's absolute path and tells the model to give
+  the user that path; if the
   row could not be written, it says the file is written and the app could not
   list it. A run's completion report ends with a line naming the files it
   wrote into the project, and its file count and chips count its by-products
@@ -677,6 +1169,23 @@ works in).
   `artifact_read` reads it back by its id, and that writing the same path
   again saves its next version. `file_edit` is refused with no project; its
   sentence names `file_write`.
+- **An MCP tool's images, audio and embedded files** are saved as
+  by-products the same way, never asked: in the project's folder in the home
+  store when the conversation has a project, the home store's own otherwise,
+  each one its own artifact, announced as `artifact_written` and listed in
+  the Library, its bytes exactly as the server sent them (base64-decoded,
+  never converted). The model reads, in each one's place, a line naming the
+  artifact's id, its absolute path, its MIME type and its size — or why
+  nothing was saved: over `[execution.artifacts] max_artifact_bytes`, data
+  that is not base64, or a turn with no owner. The kind comes from the MIME
+  type the server gave (one that is not `type/subtype` counts as none),
+  whatever the block: an image, a PDF, an archive, an HTML file, code or a
+  table opens in its app, and audio, an SVG, plain text or a file with no
+  type is shown in its folder only (`.bin`).
+  `artifact_read` returns text only, so the model cannot read back an image,
+  audio clip, PDF or archive (the kind follows the server's MIME label, not
+  the bytes); `send` can send one by its id. An embedded text resource reaches the model
+  as its text.
 
 A path that names no file (`''`, `.`, `reports/`, a blank name) is refused,
 and a turn with no owner — `POST /v1/command {"command":"process"}` runs as
@@ -1040,13 +1549,13 @@ here — it is confirmed only through the routes below.
 
 **Chat memory commands** (`/remember`, `/forget`, `/memories`). The
 orchestrator answers these itself, in its deterministic tier, with **no model
-involved** — the turn's `IntentClassified` names them `memory_command`. Typed
-by a person on an attended turn of the app's or the CLI's chat (source `gui`
-or `cli`, not `unattended`), such a command is a **user-directed** surface like
-the routes below: it builds its `UserSurface` context from the turn — the
-turn's owner, and the project root the turn's own workspace resolved to — so
-`/remember` records origin `user`. G2 is untouched: no model ever sees the
-command, and the text written is exactly what was typed.
+involved** — the turn's latency row (`GET /v1/orchestrator/latency`) names them
+`memory_command`. Typed by a person on an attended turn of the app's or the
+CLI's chat (source `gui` or `cli`, not `unattended`), such a command is a
+**user-directed** surface like the routes below: it builds its `UserSurface`
+context from the turn — the turn's owner, and the project root the turn's own
+workspace resolved to — so `/remember` records origin `user`. G2 is untouched:
+no model ever sees the command, and the text written is exactly what was typed.
 
 - `/remember [--kind <k>] [--global | --project] <text>` stores a note: the
   title is the first line cut at 80 characters, the body is the whole text,
@@ -1202,7 +1711,7 @@ Every chat message (any source: GUI, CLI, connectors) is routed by the orchestra
 
 1. **Deterministic commands** (no LLM call):
    - `/status` / `/tasks` — task summary; `/status <task_id>` for one task.
-   - `/cancel`, `/pause`, `/resume` — task control. Bare forms (no id) resolve against the lane's active workflows; an explicit id (`/cancel <id>`) targets that task.
+   - `/cancel` — stops a run. The bare form (no id) resolves against the lane's active workflows; an explicit id (`/cancel <id>`) targets that task. `/pause` and `/resume`, bare or with an id, answer one sentence — pause is not supported, `/cancel` stops a run — and change nothing. Pause is refused on every surface until a later design: the action route's `pause` answers `409` with the same sentence, `openalpaca tasks pause` prints it, and the GUI offers no Pause.
    - `/steer <text>` — inject a steering message into the lane's running workflow (guaranteed delivery, bypasses the model; requires `orchestrator.routing.steering_enabled`, default on).
    - `/remember`, `/forget`, `/memories` — the chat memory commands (see [Memory](#memory), *Chat memory commands*): matched before any skill — a slash command or the router's pick — and before the task commands above, which the three words cannot be confused with; the command word in any case and followed by a space or nothing (`/remembering` is not one). Only on an attended turn of the app's or the CLI's chat; every other turn is answered with a fixed sentence and changes nothing. Their names are reserved: a skill claiming one as its slash command, an alias or its id is not reached by that slash, and the skill loader logs one `WARN` naming it.
    - `/<skill> [args]` — invoke a skill by slash command, alias, or skill ID (directory name); skills can also be selected by the weighted skill router.
@@ -1350,7 +1859,15 @@ only for the rest of the turn or run that gave it, as
 [Tool confirmations](#tool-confirmations) says — its card names the folder the
 command runs in, and the card is the one place to stop it: read the command
 before you approve it. Only an operating-system sandbox would change this, and
-none is used in this version. A command, a command tool or a skill script that
+none is used in this version. A command, command tool, HTTP tool, MCP tool or
+plugin tool call has one clock, the sandbox's (TIMEOUT-ONE-CLOCK): a command
+tool's own `timeout_secs` and an HTTP tool's under `config/tools` are where the
+sandbox cuts it (an HTTP tool's, or an MCP server's `request_timeout_secs`,
+only below `[execution.agent_defaults] max_tool_runtime_secs`), and a cut call
+is a failed tool run with the reason `timeout`, never a `security_violation`.
+A builtin with a deadline of its own — `web_fetch`'s, `web_search`'s
+`timeout_secs`, a skill script's `timeout_secs` — still stops at it first, with
+its own error and no reason. A command, a command tool or a skill script that
 runs past its time limit, or whose run is cancelled, is killed at once, with
 the processes it started (on Windows, the command alone; a process that leaves
 its process group, as `setsid` or a program that turns itself into a
@@ -1519,6 +2036,11 @@ model that will **actually answer** — resolved through the same ladder as
 | audio | does not, and a transcript was extracted | the transcript as text |
 | audio | does not, and there is no transcript | a placeholder; skipped |
 
+A document that reaches the model with no extracted text carries a note: that
+its text extraction is pending while the file is still waiting or being
+extracted, or, once its extraction has failed, that it failed and no extracted
+text is available. The failure's own reason is never sent to the model.
+
 When nothing is routable, the parts are left untouched and the router's own
 "no routable model" error is what the user sees.
 
@@ -1573,6 +2095,15 @@ Every way a prompt stops being pending is announced — a timeout included — s
 a client can always take its prompt down. The timeout defaults to 300 s
 (`execution.agent_defaults.confirmation_timeout_secs` in `daemon.toml`) and is
 fail-closed.
+
+One agent's prompts for calls that are not read-only come one at a time.
+Within a round, such a call runs only once the calls before it have finished,
+so of two such calls that ask, the second prompt appears after the first has
+been answered and its call has run or been refused, and each waits its own
+timeout. Read-only calls in a row still run side by side, so when an agent
+template's or a skill's own list names a read-only tool, two calls of it in
+one round can ask at once. Prompts from different agents — subagents running
+side by side — can still be pending together.
 
 An approval is remembered for the rest of the loop that asked — one chat turn,
 or one agent's run inside a workflow — and no further: `these_args` covers
@@ -1716,7 +2247,10 @@ list is the whole union. Every frame also carries `ts` and `instance_id`.
 - `connector_status`, `key_status_changed`
 - `chat_stream_started`, `chat_stream_ended`
 - `orchestrator_config_changed`, `daemon_config_changed`
-- `security_violation`, `circuit_breaker_tripped`, `tool_executed`
+- `security_violation`, `circuit_breaker_tripped`, `tool_executed` — a
+  failed run the sandbox's clock cut also carries `reason: "timeout"`
+  (TIMEOUT-ONE-CLOCK; a timeout is never a `security_violation`), as does its
+  persisted row's `detail`; every other frame carries no `reason`
 - `tool_confirmation_requested` and its twin `tool_confirmation_resolved`
   (`request_id`, `agent_id`, `tool_name`, `outcome`, `stream_id`, `lane_key`,
   `task_id`) — sent for every way a prompt stops being pending, with `outcome`
@@ -1755,13 +2289,13 @@ The daemon runs periodic workers, all cancelled together on shutdown (intervals 
 - memory index rebuild (once, at start, only when the search index is missing, unreadable or of another version): rebuilds it from the note files on a blocking worker while the daemon already serves, each partition under its writer slot, so a write meanwhile is never indexed with stale derived facts; recall and search — also when a rebuild starts under them — the suggestions list and a deleted conversation's episode notes answer from the note files until it is done, the timeline answers `MEMORY_INDEX_REBUILDING`, and only background learning waits for it; and a rebuild that fails is retried by the next reconciliation
 - learning sweeper (fixed 15 s interval): a conversation with turns not yet learned becomes due once it has been idle `[orchestrator.learning] idle_secs` or is no longer its lane's active conversation, and a due one is learned once no chat turn has been in flight for 20 s; a conversation with new turns becomes due for its episode note once it has been quiet 30 minutes or is no longer its lane's active conversation, and the note is written after its facts, when it has at least 4 of your turns (see [Memory](#memory))
 - learning boot catch-up (once, 30 s after start): every conversation with turns not yet learned is due, and so is the episode note of every conversation with at least 4 of your turns past its episode cursor
-- file-processing worker and asset cleanup (upload governance)
+- file-processing worker and asset cleanup (upload governance); at start the worker first counts every attachment a stop (or a crash) left mid-extraction as a failed attempt — `Error`, "extraction was interrupted: the daemon stopped before it finished" — instead of leaving it pending. Such a file is retried, like any failed extraction, only while it has attempts left: a file is tried at most `[upload.governance] extraction_retry_count` + 1 times per attach, interrupted attempts included, so at the default of 1 it is tried twice and two stops that each cut one of its extractions leave it `Error` until it is attached again or that setting is raised, and at 0 an interrupted file is never retried; this cap is what keeps a file whose extraction takes the daemon down from doing so at every start, and each re-attach grants it again. A stop cuts an extraction only when it is still running at the stop window's end (one second before the window's 10 seconds are up; see [Startup and Lifecycle](#startup-and-lifecycle)): one that finishes by then keeps its result. Each poll takes new uploads first and retries failed files only in the room they leave in its batch (`processing_batch_size`). Once a stop is asked for, the worker begins no new extraction: a file still waiting for an extraction slot is left as it was, with no attempt counted. Attaching a failed file again through the app, the CLI or the API (`POST /v1/files/upload`) gives it a full count of fresh tries (but for one race, below): the same bytes return the same row (an upload is de-duplicated by its SHA-256, per owner and project; a row whose bytes went is re-addressed to the new copy, not replaced), and a row whose extraction failed is made pending again (`uploaded`, its reason and text cleared), so that turn waits for it as for a new upload and, if it is not extracted by then, tells the model it is pending; a row being extracted at that moment is left to that attempt. The race: if the worker has already picked the failed file for a retry when it is attached again, but has not yet started that retry, the retry goes ahead on the old count, so the file gets as many fewer tries as it had already used (one fewer at the default); a file the worker had not picked, or one that failed with no attempt counted, gets the full count. Where that re-attach also brought back bytes that had gone, the picked retry reads the old copy, which is no longer there, and, for a file whose text is read from it (text, PDF, Office, iWork), fails (an image, audio or other file ends `ready` as it would anyway): at the default this can leave a file that had failed once failed again with no try made on the new copy, although the upload answered `uploaded`, until it is attached again or that setting is raised; a file that failed with no attempt counted loses that one try and is then tried on the new copy. A file re-sent through a chat connector (Telegram, Discord, iMessage) gets no fresh tries yet: it returns the same row, failed as it is. Present limits: the reason is visible only through `GET /v1/files/{id}`, and the status only there and in an upload's answer (neither the app nor the CLI shows them); a file that fails the same way every time fails again after a re-attach; near the storage quota a re-attach is refused before it resets anything (the quota check counts the file's bytes even when the store already holds them); and no control in the app, no CLI command and no API route deletes one failed attachment or retries it other than by attaching it again: its row goes only with the asset cleanup (an upload linked to no message, after `orphan_grace_period_hours`), a project purge (`openalpaca store purge`, `POST /v1/workspaces/purge`) or a factory reset, and raising `extraction_retry_count` (read at every poll) makes a failed file retryable again once its tries fall within the new count
 - telemetry cleanup (fixed daily interval)
 - chat-stream cleanup (stale SSE streams)
 
 ## Storage Model
 
-- SQLite location is resolved by `openalpaca_storage::store::database_path()` — `~/.openalpaca/state/openalpaca.db`. Every path in the layout comes from that module; no crate joins a literal directory name onto a store root.
+- SQLite location is resolved by `openalpaca_app_support::paths::database_path()` — `~/.openalpaca/state/openalpaca.db`. The root's own paths (`state/`, the logs, `config/`, `plugins/`) come from `openalpaca_app_support::paths`, the content stores' and the projects' from `openalpaca_storage::store` (`ContentKind`); no crate joins a literal directory name onto a store root.
 - Migrations are embedded and applied from `openalpaca_storage::migrations::MIGRATIONS`, and a migration's file number is its schema version. The unreleased development chain was re-baselined on 2026-09-28 into one file, `crates/openalpaca_storage/src/migrations/001_baseline.sql`, which initializes schema version **1** directly and needs nothing beyond SQLite itself — no extension is loaded. It carries the whole schema, the turn's id and project root on each stored message (`conversation_messages.request_id`, `workspace_root`) and the `learning_cursor` table included — how far learning, and episode notes, have read each conversation; no cursor row is written in advance — a conversation without one reads as read by neither yet. A second migration, `002_working_state.sql`, registers version 2: it rebuilds the `session` table with each conversation's working state in place of the old summary columns, and whether a new conversation is given the previous one's ([Conversation continuity](#conversation-continuity)). A third, `003_no_project_store_rows.sql`, registers version 3: it deletes the rows of files whose bytes lie inside a project's own folder — the in-project store earlier builds wrote and this build never reads — with their versions and every message's link to them. A fourth, `004_project_files.sql`, registers version 4: it adds `file_assets.in_project`, which marks the row of a result file an agent wrote into a project — the real file's address, no copy, no versions — and rebuilds the unique address index with it, so such a row never collides with a by-product's or an upload's. Those are the four registered migrations: a fresh database runs all four and opens at 4, a database at 1, 2 or 3 runs the ones it is missing in place, and the next migration will be `005_<name>.sql`, registering version 5. A build from before a migration refuses a database that has it, so keep a copy of `state/openalpaca.db` before the first start of a build that migrates it if you may go back. `GET /v1/status` reports the version the open database is actually at.
 - Memory is **not** in the database. The notes are Markdown files under `memory/` (see the runtime paths at the top of this manual), each partition's revisions, origins and tombstones are one JSON control snapshot under `state/memory-control/`, and the search index is a separate, disposable SQLite file, `state/cache/memory-index-v1.sqlite`. A backup of your memory is the `memory/` directories **and** `state/memory-control/`; the index can always be rebuilt. A memory write whose index update fails still succeeds — the note is written and announced, the daemon logs a warning, and the next search or the next reconciliation (within 30 s) re-indexes what changed. See [Memory](#memory).
 - **If your database is refused.** No migration runs — the schema and its rows are left exactly as they were — and the message names the absolute path of the file. There is one refusal, for a database at a schema version above the newest this build knows:
@@ -1796,12 +2330,13 @@ The answer — `200 {"request_id", "status": "shutting_down"}` — is an
 **acceptance, not a completion.** The daemon replies first and raises the
 shutdown about 100 ms later, so that the reply can leave; the process is gone
 only once the shutdown tail has run, which can take up to the 10-second window
-described in [Startup and Lifecycle](#startup-and-lifecycle). Nothing in the
+described in [Startup and Lifecycle](#startup-and-lifecycle), and at most one
+second more for work still running. Nothing in the
 answer says the daemon has stopped. A client that needs to know waits on the
 daemon's **process**, then on its **single-instance lock** — never on the port,
 which closes first while the lock is still held — as `openalpaca daemon stop`,
 `openalpaca daemon restart` and the GUI app's `Stop daemon` all do (15 s,
-`openalpaca_storage::daemon_lifecycle`). Starting a new daemon before the lock
+`openalpaca_app_support::daemon_lifecycle`). Starting a new daemon before the lock
 is free makes the new one exit at once. The request is behind the bearer token
 like every other `/v1/*` route, and it drains nothing: see what a stop
 interrupts under [Startup and Lifecycle](#startup-and-lifecycle).
@@ -1821,10 +2356,11 @@ the app strips them for display and changes nothing else.
 - Daemon already running: check lock/discovery and stop existing instance cleanly.
 - The GUI app says the daemon did not start within 5 seconds: the rest of that message is the daemon's own reason, quoted from the end of `state/logs/daemon.log` — the same text the CLI launcher would have written there. Settings → Connection → `Show daemon log` reads more of it. "…and wrote nothing to its log" means the daemon binary never ran: check it is installed beside the app.
 - `openalpaca daemon restart` stops the daemon but starts nothing, and exits with status 2: the old daemon was not completely gone 15 s after it was asked to stop, so starting a new one would have lost the single-instance lock. The message says which of two things happened. "`The daemon (PID …) is still running 15s after it was asked to stop, so nothing was restarted.`" — read the daemon log it names (`state/logs/daemon.log` under the store root) to see what it is doing, stop it with the `kill -9 <pid>` it prints, then `openalpaca daemon start`. "`The daemon (PID …) exited, but something still holds the single-instance lock 15s after it was asked to stop, so nothing was restarted.`" — another daemon is probably already running on this store; check `openalpaca daemon status` before starting one. `openalpaca daemon stop` reports the same two cases and exits 2 as well.
-- Discovery expired: restart daemon to rotate token and rewrite discovery.
+- `openalpaca daemon start --daemon-only` or `openalpaca daemon restart` exits 1 after starting a daemon: the new daemon did not answer as one that CLI uses. Both wait as `openalpaca daemon start` waits before the app (up to 45 s, `protocol::STARTING_BUDGET`), and a daemon that exits first ends the wait at once, the lines it wrote to `state/logs/daemon.log` printed above the message: a fatal start-up refusal — a database written by another build among them — is read there. `openalpaca daemon start` over a live daemon that CLI cannot use (another protocol, or a discovery file another build wrote) starts no daemon and rotates no log, and says so in one sentence on stderr; it then starts the app all the same, or, with `--daemon-only`, exits 1.
+- Discovery expired: a running daemon renews its token every 12 hours, so an expired file means it is hung, was built before the renewal, or the Mac has just woken from a sleep past the expiry (renewed within a minute). Otherwise restart the daemon, which writes a fresh token.
 - DB lock/contention: ensure single daemon instance and avoid conflicting external writers.
 - Config not loading: verify resolved config directory and presence of expected files.
 - GUI/CLI auth failures: ensure they read the current discovery token and instance.
-- "No model is available: no enabled provider offers one": nothing is routable. Turn a provider on (`openalpaca config set ai.<provider>.enabled true`, or Settings → Models in the GUI), then check `openalpaca llm status`. A cloud provider also needs a key (`openalpaca llm keys add`), and adding a key alone does not enable it. A local Ollama needs no API key, only `ollama pull <model>`. `GET /v1/status` shows the same fact as `llm.effective_default_model: null`.
+- "No model is available: no enabled provider offers one": nothing is routable. Turn a provider on (`openalpaca config set ai.<provider>.enabled true`, or Settings → Models in the GUI), then check `openalpaca llm status`. A cloud provider also needs a key (`openalpaca llm keys add`), and adding a key alone does not enable it. A local Ollama needs no API key, only `ollama pull <model>`. An OpenAI-compatible server set as the `openai` provider's `base_url` whose model list cannot be read runs only the models you name for it, each a `[models."<id>"]` row with `provider = "openai"`; the message says so too. `GET /v1/status` shows the same fact as `llm.effective_default_model: null`.
 - A local-model turn stalls, then answers all at once: the stream sat idle for 90 s (usually the model still loading into memory) and the turn was retried without streaming. Warm the model once before a long run. See [Timeouts and output ceiling](#timeouts-and-output-ceiling).
 - A tool call "timed out after 300s": nobody answered its approval prompt. Answer it from the GUI or with `openalpaca tasks confirmations list|approve|deny`; an API client that cannot answer should send `unattended: true`, so the call is refused at once instead (the CLI does this by itself when it is piped). See [Tool confirmations](#tool-confirmations).

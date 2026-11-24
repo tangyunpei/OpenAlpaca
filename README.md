@@ -11,7 +11,7 @@ It runs on a local Ollama model with no API key, or on Anthropic and OpenAI mode
 - **Chat** from a terminal or the desktop app. Replies stream as they are written.
 - **Use a local model.** A local Ollama needs no API key and costs nothing.
 - **Hand off bigger jobs.** Ask for a workflow: a lead agent runs it in the background with subagents, then reports back in the chat.
-- **Steer work in flight.** Check, pause, resume, cancel or redirect a running workflow from the same conversation.
+- **Steer work in flight.** Check, cancel or redirect a running workflow from the same conversation.
 - **Work in your project.** In a project an agent reads, lists, writes and edits its files and runs commands there. Each write and each command asks you first, and what it writes is a real file of the project. Drafts and hand-offs are kept as versioned artifacts.
 - **Attach files** to a message.
 - **Keep a memory.** What you ask it to remember, and what it learns from what you say, are Markdown notes on your own disk — searched by keyword, with no model or download, and readable, editable and forgettable in the app, the CLI or any text editor.
@@ -27,6 +27,8 @@ These steps build from source and end with a first reply. To package and install
 - **Rust** through [rustup](https://rustup.rs). The repo pins 1.99.1 in `rust-toolchain.toml`; rustup fetches it on the first build.
 - **A model:** [Ollama](https://ollama.com) running locally, or an Anthropic or OpenAI API key.
 - **[Bun](https://bun.sh)** 1.4.4 (the version the root `package.json` pins), only for the desktop app (step 6).
+- **Python 3.11** (any 3.11.x: the line the root `.python-version` pins), as `python3.11` on `PATH`, only for the repository's scripts (`docs/api/` and the tooling checks): from [uv](https://docs.astral.sh/uv/) (`uv python install` reads `.python-version`) or [python.org](https://www.python.org/downloads/). macOS's own `/usr/bin/python3` is 3.9 and does not run them.
+- With [pyenv](https://github.com/pyenv/pyenv), install a 3.11 there too: its shims read `.python-version`, so inside the repository its `python3` needs one, and without it the Rust test and the echo-plugin stub that call `python3` fail under `cargo test`.
 - Linux only: `sudo apt-get install -y pkg-config`. The desktop app also needs `libdbus-1-dev` and [Tauri's system libraries](https://tauri.app/start/prerequisites/).
 
 ### 2. Build
@@ -48,7 +50,7 @@ openalpaca daemon start --daemon-only
 openalpaca daemon status
 ```
 
-`start` prints the path of the daemon log and returns at once. `status` prints `✓ Daemon is running` once the daemon answers. If it says the daemon is not running, run it again a second later.
+`start` prints the path of the daemon log, then waits, up to 45 seconds, until the daemon answers. If the daemon exits at boot, `start` prints the lines it wrote to its log and exits 1; if no daemon answers within the 45 seconds, it says so and exits 1. `status` then prints `✓ Daemon is running`.
 
 The first start downloads nothing and takes a few seconds. To watch it, open a second terminal and run `tail -f ~/.openalpaca/state/logs/daemon.log`; the line `Daemon ready` means it is up. Wait for it before step 4.
 
@@ -130,7 +132,7 @@ More detail: [docs/agent-loop.md](docs/agent-loop.md) and [docs/Daemon_Manual.md
 
 ## Project layout
 
-A Rust workspace (edition 2024) with three apps and eight library crates.
+A Rust workspace (edition 2024) with three apps and nine library crates.
 
 | Path | What it is |
 |---|---|
@@ -139,7 +141,8 @@ A Rust workspace (edition 2024) with three apps and eight library crates.
 | `apps/openalpaca-gui` | The desktop app: Tauri v2 shell, React 19 + TypeScript + Tailwind v4 frontend |
 | `crates/openalpaca_core` | Orchestrator, message routing, agent loop, tools, skills, security gate, event bus |
 | `crates/openalpaca_llm` | LLM router, providers, key pools, rate limiting, cost tracking |
-| `crates/openalpaca_storage` | SQLite, migrations, repositories, the memory note files and their search index, the `~/.openalpaca` store, artifacts, uploads |
+| `crates/openalpaca_app_support` | The `~/.openalpaca` store's own paths, `discovery.json`, the daemon's liveness, the wire protocol: what the daemon, the CLI and the app share |
+| `crates/openalpaca_storage` | SQLite, migrations, repositories, the memory note files and their search index, the content stores and projects, artifacts, uploads |
 | `crates/openalpaca_api` | Shared event types and plugin executor traits |
 | `crates/openalpaca_wake` | Cron scheduler and file watcher (scheduled skills, config hot reload) |
 | `crates/openalpaca_connectors` | Telegram, iMessage and Discord adapters |
@@ -155,8 +158,8 @@ Config is plain files. The daemon reloads most of them when they change. Edit th
 | `llm.toml` | Providers, keys (encrypted), default model, fallback chains. Created on first start; git-ignored in the repo. |
 | `daemon.toml` | Execution limits, cost caps, routing, sessions, uploads, security, server settings. The repo's `config/daemon.toml` is the full reference; a fresh install gets a shorter file and built-in defaults. |
 | `mcp.toml` | MCP server declarations and each server's on/off switch. |
-| `agents/*.md` | Agent templates: YAML frontmatter (model, capabilities, limits) plus a persona. Nine ship. |
-| `skills/*/SKILL.md` | Skills. Four ship: `code-review`, `commit-message`, `create-skill`, `explain-code`. |
+| `agents/*.md` | Agent templates: YAML frontmatter (model, capabilities, limits) plus a persona. Nine are built in; a file here of the same `id` overrides one. |
+| `skills/*/SKILL.md` | Skills. Four ship, built in: `code-review`, `commit-message`, `create-skill`, `explain-code`; a folder of the same name in a store's `config/skills/` overrides one. |
 | `orchestrator/*.md` | The assistant's persona documents (`SOUL.md`, `USER.md`, `IDENTITY.md`), created on first start. `USER.md` is yours to edit (`openalpaca persona edit user`, or Settings → Persona); nothing writes learned facts into it. |
 
 Which directory holds them:
@@ -175,7 +178,7 @@ Data always lives under `~/.openalpaca/`, on every platform:
 | `memory/` | Memory notes, one Markdown file each, per owner |
 | `projects/` | One folder per project — a git repository you chat in, or a folder you chose — with its `project.json`, artifacts, uploads and memory notes |
 
-Set `OPENALPACA_HOME_STORE=/absolute/path` to move the whole root, for example to try things in a sandbox. A project's files and notes live in its folder under `projects/`, named after its path. Nothing OpenAlpaca stores is written inside the project's own folder: an agent writes there only with your approval, each write and each command asking first (Daemon Manual → *The Working Folder*).
+Set `OPENALPACA_HOME_STORE=/absolute/path` to move the whole root, for example to try things in a sandbox. Without it the root needs an absolute home: a relative `HOME` is no home, and the store is refused. A project's files and notes live in its folder under `projects/`, named after its path. Nothing OpenAlpaca stores is written inside the project's own folder: an agent writes there only with your approval, each write and each command asking first (Daemon Manual → *The Working Folder*).
 
 ## Documentation
 
@@ -196,8 +199,8 @@ Set `OPENALPACA_HOME_STORE=/absolute/path` to move the whole root, for example t
 
 ```bash
 cargo build -p openalpacad -p openalpaca                      # the daemon and the CLI
-cargo build --workspace --exclude openalpaca_gui              # everything but the desktop shell, as CI builds it
-cargo test --workspace --exclude openalpaca_gui               # all Rust tests, as CI runs them
+cargo build --workspace --exclude openalpaca_gui              # everything but the desktop shell
+cargo test --workspace --exclude openalpaca_gui               # all Rust tests
 cargo clippy --workspace --exclude openalpaca_gui --all-targets
 
 cd apps/openalpaca-gui && bun install
@@ -205,23 +208,23 @@ bun run check && bun run test && bun run format:check && bun run build
 ```
 
 - A bare `cargo build` or `cargo test` covers what `--workspace --exclude openalpaca_gui` does: `default-members` is every member but the desktop shell, both apps included. Check the shell in its own `target/gui`, as [apps/openalpaca-gui/README.md](apps/openalpaca-gui/README.md) says.
-- CI (`.github/workflows/ci.yml`) has four jobs: the Rust build, tests and clippy above, run `--locked` on the toolchain `rust-toolchain.toml` pins; the four `bun run` gates under the Bun the root `package.json` pins; the Windows install-script tests on Pester 6.2.0; and a tooling job — the scripts' tests, `gen_api_docs.py --check` and the repository-policy guard `scripts/repo_policy.py` — on Python 3.9.25, the scripts' floor. Its actions are pinned by commit SHA.
-- Advisories (`.github/workflows/audit.yml`), on every pull request, every push to `main` and weekly: cargo-deny checks the crates the workspace resolves to (not every `Cargo.lock` entry) against RustSec, the licence allow list and crates.io as the only source (`deny.toml`); cargo-audit, run by hand from the root, reads the whole lock with the same ignores (`.cargo/audit.toml`); and `bun audit` checks `bun.lock`. The owner answers a red run: a lock refresh, a bump, or an ignore with its reason.
+- There is no remote CI: every gate runs locally. Run the Rust build, tests and clippy above with `--locked` on the toolchain `rust-toolchain.toml` pins, the four `bun run` gates under the Bun the root `package.json` pins, and, on the Python 3.11 the root `.python-version` pins, the scripts' tests (`scripts/tests/`), `gen_api_docs.py --check`, `scripts/release/gen_notices.py --check-hashes` and `--check-licences`, the repository-policy guard `scripts/repo_policy.py`, and the crate-edge check `scripts/crate_edges.py`, which compares the workspace's internal dependency edges (`cargo metadata --no-deps`) with the table `scripts/crate_edges.toml`: a commit that adds or drops an edge changes the table with it. The Windows install-script tests run by hand on a Windows machine: `Invoke-Pester -Path scripts/release/tests` on Pester 6.2.0.
+- Advisories, run by hand from the root: cargo-deny checks the crates the workspace resolves to (not every `Cargo.lock` entry) against RustSec, the licence allow list and crates.io as the only source (`deny.toml`); cargo-audit reads the whole lock with the same ignores (`.cargo/audit.toml`); and `bun run audit` (the root `package.json`'s script) checks `bun.lock`. The owner answers a finding: a lock refresh, a bump, or an ignore with its reason. One ignore stands in both `deny.toml` and `.cargo/audit.toml`: RUSTSEC-2026-0543, chrono 0.4.45 unmaintained (not vulnerable; no newer release), accepted by the owner on 2026-11-17 until the workspace moves off chrono; `scripts/repo_policy.py`'s `chrono` rule fails once no workspace manifest names chrono, so the ignore is lifted then (chrono-tz's RUSTSEC-2026-0555 is not ignored: cargo-audit lists it as a warning). And one in the root `package.json`'s `audit` script, since Bun reads an ignore from its command line only: GHSA-fc5q-39xc-vjpf, a ReDoS in picomatch <= 4.0.7, in dev tooling only (vite and vitest, directly and through tinyglobby; nothing shipped), with no fixed release, accepted by the owner on 2026-11-17 until a fixed picomatch reaches `bun.lock`; the policy's `picomatch` rule fails once `bun.lock` holds no picomatch at or below 4.0.7, so the ignore is lifted then. That rule reads versions only: it does not walk the dependency graph, so it does not check that picomatch stays dev-only. Bare `bun audit` still reports it. One licence is allowed for one crate alone, outside the allow list: MIT-0 (MIT No Attribution) for borrow-or-share, which `jsonschema` brings in through referencing and fluent-uri, accepted by the owner on 2026-11-21, as a `[licenses] exceptions` entry in `deny.toml` mirrored by a `[borrow-or-share]` table in `scripts/release/about.toml`; the policy's `licence-exception` rule fails once the two files disagree or the exception is stale (`Cargo.lock` holds no borrow-or-share, or no workspace manifest names jsonschema), so it is lifted then.
 - To run the daemon in the foreground on the repo's own config, use `OPENALPACA_CONFIG_DIR="$PWD/config" cargo run -p openalpacad`. Export the same variable for the CLI, so `openalpaca config set` edits the same files.
-- `docs/api/` is generated. Run `python3 scripts/gen_api_docs.py`; never edit it by hand.
-- Toolchain: Rust 1.99.1. Frontend: Bun 1.4.4, TypeScript 7, React 19, Vite 8, Tailwind 4, Vitest 5.
+- `docs/api/` is generated. Run `python3.11 scripts/gen_api_docs.py`; never edit it by hand.
+- Toolchain: Rust 1.99.1, Python 3.11 (the scripts). Frontend: Bun 1.4.4, TypeScript 7, React 19, Vite 8, Tailwind 4, Vitest 5.
 
 ## Status and limitations
 
 - **Moving target.** Config keys, API routes and the database schema change between commits. `001_baseline.sql` initializes schema version 1, `002_working_state.sql` upgrades it to 2, `003_no_project_store_rows.sql` to 3 and `004_project_files.sql` to 4, so a fresh database opens at 4, and the next migration will be `005`. A database from before that re-baseline (2026-09-28) — 42, the last schema with memory inside the database, or 43 to 45 — is refused rather than upgraded; see [Switching to the Markdown Memory Build](docs/Installation_Manual.md#switching-to-the-markdown-memory-build).
 - **The shell is not confined to the project.** A command an agent runs starts in the project's folder, but an approved command runs as you and can reach any file you can. Every command asks first: read it before you approve it.
 - **Reading never asks.** In a project an agent can read any file there, `.env` included, and what it reads goes to the model that answers — a remote provider's when that model is not local.
-- **Platforms.** Developed on macOS. CI builds and tests on Linux. Windows has packaging scripts, but CI does not build the Rust workspace there.
-- **Plugins** can add tools, skills and agent templates. Plugin connectors and plugin LLM providers are declared in the manifest format but not wired. They do not work.
+- **Platforms.** Developed on macOS. Nothing builds or tests the workspace on Linux or Windows now. Windows has packaging scripts, whose Pester tests are run by hand.
+- **Plugins** can add tools, skills and agent templates. Plugin connectors are declared in the manifest format but not wired. They do not work. Plugin LLM providers are removed: a manifest declaring one installs with a warning, and models come from the built-in providers.
 - **MCP** is client-side and tools only. MCP resources and prompts are not implemented: the client has no resource or prompt methods. Serving MCP is not a goal.
 - **Memory search is by keyword.** There is no embedding model, so a question worded very differently from the note, or in another language, can miss it. Aliases on a note (for example a Chinese and an English name for the same thing) are the remedy.
 - **Desktop app.** Two controls are shown as unavailable because the daemon has no route for them: adding a connector, and the per-agent-template on/off switch.
 - **Resuming an interrupted run** by replay is experimental and off by default (`resume_enabled` in `daemon.toml`).
 - **Costs.** A chat turn is capped at $1. A workflow's lead agent is capped at $3 by its shipped template (`daemon.toml` defaults to $5 where a template sets nothing). There is no overall daily budget; only the small background jobs (memory extraction, summaries, task-output extraction) have daily ceilings.
 - **Releases are unsigned.** The macOS package is not code-signed.
-- **License:** MIT, as declared in `Cargo.toml`.
+- **License:** MIT, as declared in `Cargo.toml`; the text is in [LICENSE](LICENSE).

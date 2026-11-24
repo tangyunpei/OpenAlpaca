@@ -14,7 +14,10 @@ use crate::client::DaemonClient;
 #[derive(Debug, Deserialize)]
 pub struct ChatSendResponse {
     pub stream_id: String,
-    #[allow(dead_code)]
+    #[expect(
+        dead_code,
+        reason = "the daemon's reply names the lane; the CLI follows stream_id"
+    )]
     pub lane_key: String,
 }
 

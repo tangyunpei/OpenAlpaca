@@ -483,3 +483,150 @@ fn a_runs_result_files_are_listed_apart_from_its_by_products() {
     assert_eq!(results[0].agent_id.as_deref(), Some("writing_agent::a1"));
     assert!(repo.project_files_for_task("task-none").unwrap().is_empty());
 }
+
+/// The columns the start-time marking may touch, and the ones it must not.
+fn columns(row: &FileAsset) -> [Option<String>; 5] {
+    [
+        Some(row.status.as_str().to_string()),
+        row.extracted_text.clone(),
+        row.extract_error.clone(),
+        row.metadata_json.clone(),
+        Some(row.updated_at.clone()),
+    ]
+}
+
+/// Sets a row's `updated_at` (and `created_at`) to a fixed old time, which
+/// the repository's own writes never do.
+fn date(db: &Database, id: &str, at: &str) {
+    db.with_connection(|conn| {
+        conn.execute(
+            "UPDATE file_assets SET created_at = ?2, updated_at = ?2 WHERE id = ?1",
+            rusqlite::params![id, at],
+        )?;
+        Ok(())
+    })
+    .unwrap();
+}
+
+const REASON: &str = "extraction was interrupted: the daemon stopped before it finished";
+
+/// PROCESSING-PICKUP: the worker's start-only marking makes `Processing`
+/// rows, and nothing else, `Error`, keeping the attempt tag the
+/// `Processing` write left (an untagged row counts as attempt 1) and
+/// changing nothing else but `updated_at`.
+#[test]
+fn fail_interrupted_processing_counts_the_attempt_and_keeps_the_row() {
+    let db = test_db();
+    let repo = FileAssetRepository::new(&db);
+    let rows = [
+        (
+            "left",
+            FileAssetStatus::Processing,
+            Some("[attempt:2] extraction in progress"),
+        ),
+        ("untagged", FileAssetStatus::Processing, None),
+        ("new", FileAssetStatus::Uploaded, None),
+        ("done", FileAssetStatus::Ready, None),
+        (
+            "failed",
+            FileAssetStatus::Error,
+            Some("[attempt:1] Failed to read text file"),
+        ),
+    ];
+    for (id, status, error) in rows {
+        let mut row = asset(id, 10);
+        row.status = status;
+        row.extracted_text = Some(format!("text of {id}"));
+        row.extract_error = error.map(str::to_string);
+        row.metadata_json = Some(format!(r#"{{"id":"{id}"}}"#));
+        repo.insert(&row).unwrap();
+        date(&db, id, "2000-01-01 00:00:00");
+    }
+    let before = |id: &str| columns(&repo.get_by_id(id).unwrap().unwrap());
+    let untouched: Vec<_> = ["new", "done", "failed"]
+        .into_iter()
+        .map(|id| (id, before(id)))
+        .collect();
+
+    assert_eq!(repo.fail_interrupted_processing(REASON).unwrap(), 2);
+    assert_eq!(
+        repo.fail_interrupted_processing(REASON).unwrap(),
+        0,
+        "nothing left"
+    );
+
+    let row = |id: &str| repo.get_by_id(id).unwrap().unwrap();
+    let left = row("left");
+    assert_eq!(left.status, FileAssetStatus::Error);
+    assert_eq!(
+        left.extract_error.as_deref(),
+        Some(format!("[attempt:2] {REASON}").as_str())
+    );
+    assert_eq!(left.extracted_text.as_deref(), Some("text of left"));
+    assert_eq!(left.metadata_json.as_deref(), Some(r#"{"id":"left"}"#));
+    assert_ne!(left.updated_at, "2000-01-01 00:00:00", "updated_at stamped");
+    assert_eq!(left.created_at, "2000-01-01 00:00:00");
+
+    let untagged = row("untagged");
+    assert_eq!(untagged.status, FileAssetStatus::Error);
+    assert_eq!(
+        untagged.extract_error.as_deref(),
+        Some(format!("[attempt:1] {REASON}").as_str())
+    );
+    assert_eq!(untagged.extracted_text.as_deref(), Some("text of untagged"));
+
+    for (id, was) in untouched {
+        assert_eq!(columns(&row(id)), was, "{id} untouched");
+    }
+}
+
+/// The poll's retry listing checks the attempt tag before its limit, so rows
+/// that have spent their retries never crowd out one that has not.
+#[test]
+fn list_retryable_errors_skips_spent_rows_before_the_limit() {
+    let db = test_db();
+    let repo = FileAssetRepository::new(&db);
+    let rows = [
+        // Oldest first.
+        (
+            "spent-a",
+            FileAssetStatus::Error,
+            Some("[attempt:2] failed"),
+        ),
+        (
+            "spent-b",
+            FileAssetStatus::Error,
+            Some("[attempt:3] failed"),
+        ),
+        ("untagged", FileAssetStatus::Error, None),
+        ("once", FileAssetStatus::Error, Some("[attempt:1] failed")),
+        ("ready", FileAssetStatus::Ready, Some("[attempt:1] failed")),
+        (
+            "unreadable",
+            FileAssetStatus::Error,
+            Some("[attempt:x] failed"),
+        ),
+    ];
+    for (i, (id, status, error)) in rows.into_iter().enumerate() {
+        let mut row = asset(id, 10);
+        row.status = status;
+        row.extract_error = error.map(str::to_string);
+        repo.insert(&row).unwrap();
+        date(&db, id, &format!("2000-01-01 00:00:0{i}"));
+    }
+    let ids = |max: u32, limit: usize| -> Vec<String> {
+        repo.list_retryable_errors(max, limit)
+            .unwrap()
+            .into_iter()
+            .map(|a| a.id)
+            .collect()
+    };
+
+    assert_eq!(ids(1, 10), ["untagged", "once", "unreadable"]);
+    assert_eq!(
+        ids(1, 1),
+        ["untagged"],
+        "the spent rows do not fill the limit"
+    );
+    assert_eq!(ids(2, 10), ["spent-a", "untagged", "once", "unreadable"]);
+}

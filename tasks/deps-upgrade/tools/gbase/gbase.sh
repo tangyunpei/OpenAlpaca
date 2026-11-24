@@ -229,14 +229,14 @@ oneline() { printf '%s\n' "$1" | grep . | tr '\n' ' ' | sed 's/ $//'; }
 
 canon() {
   if command -v realpath >/dev/null 2>&1; then realpath "$1"
-  else python3 -c 'import os, sys; print(os.path.realpath(sys.argv[1]))' "$1"
+  else python3.11 -c 'import os, sys; print(os.path.realpath(sys.argv[1]))' "$1"
   fi
 }
 
 # instant_epoch UTC — the seconds of `YYYY-MM-DDTHH:MM[:SS]Z`; anything else (a date alone, no zone,
-# an offset, an impossible field) returns 1. python3, not `date`: BSD and GNU `date` parse differently.
+# an offset, an impossible field) returns 1. python3.11, not `date`: BSD and GNU `date` parse differently.
 instant_epoch() {
-  python3 -I -c 'import calendar, re, sys, time
+  python3.11 -I -c 'import calendar, re, sys, time
 m = re.match(r"^(\d{4})-(\d{2})-(\d{2})T(\d{2}):(\d{2})(?::(\d{2}))?Z$", sys.argv[1])
 if not m:
     sys.exit(1)
@@ -246,7 +246,7 @@ if list(time.gmtime(t)[:6]) != f:
     sys.exit(1)
 print(t)' "$1"
 }
-iso_of() { python3 -I -c 'import sys, time; print(time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(int(sys.argv[1]))))' "$1"; }
+iso_of() { python3.11 -I -c 'import sys, time; print(time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(int(sys.argv[1]))))' "$1"; }
 
 # refuse_before EPOCH — MF-1 item 3: a run does not start before the cut instant (exit 2, nothing made).
 refuse_before() {
@@ -526,7 +526,7 @@ compare_lock() {
     { echo "== $label: $(basename "$act") equals $(basename "$exp")"; echo; } >> "$T/logs/lock-differences.txt"
     return 0
   fi
-  python3 -I "$HERE/lockdiff.py" "$@" "$exp" "$act" > "$out" 2>&1 || rc=$?
+  python3.11 -I "$HERE/lockdiff.py" "$@" "$exp" "$act" > "$out" 2>&1 || rc=$?
   # lockdiff.py exits 1 for "a difference was found" and 2 for anything else (a usage error, a
   # file that is not a Cargo.lock, an unforeseen error); and whatever its status, output whose
   # first line is not the summary is no comparison — a lockdiff.py that dies before main (a
@@ -594,7 +594,7 @@ prev_lock() { # prev_lock STEP -> the snapshot of the lock the step starts from
 # --precise the gate names, gates again (the steps cascade), and repeats — never a target of its own,
 # and never past a first entry with nothing eligible to step back to, which ends the run.
 regflags_init() {
-  LOCKDATES=(python3 -I "$HERE/lockdates.py")
+  LOCKDATES=(python3.11 -I "$HERE/lockdates.py")
   REGFLAGS=(--max-date "$MAX_DATE")
   if [ -n "$WAIVERS" ]; then REGFLAGS+=(--waivers "$WAIVERS"); fi
   if [ -n "$DATE_SOURCE" ]; then REGFLAGS+=(--date-source "$DATE_SOURCE"); else REGFLAGS+=(--cache "$T/logs/registry-cache.json"); fi
@@ -1006,8 +1006,8 @@ final_tests() {
 
 final_docs_check() {
   CURRENT_STEP="final-docs"
-  say ""; say "== final: python3 -I scripts/gen_api_docs.py --check  (expected: exactly docs/api/crates/openalpaca_mcp.md stale, P19/P21)"
-  run_logged_rc 91-gen-api-docs python3 -I scripts/gen_api_docs.py --check
+  say ""; say "== final: python3.11 -I scripts/gen_api_docs.py --check  (expected: exactly docs/api/crates/openalpaca_mcp.md stale, P19/P21)"
+  run_logged_rc 91-gen-api-docs python3.11 -I scripts/gen_api_docs.py --check
   live || return 0
   local changed
   changed=$(sed -n 's/^- //p' "$T/logs/91-gen-api-docs.log" | sort | tr '\n' ' ')
@@ -1171,7 +1171,7 @@ summary() {
   else LOCK_LINE="$LOCK_UNEXPECTED unexpected, $LOCK_EXPECTED expected (rmcp 3.5.1, DU-25 (v4); serde-saphyr 2.0.0, D4 (a)) — $T/logs/lock-differences.txt"; fi
   if [ "$DATES" -eq 1 ] && [ "$total" -gt 0 ]; then
     say ""; say "== release dates of the versions the differences introduced (crates.io; User-Agent openalpaca-deps-check)"
-    python3 -I "$HERE/lockdates.py" < "$T/logs/lock-differences.txt" > "$T/logs/lock-dates.txt" 2>&1 || true
+    python3.11 -I "$HERE/lockdates.py" < "$T/logs/lock-differences.txt" > "$T/logs/lock-dates.txt" 2>&1 || true
     sed 's/^/    /' "$T/logs/lock-dates.txt"
   fi
   say ""
@@ -1209,7 +1209,7 @@ EOF
 
 preflight() {
   CURRENT_STEP="preflight"
-  need git; need tar; need perl; need python3; need awk; need cargo
+  need git; need tar; need perl; need python3.11; need awk; need cargo
   cargo "+$TOOLCHAIN" --version > "$T/logs/preflight-cargo-version.log" 2>&1 \
     || { cat "$T/logs/preflight-cargo-version.log" >&2; echo "gbase: cargo +$TOOLCHAIN is not installed (this script installs nothing)" >&2; exit 2; }
   say "cargo: $(cat "$T/logs/preflight-cargo-version.log")"
@@ -1266,7 +1266,7 @@ preflight() {
 # ---------------------------------------------------------------------------- the self-test
 self_test() {
   CURRENT_STEP="self-test"
-  need perl; need python3; need cargo; need tar
+  need perl; need python3.11; need cargo; need tar
   cargo "+$TOOLCHAIN" --version > "$T/logs/selftest-cargo-version.log" 2>&1 \
     || { cat "$T/logs/selftest-cargo-version.log" >&2; echo "gbase: cargo +$TOOLCHAIN is not installed" >&2; exit 2; }
   say "self-test with $(cat "$T/logs/selftest-cargo-version.log")"
@@ -1532,7 +1532,7 @@ EOF
                       "optional": {"2.12.2": {"@tauri-apps/cli-linux-arm64-musl": "2.12.2", "fsevents": "~2.3.3"}}},
   "@tauri-apps/cli-linux-arm64-musl": {"time": {"2.12.2": "2026-10-12T20:07:30.211Z"}, "optional": {"2.12.2": {}}}}}
 EOF
-  python3 -I -c 'import json, sys
+  python3.11 -I -c 'import json, sys
 d = json.load(open(sys.argv[1])); del d["crates"]["beta"]; json.dump(d, open(sys.argv[2], "w"))' "$fr/dates.json" "$fr/dates-no-beta.json"   # beta cannot be dated
   cat > "$fr/fake-cargo" <<'EOF'
 #!/usr/bin/env bash
@@ -1591,7 +1591,7 @@ EOF
   # holding beta 0.9.0, its 1.0.0 and 1.0.1 yanked — no-step-back first, then alpha's step-back. The
   # run ends there, before any --precise: alpha (the dependency) is never stepped back first
   perl -0pe 's/(name = "beta"\nversion = ")1\.0\.0"/${1}0.9.0"/' "$fr/parent.lock" > "$fr/parent-beta-0.9.lock"
-  python3 -I -c 'import json, sys
+  python3.11 -I -c 'import json, sys
 d = json.load(open(sys.argv[1])); b = d["crates"]["beta"]
 b[0]["yanked"] = True; b.insert(0, {"num": "0.9.0", "created_at": "2026-08-01T00:00:00Z", "yanked": False})
 json.dump(d, open(sys.argv[2], "w"))' "$fr/dates.json" "$fr/dates-beta-none.json"
@@ -1606,9 +1606,9 @@ json.dump(d, open(sys.argv[2], "w"))' "$fr/dates.json" "$fr/dates-beta-none.json
     verdict x-none-first 1 "rc=$rc; see logs/selftest-10h-fresh-none-first.log, logs/fresh-selftest-x-none-first-0.log"
   fi
   rc=0
-  python3 -I "$HERE/lockdates.py" --pins npm --max-date 2026-10-10T20:08Z --date-source "$fr/dates.json" @tauri-apps/api@2.12.3 > "$T/logs/selftest-10f-npm-old.log" 2>&1 || rc=$?
+  python3.11 -I "$HERE/lockdates.py" --pins npm --max-date 2026-10-10T20:08Z --date-source "$fr/dates.json" @tauri-apps/api@2.12.3 > "$T/logs/selftest-10f-npm-old.log" 2>&1 || rc=$?
   rc2=0
-  python3 -I "$HERE/lockdates.py" --pins npm --max-date 2026-10-10T20:08Z --date-source "$fr/dates.json" @tauri-apps/api@2.12.3 @tauri-apps/cli@2.12.2 > "$T/logs/selftest-10g-npm-binary.log" 2>&1 || rc2=$?
+  python3.11 -I "$HERE/lockdates.py" --pins npm --max-date 2026-10-10T20:08Z --date-source "$fr/dates.json" @tauri-apps/api@2.12.3 @tauri-apps/cli@2.12.2 > "$T/logs/selftest-10g-npm-binary.log" 2>&1 || rc2=$?
   if [ "$rc" -eq 0 ] && [ "$rc2" -eq 1 ] && grep -q '^  TOO YOUNG  @tauri-apps/cli-linux-arm64-musl 2.12.2' "$T/logs/selftest-10g-npm-binary.log" \
      && grep -q '^  eligible   @tauri-apps/cli 2.12.2' "$T/logs/selftest-10g-npm-binary.log"; then
     verdict x-npm 0 "the npm pins: an eligible pin passes; a cli whose own time is eligible but one platform binary is not is refused (rc=$rc, $rc2)"
@@ -1687,7 +1687,7 @@ json.dump(d, open(sys.argv[2], "w"))' "$fr/dates.json" "$fr/dates-beta-none.json
   for name in tauri $TAURI_INTERNALS tauri-plugin-dialog; do
     printf '[[package]]\nname = "%s"\nversion = "%s"\n%s\n\n' "$name" "$(tauri_expected "$name")" "$reg" >> "$tt/exact.lock"
   done
-  python3 -I -c 'import json, re, sys
+  python3.11 -I -c 'import json, re, sys
 held = re.findall(r"name = \"(.*)\"\nversion = \"(.*)\"", open(sys.argv[1]).read())
 d = {"crates": {n: [{"num": v, "created_at": "2026-09-30T20:42:58Z", "yanked": False}] for n, v in held}}
 json.dump(d, open(sys.argv[2], "w"))
@@ -1781,10 +1781,10 @@ EOF
   "@scope/right": {"time": {"2.0.1": "2026-10-14T19:53:00.000Z"}, "optional": {"2.0.1": {}}},
   "young": {"time": {"3.1.0": "2026-10-14T19:53:01.000Z"}, "optional": {"3.1.0": {}}}}}
 EOF
-  python3 -I -c 'import json, sys
+  python3.11 -I -c 'import json, sys
 d = json.load(open(sys.argv[1])); del d["npm"]["left"]; json.dump(d, open(sys.argv[2], "w"))' "$bl/dates.json" "$bl/dates-no-left.json"   # left cannot be dated
   bunlock_run() { # bunlock_run LOCK DATES LOG — lockdates.py --bun-lock on a toy lock, rc in BL_RC
-    BL_RC=0; python3 -I "$HERE/lockdates.py" --bun-lock "$1" --max-date "$bmax" --date-source "$2" > "$T/logs/$3.log" 2>&1 || BL_RC=$?
+    BL_RC=0; python3.11 -I "$HERE/lockdates.py" --bun-lock "$1" --max-date "$bmax" --date-source "$2" > "$T/logs/$3.log" 2>&1 || BL_RC=$?
   }
   bunlock_run "$bl/ok.lock" "$bl/dates.json" selftest-15a-bunlock-holds
   if [ "$BL_RC" -eq 0 ] \
@@ -1843,7 +1843,7 @@ d = json.load(open(sys.argv[1])); del d["npm"]["left"]; json.dump(d, open(sys.ar
   # says `lockfileVersion`, and the negative grep below would read it as a lock read.
   twomodes_run() { # twomodes_run LOG ARGS... — lockdates.py with the given modes, rc in BL_RC
     local log=$1; shift
-    BL_RC=0; python3 -I "$HERE/lockdates.py" "$@" --max-date "$bmax" --date-source "$bl/dates.json" > "$T/logs/$log.log" 2>&1 || BL_RC=$?
+    BL_RC=0; python3.11 -I "$HERE/lockdates.py" "$@" --max-date "$bmax" --date-source "$bl/dates.json" > "$T/logs/$log.log" 2>&1 || BL_RC=$?
   }
   twomodes_run selftest-15i-two-modes-pins --bun-lock "$bl/ok.lock" --pins npm left@1.0.0
   rc=$BL_RC
@@ -1895,7 +1895,7 @@ main() {
     run_steps "$last"
     if [ "$STEPS" = all ]; then
       final_tests
-      plan "== final: python3 -I scripts/gen_api_docs.py --check   (expected: rc 1, exactly docs/api/crates/openalpaca_mcp.md)   > logs/91-gen-api-docs.log"
+      plan "== final: python3.11 -I scripts/gen_api_docs.py --check   (expected: rc 1, exactly docs/api/crates/openalpaca_mcp.md)   > logs/91-gen-api-docs.log"
       plan "== final: the JS set and the four bun gates"
       final_js
       final_gui

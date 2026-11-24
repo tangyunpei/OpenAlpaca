@@ -42,6 +42,27 @@ impl ConfirmationOutcome {
     }
 }
 
+/// Why a tool run failed, where the daemon names a reason
+/// (TIMEOUT-ONE-CLOCK): carried on `tool_executed` beside `success: false`.
+/// A failure with no reason here carries none, and its frame no `reason`
+/// key, as before.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ToolFailureReason {
+    /// The sandbox's clock cut the call: it ran as long as it may run here.
+    Timeout,
+}
+
+impl ToolFailureReason {
+    /// The wire word, so log lines and audit rows never spell it a second
+    /// way.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Timeout => "timeout",
+        }
+    }
+}
+
 /// Server events pushed to clients via WebSocket
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
@@ -60,8 +81,9 @@ pub enum ServerEvent {
     /// only by watching its socket die cannot tell a deliberate stop from a
     /// crash. Nothing persists it (`events/persistence.rs` answers `Ok(0)`).
     ///
-    /// `grace_secs` is the daemon's force-exit window, so a client can say
-    /// how long it will be before the process is gone for certain.
+    /// `grace_secs` is the daemon's force-exit window, which bounds its
+    /// shutdown tail; the process is gone for certain at most one second
+    /// after it, so a client can say how long that will be.
     DaemonShuttingDown {
         grace_secs: u64,
         ts: DateTime<Utc>,
@@ -187,6 +209,10 @@ pub enum ServerEvent {
         duration_ms: u64,
         /// The run this happened inside (GAP-10), or `null` outside one.
         task_id: Option<String>,
+        /// Why a failed run failed, where the daemon names it: `timeout` for
+        /// a call the sandbox's clock cut. Absent otherwise.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        reason: Option<ToolFailureReason>,
         ts: DateTime<Utc>,
         instance_id: String,
     },

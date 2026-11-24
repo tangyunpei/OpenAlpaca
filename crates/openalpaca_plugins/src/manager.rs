@@ -39,7 +39,7 @@ use tokio::sync::RwLock;
 use tokio::sync::mpsc::{UnboundedReceiver, unbounded_channel};
 use tracing::{debug, error, info, warn};
 
-use openalpaca_core::agent::registry::AgentRegistry;
+use openalpaca_core::agent::registry::{AgentRegistry, Registration};
 use openalpaca_core::agent::template::{AgentSource, AgentTemplate, AgentTemplateFrontmatter};
 use openalpaca_core::bus::EventBus;
 use openalpaca_core::daemon_config::DaemonConfig;
@@ -66,7 +66,7 @@ use crate::manifest::PluginManifest;
 use crate::permission_gate::{
     PermissionGate, PermissionTable, REDACTED, SecretReference, secret_reference,
 };
-use crate::process_pool::PluginProcess;
+use crate::process_pool::{CHANNEL_DEFAULT_TIMEOUT, PluginProcess};
 
 /// How long a teardown waits for a killed plugin child to actually exit
 /// before giving up and letting the kernel finish the job (design §3.2 T4).
@@ -87,7 +87,10 @@ const DRAIN_POLL: std::time::Duration = std::time::Duration::from_millis(5);
 /// Emits the declared caps for every tool whose `author` field matches
 /// `plugin:<plugin_name>` — i.e., every tool this plugin registered.
 pub(crate) struct PluginCapabilityProvider {
-    #[allow(dead_code)]
+    #[expect(
+        dead_code,
+        reason = "kept with the provider; tools are matched by author_prefix"
+    )]
     plugin_name: String,
     author_prefix: String,
     virtual_caps: Vec<String>,
@@ -131,8 +134,6 @@ pub struct PluginState {
     pub process: Option<PluginProcess>,
     pub registered_tools: Vec<String>,
     pub registered_connector: Option<String>,
-    pub registered_provider: Option<String>,
-    pub registered_models: Vec<String>,
     pub registered_skills: Vec<String>,
     pub registered_agents: Vec<String>,
     pub plugin_dir: PathBuf,
@@ -163,8 +164,6 @@ impl PluginState {
             process: None,
             registered_tools: Vec::new(),
             registered_connector: None,
-            registered_provider: None,
-            registered_models: Vec::new(),
             registered_skills: Vec::new(),
             registered_agents: Vec::new(),
             plugin_dir,
@@ -195,8 +194,6 @@ impl PluginState {
 struct Discovered {
     tools: Vec<RegisteredTool>,
     connector: Option<String>,
-    provider: Option<String>,
-    models: Vec<String>,
     skill: Option<(String, SkillFrontmatter, Arc<PluginSkillBridge>)>,
     agent: Option<AgentTemplate>,
 }
@@ -270,6 +267,10 @@ pub struct PluginManager {
     /// out of every build but this crate's tests — no production flag.
     #[cfg(test)]
     pub(crate) fail_swap_commit: std::sync::atomic::AtomicBool,
+    /// What a plugin's JSON-RPC request waits when its caller names no
+    /// figure: [`CHANNEL_DEFAULT_TIMEOUT`], set by no key — a test sets its
+    /// own at test scale (`with_channel_timeout`, this crate's tests only).
+    channel_timeout: std::time::Duration,
 }
 
 impl PluginManager {
@@ -305,7 +306,16 @@ impl PluginManager {
             notice_lane: String::new(),
             #[cfg(test)]
             fail_swap_commit: std::sync::atomic::AtomicBool::new(false),
+            channel_timeout: CHANNEL_DEFAULT_TIMEOUT,
         }
+    }
+
+    /// A channel default at test scale for the plugins this supervisor
+    /// spawns from now on; this crate's tests only.
+    #[cfg(test)]
+    pub(crate) fn with_channel_timeout(mut self, timeout: std::time::Duration) -> Self {
+        self.channel_timeout = timeout;
+        self
     }
 
     /// Attach the daemon's default lane, `{local_user_id}:gui` — where T1 step
@@ -968,7 +978,8 @@ impl PluginManager {
 
     /// **T2.** Withdraw everything else a plugin contributes: its capability
     /// provider and virtual capabilities, its skills, its agent templates, and
-    /// its connector/provider registrations (design §3.2 T2).
+    /// its connector registration (design §3.2 T2). There is no provider
+    /// registration: the plugin provider type is removed (M86).
     ///
     /// Step 1's tombstone is not optional. The provider's `derive_capabilities`
     /// returns `capabilities.virtual_.provides`, a list **separate from**
@@ -976,13 +987,13 @@ impl PluginManager {
     /// without this a template naming a virtual capability would classify
     /// `unknown` (a `debug!` only) at spawn instead of `withheld`.
     ///
-    /// Step 4 is the one `unload_plugin` used to decline. The connector and
-    /// provider bridges are not wired into `ConnectorManager`/`LlmRouter` yet,
-    /// so today clearing the registrations here **is** the whole withdrawal —
-    /// and the row data is what proves it: a `disabled` row with a non-null
-    /// `connector` is a T2 bug, and C3's guard test asserts it never happens.
-    /// When the bridges land, `LlmRouter::deregister_provider` and a
-    /// `ConnectorManager::unregister_platform` go here, beside these lines.
+    /// Step 4 is the one `unload_plugin` used to decline. The connector
+    /// bridge is not wired into `ConnectorManager`, so today clearing the
+    /// registration here **is** the whole withdrawal — and the row data is
+    /// what proves it: a `disabled` row with a non-null `connector` is a T2
+    /// bug, and C3's guard test asserts it never happens. When the bridge
+    /// lands, a `ConnectorManager::unregister_platform` goes here, beside
+    /// this line.
     /// **Whatever E4 registers, T2 deregisters, in the same supervisor.**
     ///
     /// Returns step 1's **virtual** capabilities, which T1 step 3 unions into
@@ -1030,12 +1041,13 @@ impl PluginManager {
                 registry.remove_plugin_template(agent_id, id);
                 debug!(plugin = id, agent = %agent_id, "unregistered plugin agent template");
             }
+            // A template it was refused is no longer listed on the holder's
+            // row (`plugin_refused`, subagent design §2.4 L-1).
+            registry.forget_plugin_refusals(id);
         }
 
-        // 4. connector + provider.
+        // 4. connector.
         state.registered_connector = None;
-        state.registered_provider = None;
-        state.registered_models.clear();
         state.registered_tools.clear();
 
         virtual_caps
@@ -1221,7 +1233,7 @@ impl PluginManager {
         }
 
         // `spawn` failing is the one exit with nothing to unwind.
-        let process = match PluginProcess::spawn(&manifest, dir) {
+        let process = match PluginProcess::spawn(&manifest, dir, self.channel_timeout) {
             Ok(process) => process,
             Err(e) => {
                 warn!(plugin = %id, error = %e, "plugin failed to spawn");
@@ -1230,12 +1242,17 @@ impl PluginManager {
             }
         };
 
-        if !manifest.plugin.mcp_compatible {
+        // An `mcp_compatible` plugin is opened with MCP's lifecycle and is
+        // sent no configuration (N-PLUG-5); any other with OpenAlpaca's own
+        // `initialize`, which carries it.
+        let initialized = if manifest.plugin.mcp_compatible {
+            process.mcp_initialize(&id).await
+        } else {
             let config_json: HashMap<String, Value> = provided
                 .iter()
                 .map(|(k, v)| (k.clone(), toml_to_json(v)))
                 .collect();
-            if let Err(e) = process
+            process
                 .initialize(
                     &id,
                     &manifest.plugin.version,
@@ -1243,19 +1260,19 @@ impl PluginManager {
                     config_json,
                 )
                 .await
-            {
-                // E-FAIL: the handle exists, so it goes before `Failed` is
-                // committed. Without this a `Failed` row would sit over a live
-                // child that nothing ever drops, and a later `disable` — legal
-                // from `Failed` — would run T4 on nothing while the child
-                // outlived the switch.
-                warn!(plugin = %id, error = %e, "plugin initialize failed");
-                shutdown_child(&id, process, None).await;
-                let (reason, hint) = classify_bringup(&e);
-                self.set_hint(&id, hint).await;
-                self.commit(ext, self.failure(reason, e.to_string()));
-                return;
-            }
+        };
+        if let Err(e) = initialized {
+            // E-FAIL: the handle exists, so it goes before `Failed` is
+            // committed. Without this a `Failed` row would sit over a live
+            // child that nothing ever drops, and a later `disable` — legal
+            // from `Failed` — would run T4 on nothing while the child
+            // outlived the switch.
+            warn!(plugin = %id, error = %e, "plugin initialize failed");
+            shutdown_child(&id, process, None).await;
+            let (reason, hint) = classify_bringup(&e);
+            self.set_hint(&id, hint).await;
+            self.commit(ext, self.failure(reason, e.to_string()));
+            return;
         }
 
         // ── E3 — DISCOVER ─────────────────────────────────────────────
@@ -1293,7 +1310,9 @@ impl PluginManager {
     ///
     /// `tools/list` failing is fatal to the load; the optional `*/info` probes
     /// are not — a plugin that declares a contribution it cannot describe loses
-    /// that contribution, not its tools, exactly as before.
+    /// that contribution, not its tools, exactly as before. `types.provider`
+    /// is not probed: the plugin provider type is removed (M86), and the
+    /// manifest's warning says so.
     async fn discover(
         &self,
         id: &str,
@@ -1325,39 +1344,6 @@ impl PluginManager {
                     connector = Some(platform);
                 }
                 Err(e) => warn!(plugin = %id, error = %e, "connector/info failed"),
-            }
-        }
-
-        let mut provider = None;
-        let mut models = Vec::new();
-        if manifest.types.provider {
-            match process
-                .channel
-                .call("provider/info", Value::Object(Default::default()))
-                .await
-            {
-                Ok(info) => {
-                    let provider_name = info
-                        .get("provider_name")
-                        .and_then(|p| p.as_str())
-                        .unwrap_or(id)
-                        .to_string();
-                    if let Some(found) = info.get("models").and_then(|m| m.as_array()) {
-                        for model in found {
-                            if let Some(model_id) = model.get("id").and_then(|v| v.as_str()) {
-                                models.push(model_id.to_string());
-                            }
-                        }
-                    }
-                    info!(
-                        plugin = %id,
-                        provider = %provider_name,
-                        models = models.len(),
-                        "discovered provider"
-                    );
-                    provider = Some(provider_name);
-                }
-                Err(e) => warn!(plugin = %id, error = %e, "provider/info failed"),
             }
         }
 
@@ -1419,8 +1405,6 @@ impl PluginManager {
         Ok(Discovered {
             tools,
             connector,
-            provider,
-            models,
             skill,
             agent,
         })
@@ -1495,24 +1479,35 @@ impl PluginManager {
         }
 
         let mut registered_agents = Vec::new();
+        // The id whose refusal this attempt recorded (`plugin_refused`), the
+        // one refusal its `HandleHeld` unwind may take back: one the
+        // plugin's live load recorded stays listed while that load does.
+        let mut recorded_refusal = None;
         if let (Some(registry), Some(template)) = (self.agent_registry.as_ref(), discovered.agent) {
             let agent_id = template.frontmatter.id.clone();
-            // `register_template` refuses an id another template holds by
-            // answering `false`. N-PLUG-6: that answer is honoured — the id is
-            // recorded as this plugin's only when it registered, so T2 can
-            // never take a template the plugin never had (a plugin answering
-            // `agent/info` with `writing_agent` used to delete the shipped
-            // one at its next disable). What a plugin may claim over a live
-            // incumbent is the skip rule, B-05, not this.
-            if registry.register_template(template) {
-                info!(plugin = %id, agent = %agent_id, "registered plugin agent template");
-                registered_agents.push(agent_id);
-            } else {
-                warn!(
-                    plugin = %id,
-                    agent = %agent_id,
-                    "another template already holds this id; the plugin's agent template is not registered"
-                );
+            // `register_template_reporting` refuses an id another template
+            // holds (`Registration::Refused`). N-PLUG-6: that answer is
+            // honoured — the id is recorded as this plugin's only when it
+            // registered, so T2 can never take a template the plugin never
+            // had (a plugin answering `agent/info` with `writing_agent` used
+            // to delete the shipped one at its next disable). What a plugin
+            // may claim over a live incumbent is the skip rule, B-05, not
+            // this.
+            match registry.register_template_reporting(template) {
+                Registration::Registered => {
+                    info!(plugin = %id, agent = %agent_id, "registered plugin agent template");
+                    registered_agents.push(agent_id);
+                }
+                Registration::Refused { recorded } => {
+                    warn!(
+                        plugin = %id,
+                        agent = %agent_id,
+                        "another template already holds this id; the plugin's agent template is not registered"
+                    );
+                    if recorded {
+                        recorded_refusal = Some(agent_id);
+                    }
+                }
             }
         }
 
@@ -1562,6 +1557,9 @@ impl PluginManager {
                 for agent_id in &registered_agents {
                     registry.remove_template(agent_id);
                 }
+                if let Some(agent_id) = &recorded_refusal {
+                    registry.forget_plugin_refusal(agent_id, &id);
+                }
             }
             shutdown_child(&id, process, None).await;
             return Err(PluginError::HandleHeld(id));
@@ -1573,8 +1571,6 @@ impl PluginManager {
                 process: Some(process),
                 registered_tools: registered_tools.clone(),
                 registered_connector: discovered.connector,
-                registered_provider: discovered.provider,
-                registered_models: discovered.models,
                 registered_skills,
                 registered_agents,
                 capability_provider_handle,
@@ -1647,7 +1643,9 @@ impl PluginManager {
                     strict: None,
                     input_examples: None,
                 },
-                backend: ToolBackend::Plugin(Arc::new(proxy)),
+                backend: ToolBackend::Plugin(
+                    openalpaca_api::plugin_traits::DynPluginToolExecutor::new_arc(proxy),
+                ),
                 provides_capabilities: manifest.capabilities.provides.clone(),
                 exempt_from_timeout: false,
                 annotations: None,
@@ -1891,7 +1889,6 @@ impl PluginManager {
             record.skills = state.registered_skills.clone();
             record.agents = state.registered_agents.clone();
             record.connector = state.registered_connector.clone();
-            record.provider = state.registered_provider.clone();
             record.skipped_tools = state.skipped_tools.clone();
             record.hint = state.hint.clone();
         }
@@ -2601,28 +2598,6 @@ impl PluginManager {
             channel,
         ))
     }
-
-    /// Get the [`PluginLlmProvider`](crate::bridge::PluginLlmProvider) for a
-    /// loaded provider plugin, along with its discovered model IDs. Returns
-    /// `None` if the plugin is not loaded or does not provide an LLM provider.
-    pub async fn get_plugin_provider(
-        &self,
-        name: &str,
-    ) -> Option<(crate::bridge::PluginLlmProvider, Vec<String>)> {
-        let plugins = self.plugins.read().await;
-        let state = plugins.get(name)?;
-        let provider_name = state.registered_provider.as_ref()?.clone();
-        let channel = state.process.as_ref()?.channel.clone();
-        let models = state.registered_models.clone();
-        let provider = crate::bridge::PluginLlmProvider::new(
-            name.to_string(),
-            provider_name,
-            true,  // supports_tools (TODO: get from provider/info)
-            false, // supports_streaming (TODO: get from provider/info)
-            channel,
-        );
-        Some((provider, models))
-    }
 }
 
 /// Where a sensitive plugin config value is kept. **Not defaulted** — design
@@ -2635,7 +2610,6 @@ pub enum SecretStorage {
 
 // ── The trait ───────────────────────────────────────────────────────────
 
-#[async_trait::async_trait]
 impl ExtensionSupervisor for PluginManager {
     /// W (`enabled = true`) then E0 → E-PRE → E1–E5. `200` even when bring-up
     /// fails: the write succeeded and the intent is durable; the outcome is a
@@ -2972,7 +2946,7 @@ fn existing_encryptor() -> Result<Option<KeyEncryptor>, PluginError> {
 }
 
 fn master_key_dir() -> Result<PathBuf, PluginError> {
-    openalpaca_storage::store::master_key_dir()
+    openalpaca_app_support::paths::master_key_dir()
         .map_err(|e| PluginError::Unavailable(format!("no master key directory: {e}")))
 }
 
@@ -3152,7 +3126,7 @@ fn build_agent_template_from_info(
             singleton,
             capabilities,
             denied_capabilities: Vec::new(),
-            temperature: 0.5,
+            temperature: None,
             verbosity: "normal".to_string(),
             model,
             fallback_models: Vec::new(),
@@ -3166,7 +3140,7 @@ fn build_agent_template_from_info(
         sections: HashMap::new(),
         source: AgentSource::Plugin {
             plugin_id: plugin_name.to_string(),
-            executor: bridge,
+            executor: openalpaca_api::plugin_traits::DynPluginAgentExecutor::from_arc(bridge),
         },
     }
 }

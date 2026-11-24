@@ -239,10 +239,10 @@ async fn a_call_that_times_out_is_sent_once_and_the_caller_gets_the_timeout() {
         .unwrap_or_else(|e| panic!("connect: {e}"));
 
     let outcome = client.call_tool("echo", serde_json::json!({}), None).await;
-    assert!(
-        matches!(outcome, Err(McpError::Timeout(_))),
-        "the caller must receive the timeout, got {:?}",
-        outcome.map(|_| "a result")
+    std::assert_matches!(
+        outcome,
+        Err(McpError::Timeout(_)),
+        "the caller must receive the timeout",
     );
     // Give a (wrong) re-send the time it would take to land.
     tokio::time::sleep(Duration::from_millis(300)).await;
@@ -272,10 +272,10 @@ async fn a_timed_out_call_is_cancelled_once_by_its_id_and_an_answered_call_is_no
         .unwrap_or_else(|e| panic!("connect: {e}"));
 
     let outcome = client.call_tool("echo", serde_json::json!({}), None).await;
-    assert!(
-        matches!(outcome, Err(McpError::Timeout(_))),
-        "the caller must receive the timeout, got {:?}",
-        outcome.map(|_| "a result")
+    std::assert_matches!(
+        outcome,
+        Err(McpError::Timeout(_)),
+        "the caller must receive the timeout",
     );
     let timed_out = stub.call_ids();
     assert_eq!(timed_out.len(), 1, "the call reached the server once");
@@ -456,10 +456,10 @@ async fn one_deadline_spans_the_pre_send_reconnect_and_the_call() {
     let started = tokio::time::Instant::now();
     let outcome = client.call_tool("echo", serde_json::json!({}), None).await;
     let took = started.elapsed();
-    assert!(
-        matches!(outcome, Err(McpError::Timeout(_))),
-        "the respawn's slow handshake must end at the call's deadline, got {:?}",
-        outcome.map(|_| "a result")
+    std::assert_matches!(
+        outcome,
+        Err(McpError::Timeout(_)),
+        "the respawn's slow handshake must end at the call's deadline",
     );
     assert!(took < Duration::from_millis(2500), "ended after {took:?}");
     assert_eq!(stub.calls(), 0, "nothing was sent");

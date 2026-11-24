@@ -46,16 +46,9 @@ pub struct Repointed {
 
 /// A re-point the test checkpoint stopped (R24's crash hook), returned inside
 /// the `anyhow::Error`. The disk is exactly as that step left it.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
+#[error("the re-point stopped after {0:?}")]
 pub struct RepointInterrupted(pub RepointStep);
-
-impl fmt::Display for RepointInterrupted {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "the re-point stopped after {:?}", self.0)
-    }
-}
-
-impl std::error::Error for RepointInterrupted {}
 
 /// The context step 2's failure carries when the marker it should clear
 /// could not be cleared: `project.json` in the folder still records the new

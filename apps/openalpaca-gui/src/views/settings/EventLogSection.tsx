@@ -36,7 +36,7 @@ export function EventLogSection() {
   const events = useEventHistory({ limit: 50 });
   // Served newest-first by `id`; the sort keeps the display stable for rows
   // that predate that ordering.
-  const rows = [...(events.data?.events ?? [])].sort((a, b) =>
+  const rows = (events.data?.events ?? []).toSorted((a, b) =>
     b.timestamp.localeCompare(a.timestamp),
   );
 

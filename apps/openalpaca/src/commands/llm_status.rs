@@ -19,7 +19,7 @@ use crate::output::{OutputFormat, TableRow, format_usd, print_list, status_color
 /// old spellings stay as aliases; a **free** local model is precisely the case
 /// where `$0.00` and `-` must not be confused.
 #[derive(Debug, Serialize, Deserialize)]
-pub(super) struct ModelEntry {
+pub(crate) struct ModelEntry {
     #[serde(alias = "model_id")]
     id: String,
     #[serde(default)]
@@ -39,13 +39,13 @@ pub(super) struct ModelEntry {
 
 /// `GET /v1/settings/llm` — read here for one field per provider.
 #[derive(Debug, Deserialize, Default)]
-pub(super) struct LlmSettingsSnapshot {
+pub(crate) struct LlmSettingsSnapshot {
     #[serde(default)]
     providers: BTreeMap<String, SettingsProvider>,
 }
 
 #[derive(Debug, Deserialize)]
-pub(super) struct SettingsProvider {
+pub(crate) struct SettingsProvider {
     /// Whether this provider needs an API key at all (L1). A local one does
     /// not, and an empty key list there means "no key needed", never "broken".
     #[serde(default = "requires_key_default")]
@@ -75,7 +75,7 @@ impl LlmSettingsSnapshot {
 /// `GET /v1/status`'s `llm` block (L3) — absent on a daemon that has no router,
 /// and on one built before the field existed.
 #[derive(Debug, Deserialize)]
-pub(super) struct LlmStatusInfo {
+pub(crate) struct LlmStatusInfo {
     #[serde(default)]
     pub default_model_routable: bool,
     #[serde(default)]
@@ -83,13 +83,13 @@ pub(super) struct LlmStatusInfo {
 }
 
 #[derive(Debug, Deserialize, Default)]
-struct DaemonStatusSnapshot {
+pub(crate) struct DaemonStatusSnapshot {
     #[serde(default)]
     llm: Option<LlmStatusInfo>,
 }
 
 #[derive(Debug, Serialize, Deserialize)]
-pub(super) struct UsageEntry {
+pub(crate) struct UsageEntry {
     #[serde(default)]
     timestamp: Option<String>,
     #[serde(default)]
@@ -107,7 +107,7 @@ pub(super) struct UsageEntry {
 }
 
 #[derive(Debug, Serialize, Deserialize)]
-pub(super) struct DailyUsageEntry {
+pub(crate) struct DailyUsageEntry {
     #[serde(default)]
     date: Option<String>,
     #[serde(default)]
@@ -125,7 +125,7 @@ pub(super) struct DailyUsageEntry {
 }
 
 #[derive(Debug, Serialize, Deserialize)]
-pub(super) struct CredentialEntry {
+pub(crate) struct CredentialEntry {
     #[serde(default)]
     source: Option<String>,
     #[serde(default)]
@@ -139,7 +139,7 @@ pub(super) struct CredentialEntry {
 }
 
 #[derive(Debug, Serialize, Deserialize)]
-pub(super) struct BackendEntry {
+pub(crate) struct BackendEntry {
     #[serde(default)]
     name: Option<String>,
     #[serde(default)]
@@ -151,7 +151,7 @@ pub(super) struct BackendEntry {
 }
 
 #[derive(Debug, Serialize, Deserialize)]
-pub(super) struct ProviderUsageEntry {
+pub(crate) struct ProviderUsageEntry {
     #[serde(default)]
     provider: Option<String>,
     #[serde(default)]
@@ -393,7 +393,7 @@ impl TableRow for ProviderUsageEntry {
 /// What the `Model:` line says, given the daemon's own verdict on it (L3).
 ///
 /// `[orchestrator] model` is allowed to name a model this install cannot serve
-/// — every shipped agent template pins a Claude id, and on an Ollama-only
+/// — a seeded Claude id with no Anthropic key, say, and on an Ollama-only
 /// machine the fallback ladder answers with something else. Printing only the
 /// configured id there is a lie by omission: the owner reads a Claude name and
 /// gets a local reply.
@@ -473,7 +473,7 @@ pub(super) fn key_health_lines(
 // ── Handler functions ───────────────────────────────────────────
 
 pub(super) async fn llm_status(format: OutputFormat) -> Result<()> {
-    let client = DaemonClient::connect()?;
+    let client = DaemonClient::connect().await?;
 
     let key_health: serde_json::Value = client.get("/v1/settings/llm/status").await?;
     let orch_config: serde_json::Value = client.get("/v1/orchestrator/config").await?;
@@ -540,6 +540,33 @@ pub(super) async fn llm_status(format: OutputFormat) -> Result<()> {
     Ok(())
 }
 
+/// `GET /v1/llm/usage/daily`'s path for `llm usage --daily`: thirty days,
+/// `agent_id` and `date` as typed, encoded (*Rev 147*'s item 6, (b)); held to
+/// the route's query sample by `contract_queries` (CONTRACT-SAMPLES-3).
+pub(crate) fn usage_daily_path(agent: Option<&str>, date: Option<&str>) -> String {
+    let mut path = "/v1/llm/usage/daily?limit=30".to_string();
+    if let Some(a) = agent {
+        path.push_str(&format!("&agent_id={}", urlencoding::encode(a)));
+    }
+    if let Some(d) = date {
+        path.push_str(&format!("&date={}", urlencoding::encode(d)));
+    }
+    path
+}
+
+/// `GET /v1/llm/usage`'s path for `llm usage`: fifty rows, `agent_id` and
+/// `key_id` as typed, encoded (*Rev 147*'s item 6, (b)).
+pub(crate) fn usage_path(agent: Option<&str>, key: Option<&str>) -> String {
+    let mut path = "/v1/llm/usage?limit=50".to_string();
+    if let Some(a) = agent {
+        path.push_str(&format!("&agent_id={}", urlencoding::encode(a)));
+    }
+    if let Some(k) = key {
+        path.push_str(&format!("&key_id={}", urlencoding::encode(k)));
+    }
+    path
+}
+
 pub(super) async fn llm_usage(
     agent: Option<String>,
     date: Option<String>,
@@ -547,26 +574,14 @@ pub(super) async fn llm_usage(
     daily: bool,
     format: OutputFormat,
 ) -> Result<()> {
-    let client = DaemonClient::connect()?;
+    let client = DaemonClient::connect().await?;
 
     if daily {
-        let mut path = "/v1/llm/usage/daily?limit=30".to_string();
-        if let Some(ref a) = agent {
-            path.push_str(&format!("&agent_id={}", a));
-        }
-        if let Some(ref d) = date {
-            path.push_str(&format!("&date={}", d));
-        }
+        let path = usage_daily_path(agent.as_deref(), date.as_deref());
         let entries: Vec<DailyUsageEntry> = client.get(&path).await?;
         print_list(&entries, format);
     } else {
-        let mut path = "/v1/llm/usage?limit=50".to_string();
-        if let Some(ref a) = agent {
-            path.push_str(&format!("&agent_id={}", a));
-        }
-        if let Some(ref k) = key {
-            path.push_str(&format!("&key_id={}", k));
-        }
+        let path = usage_path(agent.as_deref(), key.as_deref());
         let entries: Vec<UsageEntry> = client.get(&path).await?;
         print_list(&entries, format);
     }
@@ -580,10 +595,10 @@ pub(super) async fn llm_usage(
 /// `ollama pull` appears without restarting the daemon or writing a line of
 /// `llm.toml`. Without it the catalogue is read as it stands.
 pub(super) async fn llm_models(refresh: bool, format: OutputFormat) -> Result<()> {
-    let client = DaemonClient::connect()?;
+    let client = DaemonClient::connect().await?;
     let models: Vec<ModelEntry> = if refresh {
         client
-            .post("/v1/models/refresh", &serde_json::json!({}))
+            .post("/v1/models/refresh", &crate::client::empty_body())
             .await?
     } else {
         client.get("/v1/models").await?
@@ -609,7 +624,7 @@ pub(super) async fn llm_models(refresh: bool, format: OutputFormat) -> Result<()
 }
 
 pub(super) async fn llm_credentials(format: OutputFormat) -> Result<()> {
-    let client = DaemonClient::connect()?;
+    let client = DaemonClient::connect().await?;
     let creds: Vec<CredentialEntry> = client.get("/v1/settings/llm/credentials").await?;
 
     if creds.is_empty() {
@@ -625,7 +640,7 @@ pub(super) async fn llm_credentials(format: OutputFormat) -> Result<()> {
 }
 
 pub(super) async fn llm_backends(format: OutputFormat) -> Result<()> {
-    let client = DaemonClient::connect()?;
+    let client = DaemonClient::connect().await?;
     let backends: Vec<BackendEntry> = client.get("/v1/settings/llm/cli-backends").await?;
 
     if backends.is_empty() {
@@ -638,7 +653,7 @@ pub(super) async fn llm_backends(format: OutputFormat) -> Result<()> {
 }
 
 pub(super) async fn llm_provider_usage(format: OutputFormat) -> Result<()> {
-    let client = DaemonClient::connect()?;
+    let client = DaemonClient::connect().await?;
     let usage: Vec<ProviderUsageEntry> = client.get("/v1/settings/llm/providers/usage").await?;
 
     if usage.is_empty() {
@@ -650,13 +665,15 @@ pub(super) async fn llm_provider_usage(format: OutputFormat) -> Result<()> {
     Ok(())
 }
 
-pub(super) async fn llm_strategy(provider: &str, strategy: &str) -> Result<()> {
-    let client = DaemonClient::connect()?;
-
-    // Fetch current orchestrator config
-    let config: serde_json::Value = client.get("/v1/orchestrator/config").await?;
-
-    // Build update with strategy field
+/// `PUT /v1/orchestrator/config`'s body from `llm strategy`: the current
+/// model and fallbacks, and a `strategy` — as sent, a key the route's
+/// `UpdateOrchestratorRequest` does not read (`contract_bodies`'
+/// `SENT_UNREAD`; an owner item).
+pub(crate) fn strategy_body(
+    config: &serde_json::Value,
+    provider: &str,
+    strategy: &str,
+) -> serde_json::Value {
     let mut update = serde_json::Map::new();
     if let Some(model) = config["model"].as_str() {
         update.insert(
@@ -674,13 +691,17 @@ pub(super) async fn llm_strategy(provider: &str, strategy: &str) -> Result<()> {
             "type": strategy,
         }),
     );
+    serde_json::Value::Object(update)
+}
 
-    let _: serde_json::Value = client
-        .put(
-            "/v1/orchestrator/config",
-            &serde_json::Value::Object(update),
-        )
-        .await?;
+pub(super) async fn llm_strategy(provider: &str, strategy: &str) -> Result<()> {
+    let client = DaemonClient::connect().await?;
+
+    // Fetch current orchestrator config
+    let config: serde_json::Value = client.get("/v1/orchestrator/config").await?;
+
+    let update = strategy_body(&config, provider, strategy);
+    let _: serde_json::Value = client.put("/v1/orchestrator/config", &update).await?;
     println!(
         "{} Strategy set to '{}' for provider '{}'",
         "✓".green(),
@@ -788,7 +809,7 @@ mod tests {
     }
 
     /// L3: `[orchestrator] model` may name a model this install cannot serve —
-    /// every shipped template pins a Claude id. Printing it alone tells the
+    /// a seeded Claude id, say. Printing it alone tells the
     /// owner a Claude answered.
     #[test]
     fn the_model_line_names_what_would_really_answer() {

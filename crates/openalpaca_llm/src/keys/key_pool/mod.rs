@@ -13,11 +13,11 @@ pub enum ProviderType {
     Anthropic,
     OpenAI,
     Ollama,
-    Plugin(String),
 }
 
 impl ProviderType {
-    /// Return all built-in provider variants (excludes dynamic Plugin variants).
+    /// Return every provider variant: the built-in ones are all there are
+    /// (the plugin provider type is removed, M86).
     pub fn all() -> &'static [ProviderType] {
         // SAFETY: These are the three unit variants which contain no heap data,
         // so a static slice is fine despite ProviderType not being Copy.
@@ -45,7 +45,6 @@ impl std::fmt::Display for ProviderType {
             Self::Anthropic => write!(f, "anthropic"),
             Self::OpenAI => write!(f, "openai"),
             Self::Ollama => write!(f, "ollama"),
-            Self::Plugin(name) => write!(f, "plugin:{name}"),
         }
     }
 }
@@ -517,20 +516,6 @@ impl KeyPool {
     /// Whether the pool is empty.
     pub fn is_empty(&self) -> bool {
         self.keys.is_empty()
-    }
-
-    /// Count API-compatible keys that are currently available (not in cooldown).
-    /// Used by the router to estimate how many parallel LLM calls can proceed
-    /// without contention, so spawn concurrency can be adapted dynamically.
-    pub async fn available_api_key_count(&self) -> usize {
-        let mut count = 0;
-        for key_lock in &self.keys {
-            let key = key_lock.read().await;
-            if key.is_api_compatible_key() && key.is_available() {
-                count += 1;
-            }
-        }
-        count
     }
 
     /// Returns the shortest remaining cooldown duration among API-compatible

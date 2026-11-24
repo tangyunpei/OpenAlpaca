@@ -24,6 +24,7 @@ use std::collections::HashMap;
 use std::sync::Arc;
 
 use axum::{Json, extract::State, http::StatusCode, response::{IntoResponse, Response}};
+use openalpaca_core::bundled::ShippedVersion;
 use openalpaca_core::orchestrator::skill_catalog::{SkillCatalog, SkillSource};
 use openalpaca_core::tools::extensions::{ExtensionId, ExtensionLedger};
 use openalpaca_storage::{SkillExecutionRepository, resolve_skill_key};
@@ -129,6 +130,7 @@ pub(crate) fn skills_json(
                     let scope = match entry.scope {
                         openalpaca_core::middleware::skill::SkillScope::Project => "project",
                         openalpaca_core::middleware::skill::SkillScope::User => "user",
+                        openalpaca_core::middleware::skill::SkillScope::Bundled => "bundled",
                     };
                     ("file", serde_json::Value::Null, format!("file:{scope}"))
                 }
@@ -141,12 +143,34 @@ pub(crate) fn skills_json(
                         // An extension with no ledger entry reads as enabled —
                         // the §6.2a fail-open default, stated the same way the
                         // tool catalog states it.
-                        "enabled": record.as_ref().map(|r| r.disposition.0).unwrap_or(true),
+                        "enabled": record.as_ref().is_none_or(|r| r.disposition.0),
                         "state": record.as_ref().map(|r| r.state.word()).unwrap_or("enabled"),
                     });
                     ("plugin", origin, format!("plugin:{plugin_id}"))
                 }
             };
+            // Subagent design §2.7 R-2: whether a config folder overrides the
+            // bundled skill of the key, and what is not used — the bundled
+            // skill under it, or a folder set aside as an unedited copy of a
+            // shipped version — in R-1's six keys.
+            let provenance = catalog.provenance(&id);
+            let not_used: Vec<serde_json::Value> = provenance
+                .not_used
+                .iter()
+                .map(|entry| {
+                    serde_json::json!({
+                        "source": entry.source,
+                        "path": entry.path.as_ref().map(|p| p.display().to_string()),
+                        "plugin": serde_json::Value::Null,
+                        "reason": entry.reason,
+                        "version": entry.version.map(|v| match v {
+                            ShippedVersion::Current => "current",
+                            ShippedVersion::Earlier => "earlier",
+                        }),
+                        "edit": serde_json::Value::Null,
+                    })
+                })
+                .collect();
             let row = serde_json::json!({
                 "id": id,
                 "name": front.name,
@@ -164,6 +188,8 @@ pub(crate) fn skills_json(
                 "invocations_today": counts.get(&id).copied().unwrap_or(0),
                 "version": front.version,
                 "author": author,
+                "overrides_bundled": provenance.overrides_bundled,
+                "not_used": not_used,
             });
             (id, row)
         })
@@ -202,7 +228,13 @@ pub(crate) fn diagnostics_json(catalog: &SkillCatalog) -> Vec<serde_json::Value>
 
 /// `GET /v1/skills/health` — per-skill lifetime metrics keyed by `skill_id`.
 pub async fn skill_health_handler(State(state): State<Arc<AppState>>) -> impl IntoResponse {
-    let repo = SkillExecutionRepository::new(&state.db);
+    skill_health(&state.db)
+}
+
+/// `GET /v1/skills/health`'s answer (split out for the API contract's
+/// sample, API-CONTRACT).
+pub(crate) fn skill_health(db: &openalpaca_storage::Database) -> Response {
+    let repo = SkillExecutionRepository::new(db);
     match repo.all_skill_health() {
         Ok(metrics) => Json(metrics).into_response(),
         Err(e) => {
@@ -217,4 +249,4 @@ pub async fn skill_health_handler(State(state): State<Arc<AppState>>) -> impl In
 }
 
 #[cfg(test)]
-mod tests;
+pub(crate) mod tests;

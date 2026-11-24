@@ -23,9 +23,10 @@ use std::path::Path;
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 #[serde(default)]
 pub struct ExperimentalConfig {
-    /// When true, inject an ephemeral system notice when budget pressure
-    /// reaches 80% of cost or rounds (spec P0). Default false until
-    /// validated in real use.
+    /// When true, send a budget notice as each request's last message once
+    /// budget pressure reaches 80% of cost or rounds (spec P0), and keep it
+    /// in the run where it was sent (BUDGET-NOTICE-KEPT). Default false
+    /// until validated in real use.
     pub ephemeral_pressure_layer: bool,
 }
 
@@ -102,6 +103,22 @@ fn warn_on_removed_keys(value: &toml::Value) {
                  The key is being ignored."
             );
         }
+    }
+
+    // N-TOOL-1b (B-11): the lead's own per-tool figure reached no policy;
+    // every loop, the lead's included, reads `agent_defaults`'.
+    let lead_runtime = value
+        .get("execution")
+        .and_then(|e| e.get("lead_agent_defaults"))
+        .and_then(|l| l.get("max_tool_runtime_secs"))
+        .is_some();
+    if lead_runtime {
+        tracing::warn!(
+            "`execution.lead_agent_defaults.max_tool_runtime_secs` was removed — every loop, \
+             the lead's included, cuts a tool at `execution.agent_defaults.\
+             max_tool_runtime_secs`, and a call may ask for up to \
+             `max_tool_runtime_ceiling_secs`. The key is being ignored."
+        );
     }
 }
 

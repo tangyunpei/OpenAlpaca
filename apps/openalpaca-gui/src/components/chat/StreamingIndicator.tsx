@@ -35,7 +35,7 @@ export function ThinkingIndicator({
     <span className="flex items-center gap-[6px]" role="status">
       <span
         aria-hidden
-        className="animate-pulse-oa block h-[6px] w-[6px] shrink-0 rounded-full bg-green"
+        className="block h-[6px] w-[6px] shrink-0 animate-pulse-oa rounded-full bg-green"
       />
       {hasReasoning && onToggle !== undefined ? (
         <button
@@ -139,7 +139,7 @@ export function StreamCaret() {
   return (
     <span
       aria-hidden
-      className="animate-pulse-oa-fast ml-[2px] inline-block h-[1em] w-[2px] translate-y-[2px] bg-ink align-baseline"
+      className="ml-[2px] inline-block h-[1em] w-[2px] translate-y-[2px] animate-pulse-oa-fast bg-ink align-baseline"
     />
   );
 }

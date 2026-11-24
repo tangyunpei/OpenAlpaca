@@ -1,0 +1,41 @@
+[
+  {
+    "artifact_count": 0,
+    "completed_at": "",
+    "cost_usd": 0,
+    "created_at": "",
+    "created_by": "",
+    "description": "",
+    "id": "",
+    "outcome": {
+      "artifact_count": 0,
+      "artifacts": [
+        {
+          "agent_id": "",
+          "key": "",
+          "label": "",
+          "step_order": 0
+        }
+      ],
+      "no_artifact_reason": "",
+      "outcome_kind": "",
+      "outcome_summary": ""
+    },
+    "outcome_kind": "",
+    "priority": 0,
+    "progress_current": 0,
+    "progress_total": 0,
+    "result_summary": "",
+    "session_id": "",
+    "source_lane": "",
+    "source_task_id": "",
+    "state_version": 0,
+    "status": "",
+    "steerable": false,
+    "subagent_count": 0,
+    "title": "",
+    "unattended": false,
+    "updated_at": "",
+    "workspace_id": ""
+  }
+]

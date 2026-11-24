@@ -40,15 +40,16 @@ pub fn install_signal_handlers() -> Arc<AtomicBool> {
 /// - Never fails startup.
 #[cfg(unix)]
 pub fn warn_if_ctrl_c_unavailable_on_tty() {
+    use std::io::IsTerminal;
     use std::os::fd::AsRawFd;
 
-    let fd = std::io::stdin().as_raw_fd();
+    let stdin = std::io::stdin();
 
     // Non-interactive launch (GUI/service/redirect): no warning noise.
-    // SAFETY: `isatty` is thread-safe and does not retain pointers.
-    if unsafe { libc::isatty(fd) } != 1 {
+    if !stdin.is_terminal() {
         return;
     }
+    let fd = stdin.as_raw_fd();
 
     let mut termios = std::mem::MaybeUninit::<libc::termios>::uninit();
     // SAFETY: valid fd from stdin; `tcgetattr` initializes `termios` on success.
@@ -159,6 +160,37 @@ pub(crate) async fn within<F: Future>(stage: &str, deadline: Instant, fut: F) ->
             None
         }
     }
+}
+
+/// How long the blocking work still running once the shutdown tail has run
+/// — a memory index rebuild, a learning chunk still storing — gets before
+/// the process ends anyway ([`finish_runtime`]). What it has not finished by
+/// then is cut by the exit: an index rebuild or a learning chunk is redone
+/// at the next start, and a file a tool was still writing is left as the cut
+/// leaves it. An attachment's text extraction still running then — the tail
+/// waited for it until its stage deadline
+/// (`background::await_file_worker`) — is cut whatever it does in that
+/// second: the task awaiting it is dropped, so its result is not kept, and
+/// the next start counts it as an interrupted attempt. A fixed second,
+/// not what is left of [`FORCE_EXIT_GRACE`](crate::FORCE_EXIT_GRACE): the
+/// tail is bounded by that window, and this is the one bound after it.
+pub(crate) const RUNTIME_END: Duration = Duration::from_secs(1);
+
+/// Ends the daemon's runtime once `async_main` has returned, waiting at most
+/// `bound` for its blocking threads.
+///
+/// Dropping a `Runtime` waits for every blocking task with no bound, so a
+/// stop during a long extraction kept the process alive — its lock held,
+/// its `discovery.json` already gone — for as long as that extraction ran.
+/// `Runtime::shutdown_timeout` tells the worker threads to stop and waits at
+/// most `bound` for every runtime thread; the workers drop their async tasks
+/// during that wait, running those tasks' destructors (a running shell
+/// group's `killpg`, a plugin child's `kill_on_drop`), so a bound of a
+/// second leaves them time to, where `shutdown_background` (a zero bound)
+/// or a `process::exit` leaves none. A blocking thread still running after
+/// `bound` is left to the process's exit.
+pub(crate) fn finish_runtime(runtime: tokio::runtime::Runtime, bound: Duration) {
+    runtime.shutdown_timeout(bound);
 }
 
 /// The force-exit watchdog's last step before `process::exit(1)`: the

@@ -6,8 +6,9 @@ use std::time::Duration;
 
 use tokio::sync::OwnedSemaphorePermit;
 
-/// Maximum time to wait between SSE chunks before treating the stream as stalled.
-const STREAM_IDLE_TIMEOUT: Duration = Duration::from_secs(90);
+/// Maximum time to wait between stream events before treating the stream as
+/// stalled ([`collect_stream`]'s idle clock; a `ping` yields no event).
+pub const STREAM_IDLE_TIMEOUT: Duration = Duration::from_secs(90);
 
 /// Wraps a `ChatStream` and holds a concurrency semaphore permit.
 /// The permit is released when the stream is fully consumed or dropped,
@@ -39,10 +40,22 @@ impl PermitStream {
     }
 }
 
-/// Collect a streaming response into a complete ChatResponse.
-pub async fn collect_stream(
+/// Collect a streaming response into a complete ChatResponse, a stream that
+/// yields no event for [`STREAM_IDLE_TIMEOUT`] (90 s) ending as stalled.
+pub async fn collect_stream(stream: ChatStream, model: String) -> Result<ChatResponse, LlmError> {
+    collect_stream_idle(stream, model, Some(STREAM_IDLE_TIMEOUT)).await
+}
+
+/// [`collect_stream`] with the idle clock the caller picks: `Some(gap)` ends
+/// a stream that yields no event for `gap`, `None` sets no idle clock, the
+/// caller's own deadline and the HTTP client's read gap bounding a silent
+/// stream instead. An agent's round with no chat to forward to passes
+/// `None` (OUTPUT-BUDGET), so a model reasoning with nothing to stream is
+/// not dropped at 90 s and asked again whole.
+pub async fn collect_stream_idle(
     mut stream: ChatStream,
     model: String,
+    idle: Option<Duration>,
 ) -> Result<ChatResponse, LlmError> {
     let mut content = String::new();
     let mut thinking = None;
@@ -51,11 +64,18 @@ pub async fn collect_stream(
     let mut tool_meta: HashMap<usize, (String, String)> = HashMap::new();
     let mut usage = Usage::default();
     let mut finish_reason = FinishReason::Stop;
+    let mut echo = None;
 
-    while let Some(event) = tokio::time::timeout(STREAM_IDLE_TIMEOUT, stream.next())
-        .await
-        .map_err(|_| LlmError::Stream("SSE stream idle timeout (90s)".into()))?
-    {
+    loop {
+        let next = match idle {
+            Some(gap) => tokio::time::timeout(gap, stream.next())
+                .await
+                .map_err(|_| {
+                    LlmError::Stream(format!("SSE stream idle timeout ({}s)", gap.as_secs()))
+                })?,
+            None => stream.next().await,
+        };
+        let Some(event) = next else { break };
         match event? {
             StreamEvent::TextDelta { text } => content.push_str(&text),
             StreamEvent::ThinkingDelta { thinking: t } => {
@@ -81,6 +101,7 @@ pub async fn collect_stream(
             StreamEvent::Error { message } => {
                 return Err(LlmError::Stream(message));
             }
+            StreamEvent::Turn(turn) => echo = Some(turn),
         }
     }
 
@@ -109,6 +130,7 @@ pub async fn collect_stream(
         finish_reason,
         thinking,
         parts: None,
+        echo,
     })
 }
 
@@ -213,7 +235,7 @@ mod tests {
         let result = collect_stream(stream, "test-model".to_string()).await;
         assert!(result.is_err());
         let err = result.unwrap_err();
-        assert!(matches!(err, LlmError::Stream(ref s) if s.contains("connection reset")));
+        std::assert_matches!(err, LlmError::Stream(ref s) if s.contains("connection reset"));
     }
 
     #[tokio::test(start_paused = true)]
@@ -224,6 +246,40 @@ mod tests {
         let result = collect_stream(stream, "mock".into()).await;
         assert!(result.is_err());
         assert!(result.unwrap_err().to_string().contains("idle timeout"));
+    }
+
+    /// OUTPUT-BUDGET: with no idle clock (`None`, an agent's round with no
+    /// chat to forward to) a stream silent for 100 s, past the 90 s that
+    /// [`collect_stream`] allows, is collected whole; with the 90 s clock
+    /// the same stream is stalled.
+    #[tokio::test(start_paused = true)]
+    async fn a_stream_with_no_idle_clock_outlasts_ninety_silent_seconds() {
+        use std::time::Duration;
+        let silent = || -> ChatStream {
+            Box::pin(
+                futures_util::stream::once(async {
+                    tokio::time::sleep(Duration::from_secs(100)).await;
+                    futures_util::stream::iter(vec![
+                        Ok(StreamEvent::TextDelta {
+                            text: "late".to_string(),
+                        }),
+                        Ok(StreamEvent::Done {
+                            finish_reason: FinishReason::Stop,
+                        }),
+                    ])
+                })
+                .flatten(),
+            )
+        };
+        let response = collect_stream_idle(silent(), "m".into(), None)
+            .await
+            .unwrap();
+        assert_eq!(response.content, "late");
+        let stalled = collect_stream(silent(), "m".into()).await.unwrap_err();
+        assert!(
+            stalled.to_string().contains("idle timeout (90s)"),
+            "{stalled}"
+        );
     }
 
     /// M3 test: A slow stream that sends chunks within the idle timeout (90s)
@@ -247,7 +303,7 @@ mod tests {
         // Apply a wall-clock deadline of 2 minutes (shorter than "infinite" but
         // longer than idle timeout). The stream keeps sending so idle timeout
         // never fires, but the wall-clock timeout should cancel it.
-        let wall_clock = Duration::from_secs(120);
+        let wall_clock = Duration::from_mins(2);
         let result =
             tokio::time::timeout(wall_clock, collect_stream(slow_stream, "m".into())).await;
 

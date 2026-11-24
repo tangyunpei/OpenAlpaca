@@ -2,21 +2,24 @@
 # This file is installed only when no user config exists.
 
 [orchestrator]
-model = "claude-haiku-4-5-20251001"
-fallback_models = ["claude-sonnet-4-6"]
+model = "claude-haiku-5-5"
+fallback_models = ["claude-sonnet-5-5"]
 
 [providers.anthropic]
 enabled = false
 strategy = "round_robin"
-default_model = "claude-sonnet-4-6"
-default_max_tokens = 4096
+default_model = "claude-sonnet-5-5"
+# The output ceiling for one answer, thinking included; a request that names
+# its own max_tokens still wins.
+default_max_tokens = 16000
 
 [providers.openai]
 enabled = false
 base_url = "https://api.openai.com/v1"
 strategy = "round_robin"
-default_model = "gpt-4o-mini"
-default_max_tokens = 4096
+default_model = "gpt-6-luna"
+# The output ceiling for one answer, reasoning included.
+default_max_tokens = 16000
 
 # Local models, served by the Ollama you run yourself.
 # Turning this on is the only action needed: the daemon then asks the running
@@ -30,14 +33,23 @@ strategy = "round_robin"
 # Empty means "whatever is installed": the router picks a discovered model,
 # preferring one that can use tools. Name a tag here to pin one instead.
 default_model = ""
-# The output ceiling for one answer. A local model bills nothing, and a
-# reasoning model spends tokens thinking before it answers, so this is more
-# generous than the cloud default of 4096.
+# The output ceiling for one answer. A reasoning model spends tokens thinking
+# before it answers; a local model's window is often small, so this is less
+# than the cloud providers' 16000.
 default_max_tokens = 8192
-# How long one non-streaming call to this provider may take. A large model on a
-# laptop answers in minutes, not seconds. A streamed call is not bound by this:
-# it is cut only if the tokens stop coming.
-request_timeout_secs = 600
+# How long one non-streaming call to this provider may take: a call to a local
+# model may run up to an hour. A large model on a laptop answers in minutes, not
+# seconds, and a long task may keep it generating far longer. It also bounds the
+# gap between a stream's HTTP reads. A streamed round to a local model is
+# allowed an hour whatever this says, and is cut sooner only if the tokens stop
+# coming.
+request_timeout_secs = 3600
+# The model aliases fast, balanced and strong each name a model per provider:
+# built in for Anthropic and OpenAI; on Ollama, which has none built in, the
+# model the asking agent runs on. A provider's table pins your own, e.g. a
+# smaller pulled model for fast; a pin may name any model the router can reach.
+# [providers.ollama.model_aliases]
+# fast = "qwen3:4b"
 
 [web_search]
 api_key = ""

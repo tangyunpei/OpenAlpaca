@@ -120,7 +120,7 @@ export function WorkingStateCard({
       </button>
 
       {open && (
-        <div className="sc min-h-0 overflow-y-auto px-[18px] pb-[12px]">
+        <div className="min-h-0 sc overflow-y-auto px-[18px] pb-[12px]">
           {state === null ? (
             <p className="m-0 text-base leading-[1.45] text-muted-fg">
               {WORKING_STATE_EMPTY}

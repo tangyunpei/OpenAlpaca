@@ -18,7 +18,7 @@ use crate::middleware::bootstrap::bootstrap_to_prompt_block;
 use crate::middleware::guard::{OutputGuard, detect_hallucinated_send};
 use crate::middleware::prompt::AgentPersona;
 use crate::middleware::skill::skill_to_prompt_block;
-use crate::orchestrator::{ConversationContext, Orchestrator};
+use crate::orchestrator::{ConnectorSendProvider, ConversationContext, Orchestrator};
 use crate::prompt_ctx::SectionPriority;
 use crate::prompt_ctx::sources::{ContextRequest, ExecutionPath};
 use crate::runner::{LoopConfig, LoopFinishReason, run_agentic_loop_routed};
@@ -28,6 +28,7 @@ use crate::security::sandbox::SandboxPolicy;
 use crate::tools::builtins::ScriptToolBuiltIn;
 use crate::tools::registry::{RegisteredTool, ToolBackend, ToolContext};
 use chrono::Utc;
+use openalpaca_api::plugin_traits::{DynPluginSkillExecutor, PluginSkillExecutor};
 use openalpaca_llm::{ChatMessage, ToolChoice};
 use openalpaca_storage::repository::LlmUsageRepository;
 use std::sync::Arc;
@@ -35,7 +36,10 @@ use uuid::Uuid;
 
 impl Orchestrator {
     /// Inner implementation of skill invocation (separated for lifecycle event wrapping).
-    #[allow(clippy::too_many_arguments)]
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "the turn's context, as handle_skill_invocation passes it"
+    )]
     pub(in crate::orchestrator) async fn handle_skill_invocation_inner(
         &self,
         request_id: Uuid,
@@ -166,18 +170,6 @@ impl Orchestrator {
         };
 
         let skill_block = skill_to_prompt_block(&skill_doc);
-
-        // Emit SkillContextInjected when injected_context is present. Moved here
-        // from inside the former PromptBuilder chain; the event contract is
-        // unchanged (request_id, skill_id, context_bytes, timestamp).
-        if !injected_context.is_empty() {
-            self.bus.publish(SystemEvent::SkillContextInjected {
-                request_id,
-                skill_id: skill_name.to_string(),
-                context_bytes: injected_context.len(),
-                timestamp: Utc::now(),
-            });
-        }
 
         // Resolve tools via capability model, falling back to legacy name-based matching.
         // Intent-suggested tools are intentionally NOT merged here to maintain
@@ -379,6 +371,7 @@ impl Orchestrator {
             );
             let resolved: Vec<String> = tool_defs.iter().map(|t| t.name.clone()).collect();
             let denied_caps: Vec<String> = skill_deny.clone();
+            let (max_tool_runtime_secs, max_tool_runtime_ceiling_secs) = self.tool_runtime_bounds();
             policy_opt = Some(SandboxPolicy {
                 agent_id: "orchestrator".to_string(),
                 // Closed set: the skill may call exactly the tools resolved for
@@ -397,7 +390,8 @@ impl Orchestrator {
                     .rate_limit
                     .max_calls
                     .map(|n| n as u32),
-                max_tool_runtime_secs: self.loop_config.max_tool_runtime.as_secs(),
+                max_tool_runtime_secs,
+                max_tool_runtime_ceiling_secs,
                 stream_id: stream_id.map(|s| s.to_string()),
                 lane_key: Some(lane_key.to_string()),
                 confirmation_timeout_secs: Some(
@@ -820,11 +814,12 @@ impl Orchestrator {
             let registry = if needs_clone {
                 let cloned = (*self.tool_registry).clone();
                 if let Some(ref skill_dir) = entry.skill_dir {
+                    let roots = self.skill_catalog.skill_roots();
                     for cfg in &skill_doc.frontmatter.scripts {
-                        let tool = ScriptToolBuiltIn::new(skill_dir, cfg)?;
+                        let tool = ScriptToolBuiltIn::new(skill_dir, cfg, roots.clone())?;
                         cloned.register(RegisteredTool {
                             definition: ScriptToolBuiltIn::tool_definition(&cfg.name),
-                            backend: ToolBackend::BuiltIn(Arc::new(tool)),
+                            backend: ToolBackend::built_in(tool),
                             provides_capabilities: vec![],
                             exempt_from_timeout: false,
                             annotations: None,
@@ -837,6 +832,8 @@ impl Orchestrator {
                 // Register invoke_skill:* backends so the sandbox can execute them
                 if !skill_doc.frontmatter.depends_on.is_empty() {
                     let call_stack = vec![skill_name.to_string()];
+                    let (max_tool_runtime_secs, max_tool_runtime_ceiling_secs) =
+                        self.tool_runtime_bounds();
                     let executor = Arc::new(SkillInvocationToolExecutor::new(
                         self.skill_catalog.clone(),
                         self.tool_registry.clone(),
@@ -858,6 +855,8 @@ impl Orchestrator {
                             .execution
                             .agent_defaults
                             .confirmation_timeout_secs,
+                        max_tool_runtime_secs,
+                        max_tool_runtime_ceiling_secs,
                     ));
                     for dep_id in &skill_doc.frontmatter.depends_on {
                         if self.skill_catalog.get(dep_id).is_some() {
@@ -882,12 +881,12 @@ impl Orchestrator {
                                     strict: None,
                                     input_examples: None,
                                 },
-                                backend: ToolBackend::BuiltIn(Arc::new(
+                                backend: ToolBackend::built_in(
                                     SkillInvocationBuiltInAdapter {
                                         executor: executor.clone(),
                                         skill_id: dep_id.clone(),
                                     },
-                                )),
+                                ),
                                 provides_capabilities: vec![],
                                 exempt_from_timeout: true, // nested skills manage own timeouts
                                 annotations: None,
@@ -952,17 +951,17 @@ impl Orchestrator {
                 .resolve_provider(actual_model)
                 .map(|p| p.to_string())
                 .unwrap_or_else(|| "unknown".to_string());
-            let call_cost = router.cost_tracker.calculate_cost(
-                actual_model,
-                result.total_input_tokens,
-                result.total_output_tokens,
-            );
+            // As on the main loop: the turn's requests as each was
+            // counted, never its summed tokens (USAGE-PER-REQUEST).
+            let call_cost = result.requests_cost;
 
             let call_status = match &result.finish_reason {
                 LoopFinishReason::Complete
                 | LoopFinishReason::MaxRounds
-                | LoopFinishReason::Truncated => "success",
+                | LoopFinishReason::Truncated
+                | LoopFinishReason::ResultSubmitted => "success",
                 LoopFinishReason::CostExceeded => "cost_exceeded",
+                LoopFinishReason::ResultRejected => "result_rejected",
                 LoopFinishReason::Cancelled => "cancelled",
                 LoopFinishReason::Error(_) => "error",
             };
@@ -1203,6 +1202,20 @@ impl Orchestrator {
         })
     }
 
+    /// N-TOOL-1b: the per-tool bound every loop reads,
+    /// `[execution.agent_defaults] max_tool_runtime_secs`, and the ceiling a
+    /// command's or a plugin tool's own `timeout_secs` is clamped to — per
+    /// invocation, from one snapshot, so a reload between the two reads
+    /// cannot pair a new bound with an old ceiling.
+    fn tool_runtime_bounds(&self) -> (u64, u64) {
+        let config = self.daemon_config.load();
+        let tools = &config.execution.agent_defaults;
+        (
+            tools.max_tool_runtime_secs,
+            tools.max_tool_runtime_ceiling_secs,
+        )
+    }
+
     /// Execute a plugin-backed skill out-of-process.
     ///
     /// The plugin's `PluginSkillExecutor` drives its own reasoning loop inside
@@ -1214,14 +1227,17 @@ impl Orchestrator {
     /// emitted by the `handle_skill_invocation` wrapper, which this path
     /// shares with file-based skills. No LLM router is involved — token and
     /// cost fields in the result are zero.
-    #[allow(clippy::too_many_arguments)]
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "the turn's context plus the plugin and its executor"
+    )]
     async fn invoke_plugin_skill(
         &self,
         request_id: Uuid,
         source: &str,
         skill_name: &str,
         plugin_id: &str,
-        executor: Arc<dyn openalpaca_api::plugin_traits::PluginSkillExecutor>,
+        executor: Arc<DynPluginSkillExecutor<'static>>,
         query: &str,
         lane_key: &str,
         // R-T27 — the session the gateway resolved this turn into
@@ -1257,13 +1273,15 @@ impl Orchestrator {
             plugin_skill_allowlist(skill_name, fm, &self.tool_registry, &withheld_scope)?;
         let denied: Vec<String> = fm.tools.deny.clone();
 
+        let (max_tool_runtime_secs, max_tool_runtime_ceiling_secs) = self.tool_runtime_bounds();
         let policy = SandboxPolicy {
             agent_id: format!("plugin:{plugin_id}"),
             allowed_capabilities: allowed,
             denied_capabilities: denied,
             require_confirmation_for: fm.permissions.confirm.tools.clone(),
             max_tool_calls: fm.tools.rate_limit.max_calls.map(|n| n as u32),
-            max_tool_runtime_secs: self.loop_config.max_tool_runtime.as_secs(),
+            max_tool_runtime_secs,
+            max_tool_runtime_ceiling_secs,
             stream_id: stream_id.map(|s| s.to_string()),
             lane_key: Some(lane_key.to_string()),
             confirmation_timeout_secs: Some(
@@ -1323,6 +1341,8 @@ impl Orchestrator {
             tool_ctx,
             calls: std::sync::atomic::AtomicUsize::new(0),
         };
+        let tool_executor =
+            openalpaca_api::plugin_traits::DynToolCallbackExecutor::from_ref(&callback);
 
         let context = serde_json::json!({
             "source": source,
@@ -1340,7 +1360,7 @@ impl Orchestrator {
         // bridge rewrites the common cases itself; this is the belt-and-braces
         // catch for any path that surfaced a raw one (design §3.2 T3(b)).
         let content = ledger
-            .run_scoped(&extension, executor.invoke(query, &context, &callback))
+            .run_scoped(&extension, executor.invoke(query, &context, tool_executor))
             .await
             .map_err(|e| format!("Plugin skill '{skill_name}' failed: {e}"))?;
 
@@ -1464,7 +1484,6 @@ struct SandboxToolCallback {
     calls: std::sync::atomic::AtomicUsize,
 }
 
-#[async_trait::async_trait]
 impl openalpaca_api::plugin_traits::ToolCallbackExecutor for SandboxToolCallback {
     async fn execute_tool(
         &self,

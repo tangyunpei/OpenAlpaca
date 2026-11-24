@@ -206,15 +206,21 @@ impl EventBroadcaster {
                     success,
                     duration_ms,
                     task_id,
+                    reason,
                     ..
                 } => {
-                    let detail = serde_json::json!({
+                    let mut detail = serde_json::json!({
                         "agent_id": agent_id,
                         "tool_name": tool_name,
                         "success": success,
                         "duration_ms": duration_ms,
                         "task_id": task_id
                     });
+                    // Only a run that failed for a named reason carries the
+                    // key (TIMEOUT-ONE-CLOCK); every other row is as before.
+                    if let Some(reason) = reason {
+                        detail["reason"] = serde_json::json!(reason.as_str());
+                    }
                     repo.log_for_task(
                         "tool_executed",
                         Some(agent_id),
@@ -609,7 +615,10 @@ impl EventBroadcaster {
     /// writer can find this row and add the index half — `log_seq`, the
     /// previews, `result_ref` — rather than writing a second row for the same
     /// call.
-    #[allow(clippy::too_many_arguments)]
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "the tool call's facts, written to its tool_execution_log row"
+    )]
     pub(super) fn persist_tool_execution(
         &self,
         agent_id: &str,
@@ -853,7 +862,16 @@ mod tests {
         let eb = EventBroadcaster::new(16, "inst-1".to_string(), Some(db.clone()));
 
         eb.task_status("t-1", "A run", "running", None, None, None, None, None, None);
-        eb.tool_executed("research_agent::a1", "web_search", true, 12, Some("t-1"), None, None);
+        eb.tool_executed(
+            "research_agent::a1",
+            "web_search",
+            true,
+            12,
+            Some("t-1"),
+            None,
+            None,
+            None,
+        );
         eb.security_violation("research_agent::a1", "shell", "denied", Some("t-1"));
         eb.circuit_breaker_tripped("research_agent::a1", "web_search", 3, 300, Some("t-1"));
         eb.llm_call_completed("research_agent::a1", "m", 1, 2, 0.1, Some("t-1"));
@@ -949,6 +967,7 @@ mod tests {
             Some("task-1"),
             Some("sess-1"),
             Some("toolu_1"),
+            None,
         );
 
         let count = |db: &Database| -> i64 {
@@ -999,8 +1018,66 @@ mod tests {
         assert!(rows.iter().any(|r| r.event_type == "tool_executed"));
 
         // A call outside any session log is one row too.
-        eb.tool_executed("orchestrator", "web_search", true, 5, None, None, None);
+        eb.tool_executed(
+            "orchestrator",
+            "web_search",
+            true,
+            5,
+            None,
+            None,
+            None,
+            None,
+        );
         assert_eq!(count(&db), 2);
+    }
+
+    /// TIMEOUT-ONE-CLOCK: a run the sandbox's clock cut carries its reason,
+    /// `timeout`, on the wire and in its `event_log` row's detail; every
+    /// other run's frame and row carry no `reason` key, as before.
+    #[test]
+    fn a_timed_out_runs_frame_and_row_carry_the_reason() {
+        let (_dir, db) = test_db();
+        let eb = EventBroadcaster::new(16, "inst-1".to_string(), Some(db.clone()));
+        let mut frames = eb.subscribe();
+
+        eb.tool_executed(
+            "orchestrator",
+            "slow_cmd",
+            false,
+            1000,
+            Some("t-1"),
+            None,
+            None,
+            Some(openalpaca_api::events::ToolFailureReason::Timeout),
+        );
+        eb.tool_executed(
+            "orchestrator",
+            "web_search",
+            false,
+            5,
+            Some("t-1"),
+            None,
+            None,
+            None,
+        );
+
+        let timed = serde_json::to_value(frames.try_recv().unwrap()).unwrap();
+        assert_eq!(timed["type"], "tool_executed");
+        assert_eq!(timed["success"], false);
+        assert_eq!(timed["reason"], "timeout");
+        let plain = serde_json::to_value(frames.try_recv().unwrap()).unwrap();
+        assert!(plain.get("reason").is_none(), "{plain}");
+
+        let rows = EventLogRepository::new(&db).recent(10).unwrap();
+        let detail_of = |tool: &str| {
+            rows.iter()
+                .filter(|r| r.event_type == "tool_executed")
+                .filter_map(|r| r.detail.clone())
+                .find(|d| d["tool_name"] == tool)
+                .unwrap_or_else(|| panic!("no tool_executed row for {tool}"))
+        };
+        assert_eq!(detail_of("slow_cmd")["reason"], "timeout");
+        assert!(detail_of("web_search").get("reason").is_none());
     }
 
     /// An event with no run leaves the column NULL rather than borrowing one.
@@ -1009,7 +1086,16 @@ mod tests {
         let (_dir, db) = test_db();
         let eb = EventBroadcaster::new(16, "inst-1".to_string(), Some(db.clone()));
 
-        eb.tool_executed("orchestrator", "web_search", true, 5, None, None, None);
+        eb.tool_executed(
+            "orchestrator",
+            "web_search",
+            true,
+            5,
+            None,
+            None,
+            None,
+            None,
+        );
         eb.connector_status("telegram", "connected");
 
         let rows = EventLogRepository::new(&db).recent(10).unwrap();

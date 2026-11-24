@@ -63,6 +63,19 @@ function Assert-BunVersion($actual, $pinned) {
     }
 }
 
+# Stops unless $repoRoot's LICENSE is a file with something in it, naming it:
+# the app's MSI names it (tauri.conf.json's bundle.licenseFile). Run before
+# any tool is checked or anything is built (the owner, 2026-11-17).
+function Assert-License($repoRoot) {
+    $license = Join-Path $repoRoot 'LICENSE'
+    if (-not (Test-Path -LiteralPath $license -PathType Leaf)) {
+        Die "No LICENSE at ${license}: a package ships the repository's licence; restore the file before packaging."
+    }
+    if ((Get-Item -LiteralPath $license).Length -eq 0) {
+        Die "$license is empty: a package ships the repository's licence; restore its text before packaging."
+    }
+}
+
 # ── Dot-source guard ─────────────────────────────────────────
 # `. .\package-windows.ps1 -DotSourceOnly` defines the functions above in the
 # caller's scope and builds nothing (scripts/release/tests).
@@ -76,6 +89,8 @@ if ($env:OS -ne 'Windows_NT') {
 $ScriptDir = Split-Path -Parent $MyInvocation.MyCommand.Path
 $RepoRoot  = (Resolve-Path (Join-Path $ScriptDir '../..')).Path
 $DistDir   = Join-Path $RepoRoot 'dist'
+
+Assert-License $RepoRoot
 
 Require-Cmd 'cargo'
 Require-Cmd 'rustc'

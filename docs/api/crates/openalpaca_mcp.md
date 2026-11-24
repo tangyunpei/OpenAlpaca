@@ -1,6 +1,6 @@
 # `openalpaca_mcp`
 
-> Generated from source by `python3 scripts/gen_api_docs.py`.
+> Generated from source by `python3.11 scripts/gen_api_docs.py`.
 
 ## Overview
 
@@ -13,7 +13,7 @@
 - over MCP. Server mode (originally sketched as P4) is an explicit non-goal.
 - Provides:
 - - [`McpClient`] — connect to MCP servers, list/call tools, auto-reconnect.
-- - [`Transport`] trait with stdio + streamable-HTTP implementations.
+- - [`Transport`], an enum over the stdio and streamable-HTTP transports.
 - - [`McpError`] with retry/cancellation helpers.
 
 ## Modules
@@ -26,7 +26,7 @@
 - `pub use client::{ ConnectionEvent, ConnectionEventHandler, McpClient, McpClientConfig, NotifyingHandler, ServerChange, };`
 - `pub use error::{ErrorCategory, McpError};`
 - `pub use lifecycle::{ConnectionSnapshot, ProtocolMode};`
-- `pub use transport::{ExitObserver, HttpAuth, StdioTransport, Transport, TransportKind};`
+- `pub use transport::{ ExitObserver, HttpAuth, STDERR_SETTLE, SpawnTail, StderrTail, StdioTransport, TAIL_BYTES, TailSnapshot, Transport, TransportKind, };`
 - `pub use rmcp::model::{ CallToolResult, ContentBlock, Implementation, Prompt, PromptMessage, ProtocolVersion, Resource, ResourceContents, Tool, ToolAnnotations, };`
 
 ## Related Links

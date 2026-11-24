@@ -17,7 +17,7 @@ export function CommandButton({ onOpen, className }: CommandButtonProps) {
       onClick={onOpen}
       className={cn(
         "flex w-full cursor-pointer items-center gap-[8px] rounded-lg border border-line-popover bg-cmd px-[10px] py-[7px] font-mono text-xs-plus leading-[normal] text-secondary",
-        "transition-[background-color] duration-[120ms] hover:bg-cmd-hover",
+        "transition-[background-color] duration-120 hover:bg-cmd-hover",
         "focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-blue",
         className,
       )}

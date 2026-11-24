@@ -12,6 +12,24 @@ use crate::error::PluginError;
 use crate::manifest::PluginManifest;
 use crate::stdio_channel::StdioChannel;
 
+/// How long a JSON-RPC request to a plugin waits for its answer when its
+/// caller names no figure of its own ([`StdioChannel::call`]). `initialize`
+/// (10 s) and `shutdown` (3 s) name theirs, and so does a tool call the
+/// sandbox cuts (`PluginToolProxy`); set by no key.
+pub const CHANNEL_DEFAULT_TIMEOUT: Duration = Duration::from_mins(1);
+
+/// The MCP version an `mcp_compatible` plugin's `initialize` offers
+/// ([`PluginProcess::mcp_initialize`]): the newest with an `initialize`
+/// handshake, the one `openalpaca_mcp`'s legacy handshake and its fallback
+/// offer (rmcp's `ProtocolVersion::LATEST_WITH_INITIALIZE`). This crate does
+/// not depend on `openalpaca_mcp`, so the daemon's tests hold the two equal
+/// (`managers/extensions.rs`).
+pub const MCP_INITIALIZE_VERSION: &str = "2025-11-25";
+
+/// The `clientInfo.name` an `mcp_compatible` plugin's `initialize` carries:
+/// the name the daemon's MCP connections give themselves.
+pub const MCP_CLIENT_NAME: &str = "openalpaca-mcp";
+
 /// A running plugin child process with its JSON-RPC transport channel.
 pub struct PluginProcess {
     pub child: Child,
@@ -29,8 +47,14 @@ impl PluginProcess {
     ///
     /// Resolves the entry path relative to `plugin_dir`, configures stdin/stdout/stderr
     /// as piped, applies manifest-defined args and environment variables, and creates
-    /// the multiplexed JSON-RPC channel over stdio.
-    pub fn spawn(manifest: &PluginManifest, plugin_dir: &Path) -> Result<Self, PluginError> {
+    /// the multiplexed JSON-RPC channel over stdio, whose requests wait
+    /// `channel_timeout` when their caller names no figure
+    /// ([`CHANNEL_DEFAULT_TIMEOUT`] but in this crate's tests).
+    pub fn spawn(
+        manifest: &PluginManifest,
+        plugin_dir: &Path,
+        channel_timeout: Duration,
+    ) -> Result<Self, PluginError> {
         let entry = manifest.entry_path(plugin_dir);
 
         let mut cmd = Command::new(&entry);
@@ -88,7 +112,7 @@ impl PluginProcess {
             stdin,
             stdout,
             manifest.plugin.max_concurrent,
-            Duration::from_secs(60),
+            channel_timeout,
         );
 
         debug!(
@@ -148,6 +172,53 @@ impl PluginProcess {
         }
 
         info!(plugin_id, "plugin initialized successfully");
+        Ok(())
+    }
+
+    /// Open an `mcp_compatible` plugin as an MCP client opens a server (N-PLUG-5):
+    /// `initialize` offering [`MCP_INITIALIZE_VERSION`], then the
+    /// `notifications/initialized` notification. Only after both does the
+    /// manager send `tools/list`; an MCP server refuses any first message but
+    /// the lifecycle's.
+    ///
+    /// It is `openalpaca_mcp`'s legacy handshake (`protocol = "legacy"`),
+    /// written here because this crate does not depend on that one
+    /// (`scripts/crate_edges.toml`) and the plugin channel is not rmcp's
+    /// transport: the same version, the same `clientInfo` (`openalpaca-mcp`
+    /// with the daemon's version) and the same empty client capabilities.
+    /// The `server/discover` probe of `2026-07-28` is not sent: that
+    /// lifecycle carries its metadata in every request's `_meta`, which the
+    /// plugin channel's requests do not.
+    ///
+    /// The plugin receives no configuration: MCP's `initialize` has no place
+    /// for it (the manifest's validate step warns about a `[config]`). The
+    /// answer is read as rmcp reads it but for one tolerance: an answer with
+    /// no `protocolVersion` is accepted, as before this lifecycle, since the
+    /// manager sent no `initialize` at all and a plugin answering every
+    /// method with an empty result loaded. A JSON-RPC error fails the load.
+    /// Waits 10 s, as [`Self::initialize`] does.
+    pub async fn mcp_initialize(&self, plugin_id: &str) -> Result<(), PluginError> {
+        let params = json!({
+            "protocolVersion": MCP_INITIALIZE_VERSION,
+            "capabilities": {},
+            "clientInfo": {
+                "name": MCP_CLIENT_NAME,
+                "version": env!("CARGO_PKG_VERSION"),
+            },
+        });
+
+        info!(plugin_id, "sending MCP initialize");
+        let result = self
+            .channel
+            .call_with_timeout("initialize", params, Duration::from_secs(10))
+            .await?;
+        let negotiated = result.get("protocolVersion").and_then(Value::as_str);
+        debug!(plugin_id, ?negotiated, "MCP initialize answered");
+
+        self.channel
+            .notify("notifications/initialized", json!({}))
+            .await?;
+        info!(plugin_id, "plugin initialized under the MCP lifecycle");
         Ok(())
     }
 

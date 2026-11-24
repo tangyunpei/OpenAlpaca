@@ -73,6 +73,44 @@ const T4_BOUND: Duration = Duration::from_secs(2);
 /// never the whole window.
 const POST_SWEEP_RESERVE: Duration = Duration::from_secs(3);
 
+/// The daemon's two supervisors, a closed set: the one a verb's `kind` names,
+/// borrowed from [`Extensions`]. `ExtensionSupervisor` is a native async trait
+/// and not dyn-compatible, so the dispatch by kind is this enum's `match`.
+enum Supervisor<'a> {
+    Mcp(&'a McpSupervisor),
+    Plugin(&'a PluginManager),
+}
+
+impl Supervisor<'_> {
+    async fn enable(&self, id: &ExtensionId) -> Result<ExtensionRecord, ExtensionError> {
+        match self {
+            Self::Mcp(s) => s.enable(id).await,
+            Self::Plugin(s) => s.enable(id).await,
+        }
+    }
+
+    async fn disable(&self, id: &ExtensionId) -> Result<ExtensionRecord, ExtensionError> {
+        match self {
+            Self::Mcp(s) => s.disable(id).await,
+            Self::Plugin(s) => s.disable(id).await,
+        }
+    }
+
+    async fn reload(&self, id: &ExtensionId) -> Result<ExtensionRecord, ExtensionError> {
+        match self {
+            Self::Mcp(s) => s.reload(id).await,
+            Self::Plugin(s) => s.reload(id).await,
+        }
+    }
+
+    async fn shutdown_all(&self) {
+        match self {
+            Self::Mcp(s) => s.shutdown_all().await,
+            Self::Plugin(s) => s.shutdown_all().await,
+        }
+    }
+}
+
 /// `{ ledger, mcp, plugins }` — design §3's aggregator.
 pub struct Extensions {
     mcp: Arc<McpSupervisor>,
@@ -113,10 +151,10 @@ impl Extensions {
         }
     }
 
-    fn supervisor(&self, kind: ExtensionKind) -> &dyn ExtensionSupervisor {
+    fn supervisor(&self, kind: ExtensionKind) -> Supervisor<'_> {
         match kind {
-            ExtensionKind::Mcp => self.mcp.as_ref(),
-            ExtensionKind::Plugin => self.plugins.as_ref(),
+            ExtensionKind::Mcp => Supervisor::Mcp(self.mcp.as_ref()),
+            ExtensionKind::Plugin => Supervisor::Plugin(self.plugins.as_ref()),
         }
     }
 
@@ -265,7 +303,7 @@ impl Extensions {
     ///   literal;
     /// * `window` is what is left of the daemon's force-exit watchdog
     ///   (`main.rs`: `process::exit` after `FORCE_EXIT_GRACE`), which is the
-    ///   only bound the whole shutdown has, minus what the connector and wake
+    ///   only bound the shutdown tail has, minus what the connector and wake
     ///   shutdowns after the sweep need.
     ///
     /// It is one deadline across **both** supervisors, not one each: two
@@ -310,5 +348,80 @@ impl Extensions {
                 );
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::sync::Arc;
+
+    use openalpaca_core::agent::AgentRegistry;
+    use openalpaca_core::bus::EventBus;
+    use openalpaca_core::daemon_config::DaemonConfig;
+    use openalpaca_core::orchestrator::skill_catalog::SkillCatalog;
+    use openalpaca_core::tools::ToolRegistry;
+    use openalpaca_core::tools::extensions::ExtensionKind;
+    use openalpaca_plugins::PluginManager;
+
+    use super::{Extensions, Supervisor};
+    use crate::managers::mcp::McpSupervisor;
+    use crate::test_util::HomeStoreGuard;
+
+    /// M55 (d): `supervisor(kind)` is the closed enum over the daemon's two
+    /// supervisors — the variant its kind names, borrowing the aggregator's
+    /// own supervisor (no copy, no box, no `dyn`).
+    #[tokio::test]
+    async fn each_kind_names_its_own_supervisor_variant() {
+        let home = tempfile::tempdir().expect("home store");
+        let _env = HomeStoreGuard::set(home.path());
+        let config_dir = tempfile::tempdir().expect("config dir");
+        let plugins_root = tempfile::tempdir().expect("plugins root");
+        let bus = EventBus::new(16);
+        let registry = Arc::new(ToolRegistry::with_event_bus(bus.clone()).expect("tool registry"));
+        let mcp = McpSupervisor::new(
+            config_dir.path().join("mcp.toml"),
+            Arc::clone(&registry),
+            Arc::new(arc_swap::ArcSwap::from_pointee(DaemonConfig::default())),
+            bus,
+            Some(Arc::new(SkillCatalog::new())),
+            Some(Arc::new(AgentRegistry::new())),
+            "owner:gui",
+        );
+        let plugins = Arc::new(PluginManager::new(
+            plugins_root.path().to_path_buf(),
+            Arc::clone(&registry),
+            None,
+            None,
+        ));
+        let extensions = Extensions::new(
+            Arc::clone(&mcp),
+            Arc::clone(&plugins),
+            Arc::new(arc_swap::ArcSwap::from_pointee(DaemonConfig::default())),
+        );
+
+        match extensions.supervisor(ExtensionKind::Mcp) {
+            Supervisor::Mcp(s) => assert!(std::ptr::eq(s, mcp.as_ref())),
+            Supervisor::Plugin(_) => panic!("kind mcp reached the plugin supervisor"),
+        }
+        match extensions.supervisor(ExtensionKind::Plugin) {
+            Supervisor::Plugin(s) => assert!(std::ptr::eq(s, plugins.as_ref())),
+            Supervisor::Mcp(_) => panic!("kind plugin reached the MCP supervisor"),
+        }
+    }
+
+    /// N-PLUG-5: an `mcp_compatible` plugin's `initialize` offers the version
+    /// and names the client as the daemon's MCP connections do. The plugins
+    /// crate does not depend on `openalpaca_mcp`, so its two constants are held
+    /// to that crate's here, where both are in reach.
+    #[test]
+    fn an_mcp_compatible_plugin_is_opened_as_the_mcp_client_opens_a_server() {
+        assert_eq!(
+            openalpaca_plugins::process_pool::MCP_INITIALIZE_VERSION,
+            openalpaca_mcp::ProtocolVersion::LATEST_WITH_INITIALIZE.as_str()
+        );
+        assert_eq!(
+            openalpaca_plugins::process_pool::MCP_CLIENT_NAME,
+            openalpaca_mcp::McpClientConfig::default().client_info.name
+        );
     }
 }

@@ -3,6 +3,8 @@ import "@testing-library/jest-dom/vitest";
 import { cleanup } from "@testing-library/react";
 import { afterEach, beforeEach } from "vitest";
 
+import { fixtureHost } from "./src/lib/host/fixture";
+
 /**
  * The window every test renders into, unless it says otherwise (T2).
  *
@@ -23,4 +25,14 @@ beforeEach(() => {
 
 afterEach(() => {
   cleanup();
+});
+
+/**
+ * The host every test runs on is FixtureHost (`src/lib/host/`, Q07): the
+ * choice gives it under vitest. Before each test it is back at its start,
+ * unanswered — every shell command refused as with no Tauri bridge — so a
+ * test that needs a connection answers it itself.
+ */
+beforeEach(() => {
+  fixtureHost?.reset();
 });

@@ -18,7 +18,6 @@ fn test_request_serialization() {
         enable_caching: false,
         thinking: None,
         context_management: None,
-        ephemeral_system_notice: None,
     };
 
     let body = provider.build_request_body(&request);
@@ -32,6 +31,26 @@ fn test_request_serialization() {
     assert_eq!(messages.len(), 1); // system extracted, only user remains
     assert_eq!(messages[0]["role"], "user");
     assert_eq!(messages[0]["content"], "Hello");
+}
+
+/// OUTPUT-BUDGET (item 8): a request that names no `max_tokens` asks for
+/// 16,000 output tokens, the owner's figure ("budget can be 16000 or
+/// higher"), where it asked for 4096.
+#[test]
+fn a_request_naming_no_budget_asks_for_sixteen_thousand_tokens() {
+    let provider = AnthropicProvider::new("test-key".to_string(), None, None);
+    let request = ChatRequest {
+        messages: Arc::new(vec![ChatMessage::user("Hello")]),
+        tools: Arc::new(vec![]),
+        model: None,
+        temperature: None,
+        max_tokens: None,
+        tool_choice: None,
+        enable_caching: false,
+        thinking: None,
+        context_management: None,
+    };
+    assert_eq!(provider.build_request_body(&request)["max_tokens"], 16_000);
 }
 
 #[test]
@@ -188,7 +207,6 @@ fn test_request_serialization_filters_empty_text_parts() {
         enable_caching: false,
         thinking: None,
         context_management: None,
-        ephemeral_system_notice: None,
     };
 
     let body = provider.build_request_body(&request);
@@ -218,7 +236,6 @@ fn test_request_serialization_empty_parts_get_placeholder() {
         enable_caching: false,
         thinking: None,
         context_management: None,
-        ephemeral_system_notice: None,
     };
 
     let body = provider.build_request_body(&request);
@@ -267,7 +284,6 @@ fn test_tool_with_strict_and_examples() {
         enable_caching: false,
         thinking: None,
         context_management: None,
-        ephemeral_system_notice: None,
     };
     let body = provider.build_request_body(&request);
     let tools = body["tools"].as_array().unwrap();
@@ -295,7 +311,6 @@ fn test_tool_without_strict_no_extra_fields() {
         enable_caching: false,
         thinking: None,
         context_management: None,
-        ephemeral_system_notice: None,
     };
     let body = provider.build_request_body(&request);
     let tools = body["tools"].as_array().unwrap();
@@ -319,7 +334,6 @@ fn test_system_prompt_caching_enabled() {
         enable_caching: true,
         thinking: None,
         context_management: None,
-        ephemeral_system_notice: None,
     };
     let body = provider.build_request_body(&request);
     // System should be array with cache_control
@@ -343,7 +357,6 @@ fn test_system_prompt_caching_disabled() {
         enable_caching: false,
         thinking: None,
         context_management: None,
-        ephemeral_system_notice: None,
     };
     let body = provider.build_request_body(&request);
     // System should be plain string
@@ -378,7 +391,6 @@ fn test_tool_caching_breakpoint() {
         enable_caching: true,
         thinking: None,
         context_management: None,
-        ephemeral_system_notice: None,
     };
     let body = provider.build_request_body(&request);
     let tools = body["tools"].as_array().unwrap();
@@ -403,7 +415,6 @@ fn test_caching_with_empty_tools() {
         enable_caching: true,
         thinking: None,
         context_management: None,
-        ephemeral_system_notice: None,
     };
     let body = provider.build_request_body(&request);
     // System should still have cache_control
@@ -426,7 +437,6 @@ fn test_thinking_enabled_serialization() {
         enable_caching: false,
         thinking: Some(ThinkingConfig::Enabled { budget_tokens: 2048 }),
         context_management: None,
-        ephemeral_system_notice: None,
     };
     let body = provider.build_request_body(&request);
     assert_eq!(body["thinking"]["type"], "enabled");
@@ -448,7 +458,6 @@ fn test_thinking_disabled_keeps_temperature() {
         enable_caching: false,
         thinking: Some(ThinkingConfig::Disabled),
         context_management: None,
-        ephemeral_system_notice: None,
     };
     let body = provider.build_request_body(&request);
     assert_eq!(body["thinking"]["type"], "disabled");
@@ -503,14 +512,28 @@ fn test_thinking_adaptive_serialization() {
         max_tokens: None,
         tool_choice: None,
         enable_caching: false,
-        thinking: Some(ThinkingConfig::Adaptive),
+        thinking: Some(ThinkingConfig::Adaptive {
+            display: ThinkingDisplay::ModelDefault,
+        }),
         context_management: None,
-        ephemeral_system_notice: None,
     };
     let body = provider.build_request_body(&request);
-    assert_eq!(body["thinking"]["type"], "adaptive");
+    assert_eq!(body["thinking"], serde_json::json!({"type": "adaptive"}));
     // Temperature must be removed for adaptive thinking too
     assert!(body.get("temperature").is_none());
+
+    // A row whose model omits its thinking by default is asked for the
+    // summary (ANTHROPIC-THINKING).
+    let summarized = ChatRequest {
+        thinking: Some(ThinkingConfig::Adaptive {
+            display: ThinkingDisplay::Summarized,
+        }),
+        ..request
+    };
+    assert_eq!(
+        provider.build_request_body(&summarized)["thinking"],
+        serde_json::json!({"type": "adaptive", "display": "summarized"})
+    );
 }
 
 #[test]
@@ -681,12 +704,12 @@ async fn test_anthropic_sse_parser_thinking_event() {
 
 #[test]
 fn test_build_request_body_with_context_management() {
-    use crate::context_management::{ContextEdit, ContextManagement};
+    use crate::context_management::{ContextEdit, ContextManagement, ThinkingKept};
 
     let request = ChatRequest {
         messages: Arc::new(vec![ChatMessage::user("hello")]),
         tools: Arc::new(vec![]),
-        model: Some("claude-sonnet-4-20250514".to_string()),
+        model: Some("claude-sonnet-4-6".to_string()),
         temperature: None,
         max_tokens: None,
         tool_choice: None,
@@ -695,7 +718,7 @@ fn test_build_request_body_with_context_management() {
         context_management: Some(ContextManagement {
             edits: vec![
                 ContextEdit::ClearThinking {
-                    keep_thinking_turns: 2,
+                    keep: ThinkingKept::All,
                 },
                 ContextEdit::ClearToolUses {
                     trigger_tokens: 100_000,
@@ -703,14 +726,14 @@ fn test_build_request_body_with_context_management() {
                 },
             ],
         }),
-        ephemeral_system_notice: None,
     };
 
-    let body = request::build_request_body("claude-sonnet-4-20250514", 4096, &request);
+    let body = request::build_request_body("claude-sonnet-4-6", 4096, &request);
     assert!(body.get("context_management").is_some());
     let edits = body["context_management"]["edits"].as_array().unwrap();
     assert_eq!(edits.len(), 2);
     assert_eq!(edits[0]["type"], "clear_thinking_20251015");
+    assert_eq!(edits[0]["keep"], "all");
     assert_eq!(edits[1]["type"], "clear_tool_uses_20250919");
 }
 
@@ -726,10 +749,9 @@ fn test_build_request_body_without_context_management() {
         enable_caching: false,
         thinking: None,
         context_management: None,
-        ephemeral_system_notice: None,
     };
 
-    let body = request::build_request_body("claude-sonnet-4-20250514", 4096, &request);
+    let body = request::build_request_body("claude-sonnet-4-6", 4096, &request);
     assert!(body.get("context_management").is_none());
 }
 
@@ -750,7 +772,6 @@ fn test_anthropic_last_message_has_cache_control_when_caching_enabled() {
         enable_caching: true,
         thinking: None,
         context_management: None,
-        ephemeral_system_notice: None,
     };
 
     let body = request::build_request_body("claude-test", 1024, &request);
@@ -780,7 +801,6 @@ fn test_anthropic_no_cache_control_when_caching_disabled() {
         enable_caching: false,
         thinking: None,
         context_management: None,
-        ephemeral_system_notice: None,
     };
 
     let body = request::build_request_body("claude-test", 1024, &request);
@@ -793,125 +813,283 @@ fn test_anthropic_no_cache_control_when_caching_disabled() {
     );
 }
 
-#[test]
-fn test_anthropic_ephemeral_notice_placement() {
-    use crate::types::{ChatMessage, ChatRequest};
-    use std::sync::Arc;
+// ── ANTHROPIC-THINKING: the budget notice is the last message ─────────────
+//
+// Anthropic's pages, read 2026-11-14: "Put every update in a new message at
+// the end" and keep `system` the same on every request (.../build-with-claude/
+// preserved-thinking/prefix-checks); an updated value goes "in its own text
+// block of the user message you're about to send, after any tool results"
+// (.../preserved-thinking/change-tools-or-instructions); "Consecutive `user`
+// or `assistant` turns in your request will be combined into a single turn"
+// (.../api/messages).
 
-    let request = ChatRequest {
-        messages: Arc::new(vec![
-            ChatMessage::system("cached system"),
-            ChatMessage::user("hello"),
-        ]),
+/// A request in a tool loop: a system prompt, a tool call and its result,
+/// then, with `notice`, the budget notice the loop sends last and keeps
+/// (`ChatMessage::notice`, BUDGET-NOTICE-KEPT).
+fn notice_request(enable_caching: bool, notice: Option<&str>) -> ChatRequest {
+    let mut messages = vec![
+        ChatMessage::system("plain system"),
+        ChatMessage::user("hello"),
+        ChatMessage {
+            tool_calls: Some(vec![crate::types::ToolCall {
+                id: "tc_1".to_string(),
+                name: "search".to_string(),
+                arguments: serde_json::json!({"q": "x"}),
+            }]),
+            ..ChatMessage::assistant("")
+        },
+        ChatMessage::tool_result("tc_1", "found"),
+    ];
+    messages.extend(notice.map(ChatMessage::notice));
+    ChatRequest {
+        messages: Arc::new(messages),
         tools: Arc::new(vec![]),
         model: None,
         temperature: None,
         max_tokens: None,
         tool_choice: None,
-        enable_caching: true,
+        enable_caching,
         thinking: None,
         context_management: None,
-        ephemeral_system_notice: Some("[budget_notice]\n80% used\n[/budget_notice]".to_string()),
-    };
+    }
+}
 
-    let body = super::request::build_request_body("claude-test", 1024, &request);
-    let system = body["system"].as_array().expect("system must be an array when caching+notice");
-    assert_eq!(system.len(), 2, "expected cached block + notice block");
+/// The notice goes as the request's last message, a user text block after
+/// the tool result, and `system` is what it is without one.
+#[test]
+fn the_budget_notice_is_the_last_message_and_not_in_system() {
+    let with = request::build_request_body(
+        "claude-test",
+        1024,
+        &notice_request(false, Some("[notice]")),
+    );
+    let without = request::build_request_body("claude-test", 1024, &notice_request(false, None));
 
-    let cached = &system[0];
-    assert_eq!(cached["text"], "cached system");
-    assert_eq!(cached["cache_control"]["type"], "ephemeral");
+    assert_eq!(with["system"], "plain system", "{with}");
+    assert_eq!(with["system"], without["system"]);
+    let messages = with["messages"].as_array().unwrap();
+    let sent_without = without["messages"].as_array().unwrap();
+    assert_eq!(messages.len(), sent_without.len() + 1);
+    assert_eq!(&messages[..sent_without.len()], &sent_without[..]);
+    assert_eq!(
+        messages.last().unwrap(),
+        &serde_json::json!({
+            "role": "user",
+            "content": [{"type": "text", "text": "[notice]"}],
+        })
+    );
+    assert!(!with["system"].to_string().contains("[notice]"));
+}
 
-    let notice = &system[1];
-    assert!(notice["text"].as_str().unwrap().contains("budget_notice"));
+/// With caching on, the cached prefix is the request's without the notice:
+/// the system block and the tool result carry `cache_control`, the notice
+/// after them none.
+#[test]
+fn the_budget_notice_follows_the_cached_tail_and_carries_no_cache_control() {
+    let with = request::build_request_body(
+        "claude-test",
+        1024,
+        &notice_request(true, Some("[budget_notice]\n80% used\n[/budget_notice]")),
+    );
+    let without = request::build_request_body("claude-test", 1024, &notice_request(true, None));
+
+    assert_eq!(with["system"], without["system"]);
+    assert_eq!(
+        with["system"],
+        serde_json::json!([{
+            "type": "text",
+            "text": "plain system",
+            "cache_control": {"type": "ephemeral"},
+        }])
+    );
+    let messages = with["messages"].as_array().unwrap();
+    let sent_without = without["messages"].as_array().unwrap();
+    assert_eq!(&messages[..sent_without.len()], &sent_without[..]);
+    assert_eq!(
+        messages[messages.len() - 2]["content"][0]["cache_control"]["type"],
+        "ephemeral",
+        "the tool result keeps the tail breakpoint"
+    );
+    let notice = messages.last().unwrap();
+    assert_eq!(notice["role"], "user");
     assert!(
-        notice.get("cache_control").is_none(),
-        "notice block must NOT carry cache_control"
+        !notice.to_string().contains("cache_control"),
+        "the notice carries no cache_control: {notice}"
     );
 }
 
-#[test]
-fn test_anthropic_ephemeral_notice_placement_caching_off() {
-    use crate::types::{ChatMessage, ChatRequest};
-    use std::sync::Arc;
+// ── BUDGET-NOTICE-KEPT: a kept notice goes in its place ─────────────────
 
-    let request = ChatRequest {
-        messages: Arc::new(vec![
-            ChatMessage::system("plain system"),
-            ChatMessage::user("hello"),
-        ]),
-        tools: Arc::new(vec![]),
-        model: None,
-        temperature: None,
-        max_tokens: None,
-        tool_choice: None,
-        enable_caching: false,
-        thinking: None,
-        context_management: None,
-        ephemeral_system_notice: Some("[notice]".to_string()),
-    };
-
-    let body = super::request::build_request_body("claude-test", 1024, &request);
-    let system = body["system"].as_array().expect("system must be an array when notice present");
-    assert_eq!(system.len(), 2);
-    assert_eq!(system[0]["text"], "plain system");
-    assert!(system[0].get("cache_control").is_none());
-    assert_eq!(system[1]["text"], "[notice]");
-    assert!(system[1].get("cache_control").is_none());
+/// A thinking turn calling `search` as `id`, its blocks as Anthropic
+/// returned them.
+fn kept_thinking_turn(id: &str) -> ChatMessage {
+    let blocks = vec![
+        serde_json::json!({"type": "thinking", "thinking": "plan", "signature": format!("sig-{id}")}),
+        serde_json::json!({"type": "tool_use", "id": id, "name": "search", "input": {"q": "x"}}),
+    ];
+    ChatMessage {
+        tool_calls: Some(vec![crate::types::ToolCall {
+            id: id.to_string(),
+            name: "search".to_string(),
+            arguments: serde_json::json!({"q": "x"}),
+        }]),
+        echo: crate::types::EchoedTurn::from_blocks(blocks),
+        ..ChatMessage::assistant("")
+    }
 }
 
-#[test]
-fn test_anthropic_ephemeral_notice_placement_empty_system() {
-    use crate::types::{ChatMessage, ChatRequest};
-    use std::sync::Arc;
-
-    let request = ChatRequest {
-        messages: Arc::new(vec![ChatMessage::user("hello")]),
-        tools: Arc::new(vec![]),
-        model: None,
-        temperature: None,
-        max_tokens: None,
-        tool_choice: None,
-        enable_caching: false,
-        thinking: None,
-        context_management: None,
-        ephemeral_system_notice: Some("[notice-only]".to_string()),
+/// Round N's request, ending with the notice it sends, and round N+1's: N's
+/// list, the turn produced under the notice and its result, then N+1's own
+/// notice — as the loop keeps them (`ChatMessage::notice`).
+fn kept_notice_rounds(enable_caching: bool) -> (ChatRequest, ChatRequest) {
+    let mut first = notice_request(enable_caching, None);
+    let mut list = first.messages.to_vec();
+    list.push(ChatMessage::notice(
+        "[budget_notice]\n80% used\n[/budget_notice]",
+    ));
+    first.messages = Arc::new(list.clone());
+    list.push(kept_thinking_turn("tc_2"));
+    list.push(ChatMessage::tool_result("tc_2", "found again"));
+    list.push(ChatMessage::notice(
+        "[budget_notice]\n90% used\n[/budget_notice]",
+    ));
+    let second = ChatRequest {
+        messages: Arc::new(list),
+        ..notice_request(enable_caching, None)
     };
-
-    let body = super::request::build_request_body("claude-test", 1024, &request);
-    let system = body["system"].as_array().expect("notice-only should be a single-element array");
-    assert_eq!(system.len(), 1);
-    assert_eq!(system[0]["text"], "[notice-only]");
-    assert!(system[0].get("cache_control").is_none());
+    (first, second)
 }
 
+/// A kept notice goes where it was sent, a user text block of its own,
+/// never into `system`; the request that sent it is a prefix of the next,
+/// and the turn produced under it goes back with its thinking.
 #[test]
-fn test_anthropic_ephemeral_notice_placement_empty_system_with_caching() {
-    use crate::types::{ChatMessage, ChatRequest};
-    use std::sync::Arc;
+fn a_kept_notice_goes_in_its_place_and_the_turn_after_keeps_its_thinking() {
+    let (first, second) = kept_notice_rounds(false);
+    let before = request::build_request_body("claude-test", 1024, &first);
+    let after = request::build_request_body("claude-test", 1024, &second);
+    let plain = request::build_request_body("claude-test", 1024, &notice_request(false, None));
 
-    let request = ChatRequest {
-        messages: Arc::new(vec![ChatMessage::user("hello")]),
-        tools: Arc::new(vec![]),
-        model: None,
-        temperature: None,
-        max_tokens: None,
-        tool_choice: None,
-        enable_caching: true,  // <-- the previously-broken case
-        thinking: None,
-        context_management: None,
-        ephemeral_system_notice: Some("[budget_notice]\n80% used\n[/budget_notice]".to_string()),
-    };
-
-    let body = super::request::build_request_body("claude-test", 1024, &request);
-    let system = body["system"].as_array().expect("system should be array when notice present");
-    assert_eq!(system.len(), 1, "empty system + notice => single-element array");
-    let only_block = &system[0];
-    assert!(only_block["text"].as_str().unwrap().contains("budget_notice"));
-    assert!(
-        only_block.get("cache_control").is_none(),
-        "notice-only system must NOT carry cache_control even when caching=true"
+    assert_eq!(before["system"], "plain system", "{before}");
+    assert_eq!(after["system"], before["system"]);
+    let sent = before["messages"].as_array().unwrap();
+    let next = after["messages"].as_array().unwrap();
+    assert_eq!(&next[..sent.len()], &sent[..], "round N is a prefix of N+1");
+    assert_eq!(
+        sent.last().unwrap(),
+        &serde_json::json!({
+            "role": "user",
+            "content": [{"type": "text", "text": "[budget_notice]\n80% used\n[/budget_notice]"}],
+        }),
+        "the notice, a user text block of its own"
     );
+    assert_eq!(
+        &sent[..sent.len() - 1],
+        plain["messages"].as_array().unwrap().as_slice()
+    );
+    assert_eq!(next[sent.len()]["role"], "assistant");
+    assert_eq!(next[sent.len()]["content"][0]["type"], "thinking");
+    assert_eq!(next[sent.len()]["content"][0]["signature"], "sig-tc_2");
+    assert_eq!(next.len(), sent.len() + 3);
+    assert_eq!(
+        next.last().unwrap()["content"][0]["text"],
+        "[budget_notice]\n90% used\n[/budget_notice]"
+    );
+}
+
+/// With caching on no breakpoint goes on a kept notice: the last message
+/// before the newest notice carries it, and the older notice, inside the
+/// cached prefix now, carries none.
+#[test]
+fn a_kept_notice_carries_no_cache_control() {
+    let (first, second) = kept_notice_rounds(true);
+    let before = request::build_request_body("claude-test", 1024, &first);
+    assert_eq!(
+        serde_json::to_string(&before).unwrap(),
+        GOLDEN_WITH_NOTICE,
+        "the bytes the removed per-request notice sent"
+    );
+
+    let after = request::build_request_body("claude-test", 1024, &second);
+    let next = after["messages"].as_array().unwrap();
+    let marked: Vec<usize> = (0..next.len())
+        .filter(|&i| next[i].to_string().contains("cache_control"))
+        .collect();
+    assert_eq!(
+        marked,
+        vec![next.len() - 2],
+        "the tool result before the notice: {after}"
+    );
+}
+
+/// Round N's body with caching on, as the per-request notice
+/// (a `ChatRequest` field of its own until NOTICE-FIELD-GONE removed it)
+/// sent it: captured at `3e2cf550` from
+/// `notice_request(true, Some("[budget_notice]\n80% used\n[/budget_notice]"))`
+/// built through that field. The kept notice sends the same bytes.
+const GOLDEN_WITH_NOTICE: &str = r#"{"max_tokens":1024,"messages":[{"content":"hello","role":"user"},{"content":[{"id":"tc_1","input":{"q":"x"},"name":"search","type":"tool_use"}],"role":"assistant"},{"content":[{"cache_control":{"type":"ephemeral"},"content":"found","tool_use_id":"tc_1","type":"tool_result"}],"role":"user"},{"content":[{"text":"[budget_notice]\n80% used\n[/budget_notice]","type":"text"}],"role":"user"}],"model":"claude-test","system":[{"cache_control":{"type":"ephemeral"},"text":"plain system","type":"text"}]}"#;
+
+/// With no system prompt, a notice adds none: it is the last message.
+#[test]
+fn a_notice_with_no_system_prompt_sends_no_system() {
+    for caching in [false, true] {
+        let request = ChatRequest {
+            messages: Arc::new(vec![
+                ChatMessage::user("hello"),
+                ChatMessage::notice("[notice-only]"),
+            ]),
+            ..notice_request(caching, None)
+        };
+        let body = request::build_request_body("claude-test", 1024, &request);
+        assert!(body.get("system").is_none(), "caching {caching}: {body}");
+        let messages = body["messages"].as_array().unwrap();
+        assert_eq!(messages.len(), 2);
+        assert_eq!(
+            messages[1],
+            serde_json::json!({
+                "role": "user",
+                "content": [{"type": "text", "text": "[notice-only]"}],
+            })
+        );
+    }
+}
+
+/// A request without the notice is sent byte for byte as before
+/// (characterization: the parent's body, captured at `df260848`).
+#[test]
+fn a_request_without_the_notice_is_sent_byte_for_byte_as_before() {
+    let request = ChatRequest {
+        temperature: Some(0.5),
+        tools: Arc::new(vec![crate::types::ToolDefinition {
+            name: "search".to_string(),
+            description: "Search.".to_string(),
+            parameters: serde_json::json!({"type": "object"}),
+            ..Default::default()
+        }]),
+        ..notice_request(true, None)
+    };
+    let body = request::build_request_body("claude-test", 1024, &request);
+    assert_eq!(serde_json::to_string(&body).unwrap(), GOLDEN_NO_NOTICE);
+}
+
+const GOLDEN_NO_NOTICE: &str = r#"{"max_tokens":1024,"messages":[{"content":"hello","role":"user"},{"content":[{"id":"tc_1","input":{"q":"x"},"name":"search","type":"tool_use"}],"role":"assistant"},{"content":[{"cache_control":{"type":"ephemeral"},"content":"found","tool_use_id":"tc_1","type":"tool_result"}],"role":"user"}],"model":"claude-test","system":[{"cache_control":{"type":"ephemeral"},"text":"plain system","type":"text"}],"temperature":0.5,"tools":[{"cache_control":{"type":"ephemeral"},"description":"Search.","input_schema":{"type":"object"},"name":"search"}]}"#;
+
+/// The loop's `context_management` is sent under the context-editing page's
+/// beta header, `context-management-2025-06-27` (.../build-with-claude/
+/// context-editing, read 2026-11-14); a request without it sends none.
+#[test]
+fn the_context_management_beta_header_is_the_pages() {
+    use crate::context_management::{ContextEdit, ContextManagement};
+
+    let mut request = notice_request(false, None);
+    assert_eq!(build_beta_header(&request), "");
+    request.context_management = Some(ContextManagement {
+        edits: vec![ContextEdit::ClearToolUses {
+            trigger_tokens: 100_000,
+            keep_tool_uses: 5,
+        }],
+    });
+    assert_eq!(build_beta_header(&request), "context-management-2025-06-27");
 }
 
 /// The conversation a round with two tool calls leaves: one call answered,
@@ -962,7 +1140,6 @@ fn a_failed_tool_result_carries_is_error_and_a_successful_one_is_unchanged() {
         enable_caching: false,
         thinking: None,
         context_management: None,
-        ephemeral_system_notice: None,
     };
 
     let body = provider.build_request_body(&request);
@@ -987,5 +1164,94 @@ fn a_failed_tool_result_carries_is_error_and_a_successful_one_is_unchanged() {
             }],
         }),
         "a failed result says so in Anthropic's own field"
+    );
+}
+
+// ── CACHE-MULT: Anthropic's cache reads at the row's rate ───────────────
+
+/// Claude Opus 5.5's row (the pricing page, read 2026-11-14): $4 input,
+/// "5m cache writes" $5, "Cache hits and refreshes" $0.20 ("0.05x the base
+/// input price"), $20 output. 1,000 uncached, 7,000 written and 4,000 read
+/// input tokens and 1,000 output: $0.004 + $0.035 + $0.0008 + $0.02.
+const OPUS_5_5_COST: f64 = 0.004 + 0.035 + 0.0008 + 0.02;
+
+fn priced(model: &str, usage: &Usage) -> f64 {
+    crate::routing::CostTracker::new(crate::routing::ModelRegistry::with_defaults())
+        .calculate_cost_with_cache(
+            model,
+            usage.input_tokens,
+            usage.output_tokens,
+            usage.cache_creation_input_tokens,
+            usage.cache_read_input_tokens,
+        )
+}
+
+/// CACHE-MULT: a whole answer's cache reads and writes are priced at the
+/// row's rates. Red on the parent, which read at 0.1x ($0.40 a million).
+#[test]
+fn a_whole_answers_cache_reads_and_writes_are_priced_by_the_row() {
+    let provider = AnthropicProvider::new("test-key".to_string(), None, None);
+    let response = provider
+        .parse_response(serde_json::json!({
+            "id": "msg_cache_priced",
+            "type": "message",
+            "role": "assistant",
+            "model": "claude-opus-5-5",
+            "content": [{"type": "text", "text": "Hi."}],
+            "stop_reason": "end_turn",
+            "usage": {
+                "input_tokens": 1000,
+                "output_tokens": 1000,
+                "cache_creation_input_tokens": 7000,
+                "cache_read_input_tokens": 4000
+            }
+        }))
+        .unwrap();
+    let cost = priced("claude-opus-5-5", &response.usage);
+    assert!((cost - OPUS_5_5_COST).abs() < 1e-12, "cost={cost}");
+}
+
+/// The same on the stream: `message_start`'s usage carries the cache
+/// counts, `message_delta`'s the output. Red on the parent.
+#[tokio::test]
+async fn a_streamed_answers_cache_reads_and_writes_are_priced_by_the_row() {
+    let raw = concat!(
+        "event: message_start\n",
+        "data: {\"type\":\"message_start\",\"message\":{\"usage\":{\"input_tokens\":1000,\"cache_creation_input_tokens\":7000,\"cache_read_input_tokens\":4000}}}\n",
+        "\n",
+        "event: content_block_delta\n",
+        "data: {\"type\":\"content_block_delta\",\"index\":0,\"delta\":{\"type\":\"text_delta\",\"text\":\"Hi.\"}}\n",
+        "\n",
+        "event: message_delta\n",
+        "data: {\"type\":\"message_delta\",\"delta\":{\"stop_reason\":\"end_turn\"},\"usage\":{\"output_tokens\":1000}}\n",
+        "\n",
+        "event: message_stop\n",
+        "data: {\"type\":\"message_stop\"}\n",
+        "\n",
+    );
+    let byte_stream = futures_util::stream::iter(vec![Ok(bytes::Bytes::from(raw))]);
+    let response = crate::streaming::collect_stream(
+        Box::pin(parse_anthropic_sse(byte_stream)),
+        "claude-opus-5-5".to_string(),
+    )
+    .await
+    .expect("the stream collects");
+    assert_eq!(response.usage.input_tokens, 12_000);
+    assert_eq!(response.usage.cache_creation_input_tokens, 7_000);
+    assert_eq!(response.usage.cache_read_input_tokens, 4_000);
+    let cost = priced("claude-opus-5-5", &response.usage);
+    assert!((cost - OPUS_5_5_COST).abs() < 1e-12, "cost={cost}");
+}
+
+/// MODELS-LATEST (the design's §4.9.5): the arm's model for a request that
+/// names none is a compiled row, `claude-sonnet-5-5`. Red on the parent's
+/// `claude-sonnet-4-6`, a retired row.
+#[test]
+fn the_arms_default_model_is_the_latest_sonnet() {
+    assert_eq!(DEFAULT_MODEL, "claude-sonnet-5-5");
+    assert!(
+        crate::routing::model_registry::ModelRegistry::with_defaults()
+            .get_model_info(DEFAULT_MODEL)
+            .is_some()
     );
 }

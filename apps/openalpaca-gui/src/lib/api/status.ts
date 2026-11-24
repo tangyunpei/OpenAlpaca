@@ -39,8 +39,9 @@ export interface ShutdownAccepted {
  * Ask the daemon to shut down gracefully.
  *
  * The `200 {"status":"shutting_down"}` means the daemon *accepted*: it still
- * has up to 10 s of shutdown to run. Nothing may report "stopped" on the
- * strength of it — `awaitDaemonStopped` (the shell) is what says it is gone.
+ * has up to 10 s of shutdown tail to run, then at most 1 s more. Nothing
+ * may report "stopped" on the strength of it — `awaitDaemonStopped` (the
+ * shell) is what says it is gone.
  * Any other `status` is treated as a refusal.
  */
 export async function requestDaemonShutdown(): Promise<ShutdownAccepted> {

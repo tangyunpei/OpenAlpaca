@@ -12,14 +12,19 @@ import {
 
 describe("pauseAction", () => {
   it("labels by status, per §3.19", () => {
-    expect(pauseAction("running").label).toBe("Pause");
-    expect(pauseAction("paused").label).toBe("Resume");
-    expect(pauseAction("queued").label).toBe("Start now");
+    expect(pauseAction("paused")?.label).toBe("Resume");
+    expect(pauseAction("queued")?.label).toBe("Start now");
   });
 
-  it("wires pause and resume to the real endpoint", () => {
-    expect(pauseAction("running").enabled).toBe(true);
-    expect(pauseAction("paused").enabled).toBe(true);
+  // PAUSE-OFF: the daemon refuses `pause` until a later design, so a running
+  // run is offered no Pause at all — not a disabled one.
+  it("offers no Pause on a running run", () => {
+    expect(pauseAction("running")).toBeNull();
+  });
+
+  it("wires resume to the real endpoint", () => {
+    expect(pauseAction("paused")?.id).toBe("resume");
+    expect(pauseAction("paused")?.enabled).toBe(true);
   });
 
   // GAP-06 closed: `POST /v1/tasks/{id}/action { action: "start" }` dispatches
@@ -27,9 +32,10 @@ describe("pauseAction", () => {
   // no gap or apologetic tooltip.
   it("keeps `Start now` enabled and unmarked — the dispatch exists now", () => {
     const action = pauseAction("queued");
-    expect(action.enabled).toBe(true);
-    expect(action.gap).toBeUndefined();
-    expect(action.title).toBeUndefined();
+    expect(action?.id).toBe("start");
+    expect(action?.enabled).toBe(true);
+    expect(action?.gap).toBeUndefined();
+    expect(action?.title).toBeUndefined();
   });
 });
 
@@ -37,14 +43,24 @@ describe("liveRunActions", () => {
   const actions = liveRunActions("running");
   const byId = new Map(actions.map((action) => [action.id, action]));
 
-  it("renders the design's five controls in order", () => {
+  it("renders the design's controls in order, Pause left out", () => {
     expect(actions.map((action) => action.id)).toEqual([
-      "pause",
       "steer",
       "queue",
       "jump",
       "cancel",
     ]);
+  });
+
+  // PAUSE-OFF: no pause descriptor on a running run; the slot's other two
+  // labels stay, `Resume` on a row an earlier build left paused.
+  it("holds no pause descriptor, and keeps Resume and Start now", () => {
+    expect(actions.some((action) => (action.id as string) === "pause")).toBe(
+      false,
+    );
+    expect(actions.map((action) => action.label)).not.toContain("Pause");
+    expect(liveRunActions("paused")[0]?.id).toBe("resume");
+    expect(liveRunActions("queued")[0]?.id).toBe("start");
   });
 
   it("keeps Cancel a real, enabled danger control", () => {
@@ -98,10 +114,9 @@ describe("liveRunActions", () => {
     expect(steer?.gap).toBeUndefined();
   });
 
-  it("leaves the other four controls alone when Steer is disabled", () => {
+  it("leaves the other three controls alone when Steer is disabled", () => {
     const actions = liveRunActions("running", "Run has finished.");
     expect(actions.map((action) => action.id)).toEqual([
-      "pause",
       "steer",
       "queue",
       "jump",
@@ -228,10 +243,7 @@ describe("actionToast", () => {
     }
   });
 
-  it("uses §4.4's copy for the three real verbs", () => {
-    expect(actionToast("pause", "Connector audit")).toBe(
-      "Connector audit paused",
-    );
+  it("uses §4.4's copy for the two real transitions", () => {
     expect(actionToast("resume", "Connector audit")).toBe(
       "Connector audit resumed",
     );

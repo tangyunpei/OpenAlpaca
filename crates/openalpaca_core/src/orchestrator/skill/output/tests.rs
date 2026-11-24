@@ -57,7 +57,7 @@ fn test_json_invalid() {
     let config = config_json();
     let result = validate_skill_output(output, &config);
     assert!(result.is_err());
-    assert!(matches!(result, Err(OutputValidationError::InvalidJson(_))));
+    std::assert_matches!(result, Err(OutputValidationError::InvalidJson(_)));
 }
 
 #[test]

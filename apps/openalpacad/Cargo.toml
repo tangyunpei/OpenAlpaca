@@ -28,13 +28,13 @@ tower-http = { workspace = true }
 openalpaca_core = { workspace = true }
 openalpaca_connectors = { workspace = true, features = ["telegram", "imessage", "discord"] }
 openalpaca_api = { workspace = true }
+openalpaca_app_support = { workspace = true }
 openalpaca_storage = { workspace = true }
 openalpaca_wake = { workspace = true }
 openalpaca_mcp = { path = "../../crates/openalpaca_mcp" }
 toml.workspace = true
 toml_edit.workspace = true
 rand.workspace = true
-async-trait.workspace = true
 openalpaca_plugins = { workspace = true }
 openalpaca_llm = { workspace = true, features = ["anthropic", "openai", "ollama"] }
 teloxide = { workspace = true }
@@ -46,7 +46,10 @@ pdf-extract.workspace = true
 zip.workspace = true
 calamine.workspace = true
 signal-hook.workspace = true
-opener.workspace = true
+# Q06: `reveal` for `POST /v1/files/{id}/reveal` (`opener::reveal`; on
+# macOS `open -R -- <path>`). On Linux the feature turns on zbus 5, already in
+# Cargo.lock: the lock gains only opener's edges.
+opener = { workspace = true, features = ["reveal"] }
 # The process's one rustls crypto provider, aws-lc-rs, installed at start
 # (`src/tls.rs`).
 rustls.workspace = true
@@ -56,6 +59,9 @@ tempfile.workspace = true
 # test-home-guard: store::projects::register refuses an unguarded home store in
 # this crate's test builds (storage design, Stage 1).
 openalpaca_storage = { workspace = true, features = ["test-home-guard"] }
+# test-endpoint-guard: a provider refuses Anthropic's and OpenAI's real hosts
+# in this crate's test builds (LLM-TEST-GUARD).
+openalpaca_llm = { workspace = true, features = ["test-endpoint-guard"] }
 # `McpClient::disconnected_for_tests` — a client shell for a `ToolBackend::Mcp`
 # with no live server, which the `GET /v1/tools` origin tests need.
 openalpaca_mcp = { path = "../../crates/openalpaca_mcp", features = ["test-utils"] }
@@ -65,6 +71,9 @@ tokio-tungstenite.workspace = true
 # `ServiceExt::oneshot` for the CORS test in `router.rs`. tower is already in
 # the lockfile (axum's), so no new external crate either.
 tower.workspace = true
+# test-util enables tokio::test(start_paused) for the discovery rotation's
+# tests (T21), as core's dev-dependency does; a feature, no new crate.
+tokio = { workspace = true, features = ["test-util"] }
 
 [target.'cfg(unix)'.dependencies]
 libc.workspace = true

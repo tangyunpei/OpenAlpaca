@@ -181,10 +181,15 @@ function textFor(record: EventLogRecord): string {
       if (label === null || state === null) return record.event_type;
       return `${label} · ${state}`;
     }
+    // A run the sandbox's clock cut carries the reason `timeout`
+    // (TIMEOUT-ONE-CLOCK) and says so; any other failure is `failed`.
     case "tool_executed": {
       const tool = toolName(detail);
       if (tool === null) return record.event_type;
-      return detail["success"] === false ? `${tool} · failed` : tool;
+      if (detail["success"] !== false) return tool;
+      return detail["reason"] === "timeout"
+        ? `${tool} · timed out`
+        : `${tool} · failed`;
     }
     case "tool_confirmation_requested": {
       const tool = toolName(detail);

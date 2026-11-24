@@ -4,7 +4,6 @@ use super::delivery::send_approval_with_retry;
 use crate::common::{KeyedRateLimiter, format_confirmation_prompt};
 use crate::{Connector, ConnectorError};
 use arc_swap::ArcSwap;
-use async_trait::async_trait;
 use dashmap::DashMap;
 use openalpaca_core::{
     bus::EventBus,
@@ -220,7 +219,6 @@ impl TelegramConnector {
     }
 }
 
-#[async_trait]
 impl Connector for TelegramConnector {
     fn name(&self) -> &str {
         "telegram"

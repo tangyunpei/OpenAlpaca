@@ -11,17 +11,23 @@
  *   * when it is *not* decorated (a custom-chrome build, or the browser dev
  *     server where there is no chrome at all), render them and make them work.
  *
+ * The window is the host's (`lib/host/`): the app's own in the Tauri shell;
+ * none in a plain browser or jsdom, where the buttons are drawn and do
+ * nothing.
+ *
  * The check starts as "unknown" and renders nothing, so the real app never
  * flashes a duplicate set on boot.
  */
 
-import { getCurrentWindow } from "@tauri-apps/api/window";
 import { useEffect, useState } from "react";
+
+import { host } from "@/lib/host";
 
 type WindowAction = "close" | "minimize" | "toggleMaximize";
 
 async function runWindowAction(action: WindowAction): Promise<void> {
-  const appWindow = getCurrentWindow();
+  const appWindow = host().window;
+  if (appWindow === null) return;
   if (action === "close") return appWindow.close();
   if (action === "minimize") return appWindow.minimize();
   return appWindow.toggleMaximize();
@@ -36,13 +42,12 @@ export function useNativeDecorations(): boolean | null {
     const settle = (value: boolean) => {
       if (alive) setDecorated(value);
     };
-    try {
-      void getCurrentWindow()
-        .isDecorated()
-        .then(settle, () => settle(false));
-    } catch {
-      // No Tauri bridge (browser dev server / jsdom): no native chrome.
+    const appWindow = host().window;
+    if (appWindow === null) {
+      // No native window (browser dev server / jsdom): no native chrome.
       settle(false);
+    } else {
+      void appWindow.isDecorated().then(settle, () => settle(false));
     }
     return () => {
       alive = false;

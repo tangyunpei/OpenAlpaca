@@ -11,7 +11,23 @@ use std::path::Path;
 use std::sync::Arc;
 use tracing::{info, warn};
 
-#[allow(clippy::too_many_arguments)]
+/// Runtime-injected tools not in the registry but still protected
+/// (e.g., spawn_subagent and its variants are provided by LeadAgentToolExecutor
+/// at runtime, not the global registry, but must still be protected from
+/// TOML name collisions). `submit_result` is a typed subagent's own tool,
+/// registered on its registry clone only (SA-4, Y-18 (1)).
+const RUNTIME_PROTECTED: [&str; 5] = [
+    "spawn_subagent",
+    "spawn_subagents_batch",
+    "check_subagent_status",
+    "wait_for_subagents",
+    "submit_result",
+];
+
+#[expect(
+    clippy::too_many_arguments,
+    reason = "the startup handles the builtin tools are built from"
+)]
 pub(super) async fn build_tool_registry(
     config_base_dir: &Path,
     db: &Database,
@@ -35,8 +51,14 @@ pub(super) async fn build_tool_registry(
     // the bus here, together with the `ExtensionCapabilityWithheld` variant it
     // exists to publish. The other 100 `new()`/`default()` sites are tests: a
     // ledger with no bus logs and returns.
-    let tool_registry = openalpaca_core::tools::ToolRegistry::with_event_bus(bus.clone())
+    let mut tool_registry = openalpaca_core::tools::ToolRegistry::with_event_bus(bus.clone())
         .map_err(|e| anyhow::anyhow!(e))?;
+    // M85: an MCP tool's images, audio and embedded blobs are kept as
+    // by-products in the store `artifact_write` writes, within its caps.
+    tool_registry.set_by_product_sink(openalpaca_core::tools::builtins::ByProductSink::new(
+        db.clone(),
+        Some(daemon_config.clone()),
+    ));
 
     // Register built-in tools (including update_persona)
     let persona_ctx = PersonaToolContext {
@@ -73,20 +95,9 @@ pub(super) async fn build_tool_registry(
         .into_iter()
         .collect();
 
-    // Runtime-injected tools not in the registry but still protected
-    // (e.g., spawn_subagent and its variants are provided by LeadAgentToolExecutor
-    // at runtime, not the global registry, but must still be protected from
-    // TOML name collisions).
-    let runtime_protected: std::collections::HashSet<&str> = [
-        "spawn_subagent",
-        "spawn_subagents_batch",
-        "check_subagent_status",
-        "wait_for_subagents",
-    ].into_iter().collect();
-
     for tool in openalpaca_core::tools::config::load_tools_from_dir(&tools_config_dir) {
         let name = tool.definition.name.clone();
-        if builtin_names.contains(name.as_str()) || runtime_protected.contains(name.as_str()) {
+        if builtin_names.contains(name.as_str()) || RUNTIME_PROTECTED.contains(&name.as_str()) {
             warn!(
                 "Custom tool '{}' would override a protected tool — skipping",
                 name
@@ -150,6 +161,22 @@ fn register_memory_read_tools(
 mod tests {
     use super::*;
     use crate::test_util::HomeStoreGuard;
+
+    /// SA-4 (Y-18 (1)): `submit_result` is a reserved name beside the four
+    /// coordination names, so no custom `config/tools/` tool of that name
+    /// loads.
+    #[test]
+    fn submit_result_is_a_reserved_name() {
+        for name in [
+            "spawn_subagent",
+            "spawn_subagents_batch",
+            "check_subagent_status",
+            "wait_for_subagents",
+            "submit_result",
+        ] {
+            assert!(RUNTIME_PROTECTED.contains(&name), "{name} is reserved");
+        }
+    }
 
     /// The daemon's registry offers the four read tools under `memory_read`,
     /// read-only, and none of the writers.

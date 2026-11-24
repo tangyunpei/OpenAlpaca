@@ -39,17 +39,16 @@ pub use task_status::{task_status_tool_definition, TaskStatusTool};
 
 use crate::daemon_config::DaemonConfig;
 use crate::orchestrator::task_state::{TaskState, WorkspaceEntryType};
-use crate::orchestrator::ConnectorSendProvider;
+use crate::orchestrator::DynConnectorSendProvider;
 use crate::tools::registry::{BuiltInTool, ToolContext};
 use arc_swap::ArcSwap;
-use async_trait::async_trait;
 use openalpaca_llm::{ToolDefinition, WebSearchConfig};
 use std::path::PathBuf;
 use std::sync::{Arc, RwLock};
 use tokio::process::Command;
 
 /// Shared lock type for the connector send provider, set post-construction.
-pub type ConnectorSendLock = Arc<RwLock<Option<Arc<dyn ConnectorSendProvider>>>>;
+pub type ConnectorSendLock = Arc<RwLock<Option<Arc<DynConnectorSendProvider<'static>>>>>;
 
 use self::artifact_write::artifact_write_tool;
 use self::artifact_read::artifact_read_tool;
@@ -75,6 +74,154 @@ pub(crate) fn is_project_turn(ctx: &ToolContext) -> bool {
     )
 }
 
+/// Where an MCP tool's images, audio and embedded blobs are kept (M85,
+/// DU-R6 (b)): the database and the daemon config `put_tool_artifact`
+/// takes. The daemon sets one on its registry at boot
+/// ([`ToolRegistry::set_by_product_sink`](crate::tools::ToolRegistry::set_by_product_sink));
+/// a registry with none keeps nothing and says so in the tool's result.
+#[derive(Clone)]
+pub struct ByProductSink {
+    db: openalpaca_storage::Database,
+    daemon_config: Option<Arc<ArcSwap<DaemonConfig>>>,
+}
+
+impl ByProductSink {
+    /// `daemon_config` supplies `[execution.artifacts]`'s caps; `None` takes
+    /// their defaults.
+    pub fn new(
+        db: openalpaca_storage::Database,
+        daemon_config: Option<Arc<ArcSwap<DaemonConfig>>>,
+    ) -> Self {
+        Self { db, daemon_config }
+    }
+}
+
+impl std::fmt::Debug for ByProductSink {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("ByProductSink").finish_non_exhaustive()
+    }
+}
+
+/// One block an MCP server returned as base64 bytes (M85): an image, an
+/// audio clip or an embedded resource's blob.
+pub(crate) struct ToolBlob<'a> {
+    /// The MCP tool's registry name, which the store's refusals name.
+    pub(crate) tool: &'a str,
+    /// What the block is, as its line names it: `image`, `audio` or
+    /// `embedded resource`.
+    pub(crate) what: &'a str,
+    /// The artifact's title, distinct for every block of every call, so two
+    /// blocks never become two versions of one artifact.
+    pub(crate) title: &'a str,
+    /// The block's data as the server sent it.
+    pub(crate) base64: &'a str,
+    /// The server's MIME string, untrusted: [`accepted_mime`] reads it.
+    pub(crate) mime_type: Option<&'a str>,
+}
+
+/// Keep one MCP block as a by-product of the turn's project, or of none
+/// (M85, ST-15: never asked), and return the line the tool's result carries
+/// in its place: the artifact's id, its absolute path, its MIME type and its
+/// size, or `nothing was saved: <why>`. Every failure is a line, never a
+/// failed call: no tool context, no sink, data that is not base64, bytes over
+/// `[execution.artifacts] max_artifact_bytes`, no owner, the store's own
+/// refusal. The bytes are stored as decoded, never image-decoded, transcoded
+/// or compressed; their kind is the store's rule for the MIME type
+/// (`ArtifactKind::for_mime`). `put_tool_artifact` announces the write.
+pub(crate) fn save_tool_by_product(
+    sink: Option<&ByProductSink>,
+    ctx: Option<&ToolContext>,
+    blob: ToolBlob<'_>,
+) -> String {
+    match keep_tool_blob(sink, ctx, &blob) {
+        Ok(record) => format!(
+            "[{} saved as artifact \"{}\" at {} ({}, {} bytes)]",
+            blob.what, record.id, record.storage_path, record.mime_type, record.size_bytes
+        ),
+        Err(why) => format!("[{}: nothing was saved: {why}]", blob.what),
+    }
+}
+
+fn keep_tool_blob(
+    sink: Option<&ByProductSink>,
+    ctx: Option<&ToolContext>,
+    blob: &ToolBlob<'_>,
+) -> Result<openalpaca_storage::ArtifactRecord, String> {
+    use base64::Engine as _;
+
+    let ctx = ctx.ok_or_else(|| {
+        "the call carries no tool context, so the bytes have no owner or store".to_string()
+    })?;
+    let sink =
+        sink.ok_or_else(|| "no artifact store is wired to this tool registry".to_string())?;
+    let cap = artifact_write::artifact_caps(sink.daemon_config.as_ref()).max_artifact_bytes;
+    let over = |size: String| {
+        format!(
+            "the {} is {size} bytes, over the {cap}-byte limit for one artifact \
+             ([execution.artifacts] max_artifact_bytes)",
+            blob.what
+        )
+    };
+
+    // A server that shells out to `base64` wraps its lines: ASCII whitespace
+    // is not data.
+    let data: Vec<u8> = blob
+        .base64
+        .bytes()
+        .filter(|b| !b.is_ascii_whitespace())
+        .collect();
+    // An upper bound, at most 2 over the real length: a cheap refusal before
+    // decoding anything far too large. The cap itself is decided below, on
+    // the decoded length.
+    let estimate = base64::decoded_len_estimate(data.len()) as u64;
+    if estimate > cap.saturating_add(2) {
+        return Err(over(format!("at least {}", estimate - 2)));
+    }
+    let bytes = base64::engine::general_purpose::STANDARD_PAD_INDIFFERENT
+        .decode(&data)
+        .map_err(|e| format!("the {}'s data is not valid base64 ({e})", blob.what))?;
+    if bytes.len() as u64 > cap {
+        return Err(over(bytes.len().to_string()));
+    }
+
+    let mime = blob.mime_type.and_then(accepted_mime);
+    let kind = openalpaca_storage::ArtifactKind::for_mime(
+        mime.as_deref().unwrap_or("application/octet-stream"),
+    );
+    artifact_write::put_tool_artifact(
+        &sink.db,
+        ctx,
+        &artifact_write::scope_from_context(ctx),
+        sink.daemon_config.as_ref(),
+        artifact_write::ToolArtifact {
+            tool: blob.tool,
+            name: blob.title,
+            kind,
+            content: &bytes,
+            mime_type: mime.as_deref(),
+            note: None,
+            summary: None,
+            metadata: None,
+        },
+    )
+}
+
+/// A server's MIME string, when it is one: `type/subtype`, each an RFC 9110
+/// token, lower-cased, its parameters dropped. Anything else is no MIME type
+/// at all (M85: the string comes from an outside server and names the file's
+/// extension and kind).
+fn accepted_mime(raw: &str) -> Option<String> {
+    let essence = raw.split(';').next()?.trim().to_ascii_lowercase();
+    let (kind, subtype) = essence.split_once('/')?;
+    let token = |part: &str| {
+        !part.is_empty()
+            && part
+                .bytes()
+                .all(|b| b.is_ascii_alphanumeric() || b"!#$%&'*+-.^_`|~".contains(&b))
+    };
+    (token(kind) && token(subtype)).then_some(essence)
+}
+
 /// Context required by the `update_persona` tool at runtime.
 /// Re-export from the update_persona module.
 pub use update_persona::PersonaToolContext;
@@ -90,7 +237,6 @@ struct WorkspaceReadTool {
     db: Option<openalpaca_storage::Database>,
 }
 
-#[async_trait]
 impl BuiltInTool for WorkspaceReadTool {
     async fn execute(&self, _arguments: &serde_json::Value) -> Result<String, String> {
         Err("workspace_read requires execution context — use execute_with_context".to_string())
@@ -164,7 +310,6 @@ struct WorkspaceWriteTool {
     daemon_config: Option<Arc<ArcSwap<DaemonConfig>>>,
 }
 
-#[async_trait]
 impl BuiltInTool for WorkspaceWriteTool {
     async fn execute(&self, _arguments: &serde_json::Value) -> Result<String, String> {
         Err("workspace_write requires execution context — use execute_with_context".to_string())
@@ -397,12 +542,12 @@ pub fn builtin_tools(
             vec!["workspace_write".to_string()]
         };
         let backend = if def.name == "workspace_read" {
-            ToolBackend::BuiltIn(Arc::new(WorkspaceReadTool { db: ws_db.clone() }))
+            ToolBackend::built_in(WorkspaceReadTool { db: ws_db.clone() })
         } else {
-            ToolBackend::BuiltIn(Arc::new(WorkspaceWriteTool {
+            ToolBackend::built_in(WorkspaceWriteTool {
                 db: ws_db.clone(),
                 daemon_config: tool_cfg.clone(),
-            }))
+            })
         };
         tools.push(RegisteredTool {
             annotations: annotations_for_builtin(&def.name),
@@ -518,19 +663,46 @@ pub fn workspace_tool_definitions() -> Vec<ToolDefinition> {
 // ScriptToolBuiltIn
 // ---------------------------------------------------------------------------
 
+/// The skills roots a skill script is told by name (subagent design §2.6
+/// K-5), from the catalog that resolved its skill
+/// (`SkillCatalog::skill_roots`): a script run from the built-in pack under
+/// `state/cache/bundled-skills/` cannot find the config directory by its own
+/// location, and the daemon, never the model, names where a skill is
+/// written.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct SkillRoots {
+    /// `<config>/skills`, where a script that writes skills writes —
+    /// `OPENALPACA_SKILLS_DIR`. None for a catalog that read no config
+    /// directory (a test's).
+    pub config: Option<PathBuf>,
+    /// The built-in skills' pack, where a script that lists skills finds
+    /// them — `OPENALPACA_BUNDLED_SKILLS_DIR`. None when no pack was written
+    /// (K-4).
+    pub bundled: Option<PathBuf>,
+}
+
+/// The variable naming the config directory's `skills/` to a skill script.
+pub const SKILLS_DIR_ENV: &str = "OPENALPACA_SKILLS_DIR";
+/// The variable naming the built-in skills' pack to a skill script.
+pub const BUNDLED_SKILLS_DIR_ENV: &str = "OPENALPACA_BUNDLED_SKILLS_DIR";
+
 /// A skill-bundled script tool wrapped as a BuiltInTool.
 pub struct ScriptToolBuiltIn {
     script_path: PathBuf,
     interpreter: Option<String>,
     timeout_secs: u64,
     skill_dir: PathBuf,
+    roots: SkillRoots,
 }
 
 impl ScriptToolBuiltIn {
-    /// Create with path-traversal validation.
+    /// Create with path-traversal validation. `roots` reach the script as
+    /// [`SKILLS_DIR_ENV`] and [`BUNDLED_SKILLS_DIR_ENV`], each set only when
+    /// known.
     pub fn new(
         skill_dir: &std::path::Path,
         cfg: &crate::middleware::skill::ScriptConfig,
+        roots: SkillRoots,
     ) -> Result<Self, String> {
         let script_path = skill_dir.join("scripts").join(&cfg.file);
         let canonical = script_path.canonicalize().map_err(|e| {
@@ -550,6 +722,7 @@ impl ScriptToolBuiltIn {
             interpreter: cfg.interpreter.clone(),
             timeout_secs: cfg.timeout_secs,
             skill_dir: skill_dir.to_path_buf(),
+            roots,
         })
     }
 
@@ -569,7 +742,6 @@ impl ScriptToolBuiltIn {
     }
 }
 
-#[async_trait]
 impl BuiltInTool for ScriptToolBuiltIn {
     async fn execute(&self, arguments: &serde_json::Value) -> Result<String, String> {
         let args = json_to_cli_args(arguments);
@@ -582,6 +754,18 @@ impl BuiltInTool for ScriptToolBuiltIn {
         };
         cmd.args(&args);
         cmd.current_dir(&self.skill_dir);
+        // K-5: where skills are written, and where the built-in ones are.
+        // Never inherited from the daemon's own environment: a root not
+        // known here is removed, so the script's own fallback applies.
+        for (name, root) in [
+            (SKILLS_DIR_ENV, &self.roots.config),
+            (BUNDLED_SKILLS_DIR_ENV, &self.roots.bundled),
+        ] {
+            match root {
+                Some(root) => cmd.env(name, root),
+                None => cmd.env_remove(name),
+            };
+        }
 
         // R45 (storage design §11): killed with the processes it started
         // when its time runs out or its call is dropped.
@@ -658,6 +842,18 @@ pub(crate) fn annotations_for_builtin(name: &str) -> Option<openalpaca_mcp::Tool
 /// Static per tool name, like every annotation (design 03 §7).
 pub fn approval_is_per_call(name: &str) -> bool {
     name == "memory_confirm"
+}
+
+/// Whether the sandbox leaves this per-request builtin uncut by the
+/// per-tool time limit (`exempt_from_timeout`): true only for
+/// `invoke_skill` (SKILL-NO-CUT, the owner's answer of 2026-11-06).
+///
+/// A skill is bounded by its own loop — its rounds, its cost cap, and each
+/// of its tools under the per-tool limit — as the nested tier's
+/// `invoke_skill:<id>` calls are. Static per tool name, like every
+/// annotation; read by each place that registers the tool.
+pub(crate) fn builtin_is_exempt_from_timeout(name: &str) -> bool {
+    name == "invoke_skill"
 }
 
 fn read_only_annotations() -> openalpaca_mcp::ToolAnnotations {

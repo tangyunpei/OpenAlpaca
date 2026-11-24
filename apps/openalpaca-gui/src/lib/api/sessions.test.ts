@@ -14,6 +14,7 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 import { resetConnection } from "@/lib/connection";
 import { ApiError } from "@/lib/http";
 import type { Session } from "@/lib/api/types";
+import { fixtureHost } from "@/lib/host/fixture";
 
 import {
   activateSession,
@@ -25,13 +26,13 @@ import {
   updateSession,
 } from "./sessions";
 
-vi.mock("@tauri-apps/api/core", () => ({
-  invoke: vi.fn(async () => ({
+beforeEach(() => {
+  fixtureHost!.answerConnection({
     baseUrl: "http://127.0.0.1:9999",
     token: "tok en/+",
     instanceId: "7f3a1122",
-  })),
-}));
+  });
+});
 
 interface Recorded {
   url: string;

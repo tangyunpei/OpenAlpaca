@@ -1,14 +1,14 @@
 /**
  * The chat view end to end, over the real data layer.
  *
- * Only the two edges are doubled — the Tauri discovery command and the two
+ * Only the two edges are doubled — the shell's discovery command (answered by
+ * FixtureHost, `lib/host/fixture.ts`) and the two
  * transports (`fetch`, `EventSource`) — so the SSE state machine, the query
  * layer and the request bodies under test are the production ones. That is the
  * point: `approval_scope` has to be asserted on the wire, not on a spy.
  */
 
 import { QueryClient } from "@tanstack/react-query";
-import { invoke } from "@tauri-apps/api/core";
 import {
   act,
   cleanup,
@@ -24,6 +24,7 @@ import { useGlobalKeys } from "@/components/shell";
 import { clearConfirmationsOver } from "@/lib/confirmations-over";
 import { resetConnection } from "@/lib/connection";
 import { daemonEvents, type ServerEvent } from "@/lib/events";
+import { fixtureHost } from "@/lib/host/fixture";
 import { qk } from "@/lib/query-keys";
 import { QueryProvider } from "@/lib/query-provider";
 import { revealLabel } from "@/lib/reveal";
@@ -37,22 +38,24 @@ import { FIRST_RUN_ACTION, FIRST_RUN_TITLE } from "./first-run";
 import { useResolutions } from "./resolution-store";
 import type { WorkPaneRenderer } from "./WorkPaneSlot";
 
-vi.mock("@tauri-apps/api/core", () => ({
-  invoke: vi.fn(async () => ({
+beforeEach(() => {
+  fixtureHost!.answerConnection({
     baseUrl: "http://127.0.0.1:9999",
     token: "test-token",
     instanceId: "7f3a1122",
-  })),
-}));
+  });
+});
 
 type Listener = (event: { data?: unknown }) => void;
 
 class FakeEventSource {
+  readonly url: string;
   static instances: FakeEventSource[] = [];
   private readonly listeners = new Map<string, Listener[]>();
   closed = false;
 
-  constructor(readonly url: string) {
+  constructor(url: string) {
+    this.url = url;
     FakeEventSource.instances.push(this);
   }
 
@@ -2143,6 +2146,40 @@ describe("ChatView — a confirmation whose tool reported first (G6)", () => {
     expect(
       await screen.findByText(
         "artifact_write approved · failed after 9.0s, the agent continued without it.",
+      ),
+    ).toBeInTheDocument();
+  });
+
+  /**
+   * TIMEOUT-ONE-CLOCK: a call the sandbox's clock cut is a failed tool run
+   * with the reason `timeout`, so the approved row settles, saying so —
+   * where a cut used to leave it "waiting for the tool to run…" for good.
+   */
+  it("settles a card whose tool the sandbox cut, saying it timed out", async () => {
+    renderChat();
+    const source = await sendMessage("write the notes");
+    await raiseMainLoopCard(source);
+
+    fireEvent.click(screen.getByRole("button", { name: /Approve/ }));
+    expect(
+      await screen.findByText(/artifact_write approved · waiting/),
+    ).toBeInTheDocument();
+
+    await act(async () => {
+      emitServerEvent({
+        type: "tool_executed",
+        agent_id: "orchestrator",
+        tool_name: "artifact_write",
+        success: false,
+        duration_ms: 120000,
+        task_id: null,
+        reason: "timeout",
+      });
+    });
+
+    expect(
+      await screen.findByText(
+        "artifact_write approved · timed out after 2m 00s, the agent continued without it.",
       ),
     ).toBeInTheDocument();
   });
@@ -4907,12 +4944,14 @@ describe("ChatView — the conversation's continuity (design 11 §5, CQ-7)", () 
 
 describe("ChatView — a written file's Reveal in Finder (Round G, G4)", () => {
   afterEach(() => {
-    // `isTauri` is this block's own; `beforeEach` stubs the rest again.
+    // `beforeEach` stubs the transports again.
     vi.unstubAllGlobals();
   });
 
-  it("asks the shell for the path the artifact_written frame carried", async () => {
-    vi.stubGlobal("isTauri", true);
+  it("asks the daemon to reveal the file id the artifact_written frame carried", async () => {
+    fixtureHost!.setReveal(true);
+    const logTail = vi.spyOn(fixtureHost!, "readDaemonLogTail");
+    const stopWait = vi.spyOn(fixtureHost!, "awaitDaemonStopped");
     const path =
       "/Users/dev/.openalpaca/artifacts/loose/2026-10-02/01-pasta-night.md";
     renderChat();
@@ -4932,8 +4971,19 @@ describe("ChatView — a written file's Reveal in Finder (Round G, G4)", () => {
     fireEvent.click(await screen.findByRole("button", { name: revealLabel() }));
 
     await waitFor(() =>
-      expect(invoke).toHaveBeenCalledWith("reveal_path", { path }),
+      expect(
+        requests.some(
+          (r) =>
+            r.method === "POST" && r.url.endsWith("/v1/files/art-9/reveal"),
+        ),
+      ).toBe(true),
     );
+    // The shell is asked for the connection only: the host has no reveal
+    // command, and no other command, dialog or window of it was used.
+    expect(logTail).not.toHaveBeenCalled();
+    expect(stopWait).not.toHaveBeenCalled();
+    expect(fixtureHost!.dialog).toBeNull();
+    expect(fixtureHost!.window).toBeNull();
   });
 });
 

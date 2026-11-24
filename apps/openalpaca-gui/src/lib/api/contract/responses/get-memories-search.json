@@ -1,0 +1,41 @@
+{
+  "count": 0,
+  "index_state": "",
+  "partial": false,
+  "results": [
+    {
+      "conflict": false,
+      "effective_status": "",
+      "excerpt": "",
+      "freshness": "",
+      "heading": "",
+      "id": "",
+      "kind": "",
+      "line_range": [
+        0
+      ],
+      "match": [
+        ""
+      ],
+      "origin": "",
+      "path": "",
+      "pinned": false,
+      "revision": "",
+      "same_key_loser": false,
+      "scope": "",
+      "sources": [
+        {
+          "id": "",
+          "observed_at": null,
+          "type": ""
+        }
+      ],
+      "sources_status": "",
+      "status": "",
+      "superseded_by": [],
+      "title": "",
+      "valid_from": null,
+      "valid_to": null
+    }
+  ]
+}

@@ -42,10 +42,10 @@ fn delete_takes_one_id_and_listing_stays_the_default() {
     assert!(parse(&["sessions", "--all"]).command.is_none());
 
     let args = parse(&["sessions", "delete", "sess-1"]);
-    assert!(matches!(
+    std::assert_matches!(
         args.command,
         Some(SessionsCommands::Delete { ref id }) if id == "sess-1"
-    ));
+    );
 
     // An id is required, and exactly one of them.
     assert!(Harness::try_parse_from(["sessions", "delete"]).is_err());

@@ -14,6 +14,7 @@ pub struct ConfigArgs {
 }
 
 #[derive(Subcommand)]
+#[command(defer = true)]
 pub enum ConfigAction {
     /// Set a configuration value (validates against schema)
     Set { key: String, value: String },

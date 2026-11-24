@@ -51,7 +51,7 @@ export function rowsLine(rows: WorkspaceCounts): string {
     rows.followups > 0
       ? counted(rows.followups, "queued follow-up", "queued follow-ups")
       : null,
-  ].filter((part): part is string => part !== null);
+  ].filter((part) => part !== null);
   return parts.length === 0 ? "nothing yet" : parts.join(" · ");
 }
 

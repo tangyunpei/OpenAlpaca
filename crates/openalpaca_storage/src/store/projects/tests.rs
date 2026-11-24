@@ -780,13 +780,19 @@ fn an_unguarded_home_store_stops_a_test_build_and_nothing_is_written() {
     ] {
         let _env = HomeStoreGuard::for_user_home(user_home.path(), store.as_deref());
         // With HOME moved, the store `home_root` falls back to is a temp dir.
-        assert_eq!(crate::store::home_root().unwrap(), real_store);
+        assert_eq!(
+            openalpaca_app_support::paths::home_root().unwrap(),
+            real_store
+        );
         let message = panic_of(|| {
             let _ = register_home();
         })
         .expect("the guard must refuse");
         assert!(
-            message.contains(&format!("{} {why}", crate::store::HOME_STORE_ENV)),
+            message.contains(&format!(
+                "{} {why}",
+                openalpaca_app_support::paths::HOME_STORE_ENV
+            )),
             "{message}"
         );
         assert!(
@@ -907,10 +913,7 @@ fn the_home_store_what_lies_inside_it_and_what_contains_it_are_refused() {
     ] {
         let err = register(&path).unwrap_err();
         let refusal = err.downcast_ref::<ProjectError>().expect("a ProjectError");
-        assert!(
-            matches!(refusal, ProjectError::IsHome { .. }),
-            "{path:?}: {refusal}"
-        );
+        std::assert_matches!(refusal, ProjectError::IsHome { .. }, "{path:?}: {refusal}");
         assert_eq!(refusal.code(), "WORKSPACE_IS_HOME");
     }
     assert!(!w.projects().exists(), "a refusal creates nothing");
@@ -923,11 +926,9 @@ fn a_path_that_is_not_a_directory_is_refused_and_so_is_a_relative_one() {
     fs::write(&file, "x").unwrap();
     for path in [w.tmp.path().join("work").join("never-made"), file] {
         let err = register(&path).unwrap_err();
-        assert!(
-            matches!(
-                err.downcast_ref::<ProjectError>(),
-                Some(ProjectError::NotADirectory { .. })
-            ),
+        std::assert_matches!(
+            err.downcast_ref::<ProjectError>(),
+            Some(ProjectError::NotADirectory { .. }),
             "{path:?}: {err}"
         );
     }
@@ -1081,9 +1082,12 @@ fn register_writes_only_under_the_home_store_it_checked_when_the_variable_change
                 // writes the variable takes the same lock.
                 unsafe {
                     if unset {
-                        std::env::remove_var(crate::store::HOME_STORE_ENV);
+                        std::env::remove_var(openalpaca_app_support::paths::HOME_STORE_ENV);
                     } else {
-                        std::env::set_var(crate::store::HOME_STORE_ENV, &other_store);
+                        std::env::set_var(
+                            openalpaca_app_support::paths::HOME_STORE_ENV,
+                            &other_store,
+                        );
                     }
                 }
             }));
@@ -1420,4 +1424,55 @@ fn a_root_renamed_by_case_only_still_looks_up_and_registers_as_its_own_project()
     assert_eq!(lookup(&renamed).unwrap().map(|p| p.id), Some(other.id));
     assert_eq!(register(&root).unwrap().id, own.id);
     assert_eq!(list().unwrap().len(), 2);
+}
+
+/// Step 9's golden (M19): every variant's sentence byte for byte, under `{}`
+/// and `{:#}`, with no `source()` — written against the hand-written
+/// `Display` and kept on the derive. The `match` has no `_` arm, so a new
+/// variant does not compile without its row.
+#[test]
+fn every_project_error_prints_its_sentence_whole_and_has_no_source() {
+    let rows = [
+        ProjectError::NotRegistered {
+            root: "/w/\u{202e}evil\u{200b}".to_string(),
+        },
+        ProjectError::IsHome {
+            path: "/work/app".to_string(),
+        },
+        ProjectError::NotADirectory {
+            path: "/work/app".to_string(),
+        },
+        ProjectError::Exists {
+            path: "/work/app".to_string(),
+        },
+        ProjectError::RepointUnfinished {
+            path: "/work/app".to_string(),
+        },
+        ProjectError::SamePath {
+            path: "/work/app".to_string(),
+        },
+    ];
+    for error in rows {
+        let want = match &error {
+            ProjectError::NotRegistered { .. } => {
+                "/w/\u{202e}evil\u{200b} is not a project OpenAlpaca knows: no folder under projects/ records it"
+            }
+            ProjectError::IsHome { .. } => {
+                "/work/app is, contains or lies inside the OpenAlpaca home store, so it cannot be a project. Name the project directory itself"
+            }
+            ProjectError::NotADirectory { .. } => {
+                "/work/app is not a directory. Create it first, or name the folder the project is in now"
+            }
+            ProjectError::Exists { .. } => {
+                "/work/app is already a project of its own, or OpenAlpaca's records already name it. Re-pointing onto it would merge two projects: delete that project's data first, or re-point onto another path"
+            }
+            ProjectError::RepointUnfinished { .. } => {
+                "/work/app is either path of another project's re-point that has not finished; the next start of the daemon finishes that re-point. Re-pointing onto it would merge two projects: re-point onto another path"
+            }
+            ProjectError::SamePath { .. } => "/work/app is already where the project is",
+        };
+        assert_eq!(error.to_string(), want);
+        assert_eq!(format!("{error:#}"), want);
+        assert!(std::error::Error::source(&error).is_none(), "{want}");
+    }
 }

@@ -7,8 +7,9 @@
 
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { act, renderHook } from "@testing-library/react";
-import { beforeEach, describe, expect, it, vi } from "vitest";
+import { beforeEach, describe, expect, it } from "vitest";
 
+import { fixtureHost } from "@/lib/host/fixture";
 import { useUiStore } from "@/stores/ui";
 
 import type { Run } from "./run-model";
@@ -16,13 +17,13 @@ import { useRunController } from "./useRunController";
 
 // As every sibling hook test: nothing here is asked of the shell, and a
 // discovery call, if one happened, gets an answer rather than a throw.
-vi.mock("@tauri-apps/api/core", () => ({
-  invoke: vi.fn(async () => ({
+beforeEach(() => {
+  fixtureHost!.answerConnection({
     baseUrl: "http://127.0.0.1:9999",
     token: "test-token",
     instanceId: "7f3a1122",
-  })),
-}));
+  });
+});
 
 const run: Run = {
   id: "task-1",

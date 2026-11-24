@@ -59,12 +59,17 @@ pub struct ExtArgs {
     pub command: ExtCommands,
 }
 
-// `mcp add` carries thirteen options, so the `Mcp` variant is much larger than
-// the two-string ones. clap builds exactly one of these per process, from argv,
-// and its derive cannot take a boxed subcommand field — so the size is the
-// argument surface, not a cost anything pays.
-#[allow(clippy::large_enum_variant)]
-#[derive(Subcommand)]
+// `mcp add` takes a server name and fourteen options, so the `Mcp` variant is
+// much larger than the two-string ones. At most one `ExtCommands` is parsed
+// from argv per run of the CLI, so the size is the argument surface, not a
+// cost anything pays. The derive of clap would take the field boxed (`Box<T>`
+// implements `Subcommand` and `FromArgMatches`); boxing it buys nothing here.
+#[expect(
+    clippy::large_enum_variant,
+    reason = "Mcp holds `mcp add`'s options; one is parsed from argv per run"
+)]
+#[derive(Subcommand, Debug)]
+#[command(defer = true)]
 pub enum ExtCommands {
     /// List MCP servers and plugins
     List {
@@ -150,8 +155,12 @@ pub enum ExtCommands {
     },
 }
 
-#[allow(clippy::large_enum_variant)]
-#[derive(Subcommand)]
+#[expect(
+    clippy::large_enum_variant,
+    reason = "`mcp add`'s options make Add the large variant; one per run"
+)]
+#[derive(Subcommand, Debug)]
+#[command(defer = true)]
 pub enum ExtMcpCommands {
     /// Write a servers block into config/mcp.toml and connect it
     Add {
@@ -355,14 +364,19 @@ pub async fn run(args: ExtArgs) -> Result<()> {
     }
 }
 
-pub(crate) async fn fetch_rows(include_orphaned: bool) -> Result<Vec<ExtensionRow>> {
-    let client = DaemonClient::connect()?;
-    let path = if include_orphaned {
+/// `GET /v1/extensions`'s path: `include_orphaned` only when asked; held
+/// to the route's query sample by `contract_queries` (CONTRACT-SAMPLES-3).
+pub(crate) fn list_path(include_orphaned: bool) -> &'static str {
+    if include_orphaned {
         "/v1/extensions?include_orphaned=true"
     } else {
         "/v1/extensions"
-    };
-    client.get(path).await
+    }
+}
+
+pub(crate) async fn fetch_rows(include_orphaned: bool) -> Result<Vec<ExtensionRow>> {
+    let client = DaemonClient::connect().await?;
+    client.get(list_path(include_orphaned)).await
 }
 
 async fn list(include_orphaned: bool, format: OutputFormat) -> Result<()> {
@@ -419,6 +433,7 @@ pub(crate) fn print_row(row: &ExtensionRow) {
     print_names("Skills:", &row.skills);
     print_names("Agents:", &row.agents);
     print!("{}", declared_warnings_text(row));
+    print!("{}", approve_grants_text(row));
     if let Some(since) = &row.since {
         println!("{} {}", "Since:".dimmed(), since);
     }
@@ -475,6 +490,33 @@ fn declared_warnings_text(row: &ExtensionRow) -> String {
     out
 }
 
+/// What approving a plugin grants, said under every approve preview
+/// (N-PLUG-3): here under `ext install --dry-run`'s manifest, and last in
+/// `ext install`, `ext update` and `ext info` on a plugin awaiting consent;
+/// in the GUI, the consent row. Our own fixed words, so they
+/// are printed as they are and counted by no notice. The child is spawned
+/// with the daemon's environment (`openalpaca_plugins`'
+/// `PluginProcess::spawn`, from which the daemon took the master-key
+/// variable at boot) and nothing confines it; the capabilities a manifest
+/// lists (`capabilities.provides`) are what its tools contribute to agents.
+const APPROVE_GRANTS: &str = "Approving lets this plugin's program run as you, with the \
+                              daemon's environment (less OPENALPACA_MASTER_KEY) and all \
+                              the file and network access your account has; the \
+                              capabilities it asks for name what it contributes to agents, \
+                              not what it can do (Daemon Manual, Extensions).";
+
+/// [`APPROVE_GRANTS`] for a plugin awaiting consent — after `ext install`'s
+/// and `ext update`'s lines, and in `ext info`, which is all a person reads
+/// of one dropped in by hand before `ext approve <id>`; nothing for any
+/// other row.
+fn approve_grants_text(row: &ExtensionRow) -> String {
+    if row.kind == "plugin" && row.state == "unapproved" {
+        format!("{APPROVE_GRANTS}\n")
+    } else {
+        String::new()
+    }
+}
+
 fn print_names(label: &str, names: &[String]) {
     if names.is_empty() {
         return;
@@ -487,11 +529,11 @@ fn print_names(label: &str, names: &[String]) {
 
 pub(crate) async fn verb(kind: &str, id: &str, verb: &str) -> Result<()> {
     check_kind(kind)?;
-    let client = DaemonClient::connect()?;
+    let client = DaemonClient::connect().await?;
     let row: ExtensionRow = client
         .post(
             &format!("/v1/extensions/{kind}/{id}/{verb}"),
-            &serde_json::json!({}),
+            &crate::client::empty_body(),
         )
         .await?;
 
@@ -516,7 +558,7 @@ pub(crate) async fn verb(kind: &str, id: &str, verb: &str) -> Result<()> {
 }
 
 async fn remove(id: &str) -> Result<()> {
-    let client = DaemonClient::connect()?;
+    let client = DaemonClient::connect().await?;
     let _: serde_json::Value = client
         .delete_req(&format!("/v1/extensions/plugin/{id}"))
         .await?;
@@ -624,7 +666,7 @@ pub(crate) fn mcp_add_body(command: ExtMcpCommands) -> Result<serde_json::Value>
 /// What an install or an update answers with: the row, plus the manifest the
 /// owner has to look at before approving.
 #[derive(Debug, Deserialize)]
-struct InstallResponse {
+pub(crate) struct InstallResponse {
     extension: ExtensionRow,
     #[serde(default)]
     manifest: Option<ManifestSummary>,
@@ -635,7 +677,7 @@ struct InstallResponse {
 }
 
 #[derive(Debug, Deserialize)]
-struct ValidateResponse {
+pub(crate) struct ValidateResponse {
     manifest: ManifestSummary,
     #[serde(default)]
     installed: bool,
@@ -643,7 +685,7 @@ struct ValidateResponse {
 
 /// The manifest summary, as the daemon reads it off `plugin.toml`.
 #[derive(Debug, Deserialize)]
-struct ManifestSummary {
+pub(crate) struct ManifestSummary {
     name: String,
     version: String,
     #[serde(default)]
@@ -673,18 +715,27 @@ fn print_manifest(manifest: &ManifestSummary) {
     );
 }
 
-/// What [`print_manifest`] prints, painted, one line each: on a terminal
-/// first [`crate::output::TERMINAL_RESET`], as before every approval
-/// prompt, then the manifest and, directly under it, the notice.
+/// What [`print_manifest`] prints (`ext install --dry-run`): the manifest
+/// ([`manifest_body`]) and under it [`APPROVE_GRANTS`] (N-PLUG-3).
+fn manifest_text(manifest: &ManifestSummary, tty: bool) -> String {
+    let mut out = manifest_body(manifest, tty);
+    out.push_str(APPROVE_GRANTS);
+    out.push('\n');
+    out
+}
+
+/// The manifest, painted, one line each: on a terminal first
+/// [`crate::output::TERMINAL_RESET`], as before every approval prompt, then
+/// the manifest and, directly under it, the notice.
 ///
-/// This is what a person reads before `openalpaca ext approve <id>`, and
-/// what approving grants is these strings — the name, the capabilities, the
-/// keys — which the plugin's author wrote. So every hidden character in them
+/// This is what a person reads before `openalpaca ext approve <id>`: the
+/// name, the capabilities, the keys — strings the plugin's author wrote, and
+/// what consent is recorded for. So every hidden character in them
 /// is shown as `<U+XXXX>` (`openalpaca_core::utils::text::escape_hidden_line`:
 /// each field is one line, so a line break in a description cannot print a
 /// forged `Asks for:` list under it) and one line counts them in the words
 /// every approval surface uses. Display only: nothing is sent from here.
-fn manifest_text(manifest: &ManifestSummary, tty: bool) -> String {
+fn manifest_body(manifest: &ManifestSummary, tty: bool) -> String {
     use openalpaca_core::utils::text::{escape_hidden_line, hidden_notice};
     use std::fmt::Write as _;
 
@@ -750,7 +801,7 @@ fn manifest_text(manifest: &ManifestSummary, tty: bool) -> String {
 }
 
 async fn install(path: &str, dry_run: bool) -> Result<()> {
-    let client = DaemonClient::connect()?;
+    let client = DaemonClient::connect().await?;
     if dry_run {
         let response: ValidateResponse = client
             .post("/v1/extensions/plugin/validate", &source_body(path))
@@ -778,8 +829,9 @@ async fn install(path: &str, dry_run: bool) -> Result<()> {
 }
 
 /// What `ext install` prints once the daemon has installed the plugin: the
-/// manifest ([`manifest_text`]), then the id twice — `ok installed <id>` and
-/// the `ext approve <id>` that starts it.
+/// manifest ([`manifest_body`]), then the id twice — `ok installed <id>` and
+/// the `ext approve <id>` that starts it — and last, the plugin awaiting
+/// consent, [`APPROVE_GRANTS`] ([`approve_grants_text`]).
 ///
 /// The id is printed as the manifest prints the plugin's name, which it is
 /// (`install` refuses a manifest whose name is not its directory's), through
@@ -791,7 +843,7 @@ fn install_text(response: &InstallResponse, tty: bool) -> String {
 
     let mut out = String::new();
     if let Some(manifest) = &response.manifest {
-        out.push_str(&manifest_text(manifest, tty));
+        out.push_str(&manifest_body(manifest, tty));
     }
     let mut uncounted = 0;
     let id = under_manifest(
@@ -818,11 +870,12 @@ fn install_text(response: &InstallResponse, tty: bool) -> String {
         format!("nothing is running yet — `openalpaca ext approve {id}` starts it").dimmed()
     );
     push_notice(&mut out, uncounted);
+    out.push_str(&approve_grants_text(&response.extension));
     out
 }
 
 /// A value of the plugin's printed on a line under its manifest — its id, a
-/// capability an update added — escaped as [`manifest_text`] escapes every
+/// capability an update added — escaped as [`manifest_body`] escapes every
 /// field (`escape_hidden_line`).
 /// `counted` says the manifest printed the same value, whose hidden
 /// characters its notice has counted; otherwise they are added to
@@ -846,7 +899,7 @@ fn push_notice(out: &mut String, uncounted: usize) {
 }
 
 async fn update(id: &str, path: &str) -> Result<()> {
-    let client = DaemonClient::connect()?;
+    let client = DaemonClient::connect().await?;
     let response: InstallResponse = client
         .put(&format!("/v1/extensions/plugin/{id}"), &source_body(path))
         .await?;
@@ -858,10 +911,12 @@ async fn update(id: &str, path: &str) -> Result<()> {
 }
 
 /// What `ext update` prints once the daemon has replaced the plugin's tree:
-/// the new manifest ([`manifest_text`]), `ok updated <id>` and, when the new
+/// the new manifest ([`manifest_body`]), `ok updated <id>` and, when the new
 /// tree asks for a different set of capabilities, what it now also asks for,
 /// that consent was taken back and the `ext approve <id>` that restores it;
-/// then any warning.
+/// then any warning and, only when the plugin is left awaiting consent,
+/// [`APPROVE_GRANTS`] last ([`approve_grants_text`]): an update that kept
+/// consent leaves nothing to approve.
 ///
 /// Everything of the plugin's under the manifest goes through
 /// [`under_manifest`], as [`install_text`] prints the id: the id (the new
@@ -878,7 +933,7 @@ fn update_text(response: &InstallResponse, tty: bool) -> String {
 
     let mut out = String::new();
     if let Some(manifest) = &response.manifest {
-        out.push_str(&manifest_text(manifest, tty));
+        out.push_str(&manifest_body(manifest, tty));
     }
     let mut uncounted = 0;
     let id = under_manifest(
@@ -946,11 +1001,12 @@ fn update_text(response: &InstallResponse, tty: bool) -> String {
         );
     }
     push_notice(&mut out, uncounted);
+    out.push_str(&approve_grants_text(&response.extension));
     out
 }
 
 #[derive(Debug, Deserialize)]
-struct UninstallResponse {
+pub(crate) struct UninstallResponse {
     removed: String,
     #[serde(default)]
     trashed: Option<String>,
@@ -960,7 +1016,7 @@ struct UninstallResponse {
 
 async fn uninstall(kind: &str, id: &str, keep_data: bool) -> Result<()> {
     check_kind(kind)?;
-    let client = DaemonClient::connect()?;
+    let client = DaemonClient::connect().await?;
     let response: UninstallResponse = client
         .delete_req(&uninstall_path(kind, id, keep_data))
         .await?;
@@ -978,7 +1034,7 @@ async fn uninstall(kind: &str, id: &str, keep_data: bool) -> Result<()> {
 }
 
 async fn mcp_add(body: serde_json::Value) -> Result<()> {
-    let client = DaemonClient::connect()?;
+    let client = DaemonClient::connect().await?;
     let response: InstallResponse = client.post("/v1/extensions/mcp", &body).await?;
     println!(
         "{} declared mcp:{} -> {} (enabled: {})",
@@ -996,6 +1052,13 @@ async fn mcp_add(body: serde_json::Value) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// N-PLUG-3: the line under every approve preview, pinned whole.
+    const GRANTS: &str = "Approving lets this plugin's program run as you, with the \
+                          daemon's environment (less OPENALPACA_MASTER_KEY) and all the \
+                          file and network access your account has; the capabilities it \
+                          asks for name what it contributes to agents, not what it can \
+                          do (Daemon Manual, Extensions).";
     use clap::Parser;
 
     #[derive(Parser)]
@@ -1013,36 +1076,36 @@ mod tests {
 
     #[test]
     fn every_verb_parses_with_its_arguments() {
-        assert!(matches!(
+        std::assert_matches!(
             parse(&["ext", "list"]),
             ExtCommands::List {
                 include_orphaned: false,
                 ..
             }
-        ));
-        assert!(matches!(
+        );
+        std::assert_matches!(
             parse(&["ext", "list", "--include-orphaned"]),
             ExtCommands::List {
                 include_orphaned: true,
                 ..
             }
-        ));
-        assert!(matches!(
+        );
+        std::assert_matches!(
             parse(&["ext", "enable", "mcp", "github"]),
             ExtCommands::Enable { kind, id } if kind == "mcp" && id == "github"
-        ));
-        assert!(matches!(
+        );
+        std::assert_matches!(
             parse(&["ext", "disable", "plugin", "notion"]),
             ExtCommands::Disable { kind, id } if kind == "plugin" && id == "notion"
-        ));
-        assert!(matches!(
+        );
+        std::assert_matches!(
             parse(&["ext", "reload", "mcp", "github"]),
             ExtCommands::Reload { kind, id } if kind == "mcp" && id == "github"
-        ));
-        assert!(matches!(
+        );
+        std::assert_matches!(
             parse(&["ext", "info", "mcp", "github"]),
             ExtCommands::Info { kind, id } if kind == "mcp" && id == "github"
-        ));
+        );
     }
 
     /// The three consent verbs are plugin-only, so they take **no** kind: a
@@ -1050,18 +1113,18 @@ mod tests {
     /// daemon can only answer `409 unsupported_for_kind`.
     #[test]
     fn the_consent_verbs_take_only_an_id() {
-        assert!(matches!(
+        std::assert_matches!(
             parse(&["ext", "approve", "notion"]),
             ExtCommands::Approve { id } if id == "notion"
-        ));
-        assert!(matches!(
+        );
+        std::assert_matches!(
             parse(&["ext", "deny", "notion"]),
             ExtCommands::Deny { id } if id == "notion"
-        ));
-        assert!(matches!(
+        );
+        std::assert_matches!(
             parse(&["ext", "remove", "notion"]),
             ExtCommands::Remove { id } if id == "notion"
-        ));
+        );
         assert!(
             Harness::try_parse_from(["ext", "approve", "plugin", "notion"]).is_err(),
             "approve must not accept a kind argument"
@@ -1088,32 +1151,32 @@ mod tests {
     /// The five new verbs, and the shapes their arguments take.
     #[test]
     fn the_install_verbs_parse_with_their_arguments() {
-        assert!(matches!(
+        std::assert_matches!(
             parse(&["ext", "install", "/src/notion"]),
             ExtCommands::Install { path, dry_run: false } if path == "/src/notion"
-        ));
-        assert!(matches!(
+        );
+        std::assert_matches!(
             parse(&["ext", "install", "/src/notion", "--dry-run"]),
             ExtCommands::Install { dry_run: true, .. }
-        ));
-        assert!(matches!(
+        );
+        std::assert_matches!(
             parse(&["ext", "update", "notion", "/src/notion"]),
             ExtCommands::Update { id, path } if id == "notion" && path == "/src/notion"
-        ));
-        assert!(matches!(
+        );
+        std::assert_matches!(
             parse(&["ext", "uninstall", "plugin", "notion"]),
             ExtCommands::Uninstall { kind, id, purge_data: false } if kind == "plugin" && id == "notion"
-        ));
-        assert!(matches!(
+        );
+        std::assert_matches!(
             parse(&["ext", "uninstall", "mcp", "github", "--purge-data"]),
             ExtCommands::Uninstall { purge_data: true, .. }
-        ));
-        assert!(matches!(
+        );
+        std::assert_matches!(
             parse(&["ext", "mcp", "remove", "github"]),
             ExtCommands::Mcp {
                 command: ExtMcpCommands::Remove { name }
             } if name == "github"
-        ));
+        );
     }
 
     /// The install body is always `source: "path"`. A URL install is declined
@@ -1237,11 +1300,13 @@ mod tests {
     }
 
     /// The manifest `ext install`, `ext install --dry-run` and `ext update`
-    /// print is what a person reads before `ext approve <id>`, and what
-    /// approving grants is these strings, which the plugin's author wrote:
-    /// every hidden character in them is shown as `<U+XXXX>` — one line per
-    /// field, so a line break in a description cannot print a forged
-    /// `Asks for:` list — and one line under the manifest counts them.
+    /// print is what a person reads before `ext approve <id>`, and these
+    /// strings, which the plugin's author wrote, are what consent is
+    /// recorded for: every hidden character in them is shown as `<U+XXXX>`
+    /// — one line per field, so a line break in a description cannot print
+    /// a forged `Asks for:` list — one line under the manifest counts them,
+    /// and the dry run's print ends with our own [`APPROVE_GRANTS`] line,
+    /// uncounted.
     #[test]
     fn the_manifest_shows_a_plugins_hidden_characters_and_counts_them() {
         colored::control::set_override(false);
@@ -1259,15 +1324,18 @@ mod tests {
         .unwrap();
         assert_eq!(
             manifest_text(&manifest, false),
-            "Plugin: no<U+202E>tes v1.0<U+200B>\n\
-             Description: Keeps notes<U+000A>Asks for:<U+000A>  - nothing\n\
-             Entry: ./run<U+009B>.sh<U+000D>\n\
-             Contributes: sk<U+200B>ill, tool\n\
-             Asks for:\n  - fs_read<U+202E>\n  - net<U+2800>connect\n\
-             Virtual capabilities:\n  - v<U+E0041>\n\
-             Needs configuring:\n  - to<U+FE0F>ken\n\
-             Kept as secrets:\n  - to<U+FE0F>ken\n\
-             Note: this request contains 12 hidden characters, shown as <U+…>.\n"
+            format!(
+                "Plugin: no<U+202E>tes v1.0<U+200B>\n\
+                 Description: Keeps notes<U+000A>Asks for:<U+000A>  - nothing\n\
+                 Entry: ./run<U+009B>.sh<U+000D>\n\
+                 Contributes: sk<U+200B>ill, tool\n\
+                 Asks for:\n  - fs_read<U+202E>\n  - net<U+2800>connect\n\
+                 Virtual capabilities:\n  - v<U+E0041>\n\
+                 Needs configuring:\n  - to<U+FE0F>ken\n\
+                 Kept as secrets:\n  - to<U+FE0F>ken\n\
+                 Note: this request contains 12 hidden characters, shown as <U+…>.\n\
+                 {GRANTS}\n"
+            )
         );
     }
 
@@ -1283,7 +1351,7 @@ mod tests {
             "capabilities": ["notes_write"],
         }))
         .unwrap();
-        let plain = "Plugin: notes v1.0\nAsks for:\n  - notes_write\n";
+        let plain = format!("Plugin: notes v1.0\nAsks for:\n  - notes_write\n{GRANTS}\n");
         assert_eq!(manifest_text(&manifest, false), plain);
         assert_eq!(
             manifest_text(&manifest, true),
@@ -1325,7 +1393,8 @@ mod tests {
                  Description: N<U+200B>otes\n\
                  warning: {TYPO_WARNING}\n\
                  warning: {HIDDEN_KEY_WARNING}\n\
-                 Note: this request contains 1 hidden character, shown as <U+…>.\n"
+                 Note: this request contains 1 hidden character, shown as <U+…>.\n\
+                 {GRANTS}\n"
             )
         );
     }
@@ -1357,6 +1426,28 @@ mod tests {
              Note: this request contains 2 hidden characters, shown as <U+…>.\n"
         );
         assert_eq!(declared_warnings_text(&row(serde_json::json!([]))), "");
+    }
+
+    /// N-PLUG-3: `ext info` on a plugin awaiting consent — the approve
+    /// preview of one dropped in by hand — ends with the same line as the
+    /// manifest print; an approved plugin and an MCP server get none.
+    #[test]
+    fn info_says_what_approving_grants_on_a_plugin_awaiting_consent() {
+        colored::control::set_override(false);
+        let row = |kind: &str, state: &str| -> ExtensionRow {
+            serde_json::from_value(serde_json::json!({
+                "kind": kind,
+                "id": "notes",
+                "state": state,
+            }))
+            .unwrap()
+        };
+        assert_eq!(
+            approve_grants_text(&row("plugin", "unapproved")),
+            format!("{GRANTS}\n")
+        );
+        assert_eq!(approve_grants_text(&row("plugin", "enabled")), "");
+        assert_eq!(approve_grants_text(&row("mcp", "unapproved")), "");
     }
 
     /// DU-25 (m-g): `ext info` on a connected MCP server says the protocol
@@ -1436,7 +1527,8 @@ mod tests {
                  Asks for:\n  - notes_write\n\
                  Note: this request contains 4 hidden characters, shown as <U+…>.\n\
                  ok installed {SHOWN_ID} (unapproved)\n   \
-                 nothing is running yet — `openalpaca ext approve {SHOWN_ID}` starts it\n"
+                 nothing is running yet — `openalpaca ext approve {SHOWN_ID}` starts it\n\
+                 {GRANTS}\n"
             )
         );
         // On a terminal the reset is the only ESC the output holds.
@@ -1458,13 +1550,17 @@ mod tests {
             format!(
                 "ok installed {SHOWN_ID} (unapproved)\n   \
                  nothing is running yet — `openalpaca ext approve {SHOWN_ID}` starts it\n\
-                 Note: this request contains 4 hidden characters, shown as <U+…>.\n"
+                 Note: this request contains 4 hidden characters, shown as <U+…>.\n\
+                 {GRANTS}\n"
             )
         );
         assert_eq!(
             install_text(&install_response("notes", false), false),
-            "ok installed notes (unapproved)\n   \
-             nothing is running yet — `openalpaca ext approve notes` starts it\n"
+            format!(
+                "ok installed notes (unapproved)\n   \
+                 nothing is running yet — `openalpaca ext approve notes` starts it\n\
+                 {GRANTS}\n"
+            )
         );
     }
 
@@ -1487,7 +1583,8 @@ mod tests {
                  Asks for:\n  - notes_write\n\
                  Note: this request contains 4 hidden characters, shown as <U+…>.\n\
                  ok updated {SHOWN_ID} -> unapproved (enabled: on)\n   \
-                 consent was withdrawn — `openalpaca ext approve {SHOWN_ID}` starts it again\n"
+                 consent was withdrawn — `openalpaca ext approve {SHOWN_ID}` starts it again\n\
+                 {GRANTS}\n"
             )
         );
     }
@@ -1550,7 +1647,8 @@ mod tests {
                  ok updated notes -> unapproved (enabled: on)\n   \
                  now also asks for: shell_exec, {SHOWN_CAP}\n   \
                  consent was withdrawn — `openalpaca ext approve notes` starts it again\n   \
-                 warning: the install provenance was not recorded: <U+001B>[2Jgone\n"
+                 warning: the install provenance was not recorded: <U+001B>[2Jgone\n\
+                 {GRANTS}\n"
             )
         );
         let tty = update_text(&response, true);
@@ -1575,6 +1673,22 @@ mod tests {
         assert!(text.contains("warning: provenance gone"), "{text}");
     }
 
+    /// N-PLUG-3: an update that kept consent leaves nothing to approve, so
+    /// it does not say what approving grants.
+    #[test]
+    fn update_that_kept_consent_does_not_say_what_approving_grants() {
+        colored::control::set_override(false);
+        let mut response = update_response(&["notes_read"], &[], &[]);
+        response.consent_reset = false;
+        response.extension.state = "enabled".to_string();
+        assert_eq!(
+            update_text(&response, false),
+            "Plugin: notes v2.0\n\
+             Asks for:\n  - notes_read\n\
+             ok updated notes -> enabled (enabled: on)\n"
+        );
+    }
+
     /// An added capability the manifest did not print is counted by the
     /// lines that print it, under the last of them.
     #[test]
@@ -1583,11 +1697,14 @@ mod tests {
         let text = update_text(&update_response(&[], &["sh\u{200b}ell"], &[]), false);
         assert_eq!(
             text,
-            "Plugin: notes v2.0\n\
-             ok updated notes -> unapproved (enabled: on)\n   \
-             now also asks for: sh<U+200B>ell\n   \
-             consent was withdrawn — `openalpaca ext approve notes` starts it again\n\
-             Note: this request contains 1 hidden character, shown as <U+…>.\n"
+            format!(
+                "Plugin: notes v2.0\n\
+                 ok updated notes -> unapproved (enabled: on)\n   \
+                 now also asks for: sh<U+200B>ell\n   \
+                 consent was withdrawn — `openalpaca ext approve notes` starts it again\n\
+                 Note: this request contains 1 hidden character, shown as <U+…>.\n\
+                 {GRANTS}\n"
+            )
         );
     }
 

@@ -1,6 +1,6 @@
 use super::artifacts::{deliver_artifacts, resolve_artifact_file};
 use super::formatting::{format_completion_message, format_failure_message};
-use openalpaca_core::orchestrator::ConnectorSendProvider;
+use openalpaca_core::orchestrator::{ConnectorSendProvider, DynConnectorSendProvider};
 use openalpaca_storage::{Database, FileAssetRepository};
 
 // ── format_completion_message ──────────────────────────────────────
@@ -250,7 +250,6 @@ struct MockSendProvider {
     file_capable: Vec<String>,
 }
 
-#[async_trait::async_trait]
 impl ConnectorSendProvider for MockSendProvider {
     async fn send_message(&self, _c: &str, _r: &str, _m: &str) -> Result<String, String> {
         Ok("ok".to_string())
@@ -266,9 +265,9 @@ impl ConnectorSendProvider for MockSendProvider {
 #[tokio::test]
 async fn test_deliver_artifacts_skips_non_file_capable_channel() {
     let db = test_db();
-    let send = MockSendProvider {
+    let send = DynConnectorSendProvider::new_box(MockSendProvider {
         file_capable: vec!["telegram".to_string()],
-    };
+    });
     // outcome_json with one artifact
     let outcome_json = r#"{"summary":"done","outcome_kind":"mixed","artifacts":[{"key":"k","label":"l","agent_id":"a","step_order":0}]}"#;
     // Channel is "imessage" which is NOT in file_capable_channels
@@ -316,9 +315,9 @@ fn test_format_completion_handles_very_long_summary() {
 #[tokio::test]
 async fn test_deliver_artifacts_handles_malformed_outcome_json() {
     let db = test_db();
-    let send = MockSendProvider {
+    let send = DynConnectorSendProvider::new_box(MockSendProvider {
         file_capable: vec!["telegram".to_string()],
-    };
+    });
 
     // Completely invalid JSON — should return early without panic
     deliver_artifacts(&db, &send, "task_1", "telegram", "12345", Some("{invalid json!!!}"), "user1").await;

@@ -1,7 +1,7 @@
 /**
  * The one place a run action turns into an effect.
  *
- * Four of the design's verbs are `POST /v1/tasks/{id}/action`, one is
+ * Three of the design's verbs are `POST /v1/tasks/{id}/action`, one is
  * `POST /v1/tasks/{id}/rerun`, and three are pure navigation — `Steer` and
  * `Queue follow-up` aim the composer, `Jump to chat` just switches view.
  * Nothing here is a dead branch any more: GAP-06 closed, so `Start now` and
@@ -30,12 +30,13 @@ import { actionToast, type RunActionId } from "./run-actions";
 import type { Run } from "./run-model";
 
 /**
- * The verbs the action route takes. `start` is here with the three
- * transitions because it shares their route and their response — D5 keeps the
- * run's id, so a started run is the row the card is already showing.
+ * The verbs the action route takes. `start` is here with the two transitions
+ * because it shares their route and their response — D5 keeps the run's id,
+ * so a started run is the row the card is already showing. `pause` is not:
+ * the route refuses it until a later design (PAUSE-OFF), and no control
+ * sends it.
  */
 const HTTP_ACTIONS: Partial<Record<RunActionId, TaskAction>> = {
-  pause: "pause",
   resume: "resume",
   cancel: "cancel",
   start: "start",
@@ -97,7 +98,7 @@ export function useRunController(): RunController {
             onError: (error: Error) => {
               // `start`'s refusals have their own codes and their own
               // sentences, and so do §5.6c's three for `resume`; a plain
-              // transition's 409 carries the daemon's own ("cannot pause a
+              // transition's 409 carries the daemon's own ("cannot cancel a
               // completed task"), which beats inventing one.
               if (action === "start" || action === "resume") {
                 showToast(launchErrorMessage(error));

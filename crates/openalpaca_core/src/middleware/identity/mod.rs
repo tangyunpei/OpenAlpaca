@@ -5,7 +5,6 @@
 //! agent fills in during its first conversation.
 
 use super::persona_frontmatter;
-use std::fmt;
 
 // ---------------------------------------------------------------------------
 // Types
@@ -32,24 +31,15 @@ pub struct IdentityDocument {
     pub avatar: String,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
 pub enum IdentityParseError {
+    #[error("Missing YAML frontmatter")]
     MissingFrontmatter,
+    #[error("Unterminated YAML frontmatter")]
     UnterminatedFrontmatter,
+    #[error("Missing frontmatter field '{0}'")]
     MissingField(&'static str),
 }
-
-impl fmt::Display for IdentityParseError {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            Self::MissingFrontmatter => write!(f, "Missing YAML frontmatter"),
-            Self::UnterminatedFrontmatter => write!(f, "Unterminated YAML frontmatter"),
-            Self::MissingField(field) => write!(f, "Missing frontmatter field '{}'", field),
-        }
-    }
-}
-
-impl std::error::Error for IdentityParseError {}
 
 // ---------------------------------------------------------------------------
 // Body parsing

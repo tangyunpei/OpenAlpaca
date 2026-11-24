@@ -79,6 +79,11 @@ pub const INDEX_FILE_NAME: &str = "memory-index-v1.sqlite";
 /// now folds 68 of its new characters (the subscript `w`, U+209D, to `w`)
 /// and orders 34 new combining marks by their combining class, and a row of
 /// a version-6 cache can hold what the same note bytes no longer give.
+/// Version 8 (the security batch's SQLite 3.54.1) changes no table: its
+/// FTS5 takes a deleted row of a `contentless_delete=1` table out of the
+/// bm25 totals — the averages record's row count and column token counts —
+/// which 3.53.2 never did, so the averages of a version-7 cache can count
+/// rows its notes no longer have, and so rank notes differently.
 ///
 /// **It versions what a row holds, not only the tables.** Since scale slice
 /// S1 the service re-indexes a note only when its bytes, its file's stat or
@@ -89,10 +94,11 @@ pub const INDEX_FILE_NAME: &str = "memory-index-v1.sqlite";
 /// service's `record_for`, how `date` or `norm_title` is derived, the FTS
 /// tokenizers, the script-boundary split ([`query::split_scripts`]) and the
 /// ranges of [`query::is_unsegmented`], which decide what `fts_word` and
-/// `fts_tri` hold — must bump this too, or the old rows are served for
-/// good; the bump is what re-derives every row, by a rebuild off the
-/// request path.
-pub const SCHEMA_VERSION: i64 = 7;
+/// `fts_tri` hold, and a bundled SQLite whose FTS5 changes the tokens or
+/// what the shadow tables or the averages record hold — must bump this too,
+/// or the old rows are served for good; the bump is what re-derives every
+/// row, by a rebuild off the request path.
+pub const SCHEMA_VERSION: i64 = 8;
 /// Design §4: a note is at most 32 KiB. A larger body is refused by
 /// [`MemoryIndex::upsert`] so the cache stays bounded by what `memory_files`
 /// would have written.
@@ -122,30 +128,21 @@ pub const SUBSTRING_SCAN_CAP: usize = 4096;
 // ============================================================================
 
 /// What the index can refuse or fail with.
-#[derive(Debug)]
+#[derive(Debug, thiserror::Error)]
 pub enum IndexError {
     /// A caller-supplied value the index will not accept: an empty or
     /// over-long query, a limit outside 1–20, an over-size body, a timestamp
     /// that is not RFC 3339. The message names the field.
+    #[error("invalid input: {0}")]
     InvalidInput(String),
     /// The cache database itself.
+    #[error("memory index database: {0}")]
     Sqlite(rusqlite::Error),
     /// The scanner callback of [`MemoryIndex::reconcile`], or the cache file's
     /// directory.
+    #[error("memory index io: {0}")]
     Io(std::io::Error),
 }
-
-impl fmt::Display for IndexError {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            Self::InvalidInput(msg) => write!(f, "invalid input: {msg}"),
-            Self::Sqlite(e) => write!(f, "memory index database: {e}"),
-            Self::Io(e) => write!(f, "memory index io: {e}"),
-        }
-    }
-}
-
-impl std::error::Error for IndexError {}
 
 impl IndexError {
     /// Whether the cache file itself is damaged — SQLite's `SQLITE_CORRUPT`
@@ -551,7 +548,7 @@ impl MemoryIndex {
     /// Creates `state/` (0700) like every other `state/` accessor; the
     /// `cache/` directory is created by [`MemoryIndex::open`].
     pub fn default_path() -> anyhow::Result<PathBuf> {
-        Ok(crate::store::cache_dir()?.join(INDEX_FILE_NAME))
+        Ok(openalpaca_app_support::paths::cache_dir()?.join(INDEX_FILE_NAME))
     }
 
     /// Opens the cache at `path`, creating it when absent. A file that is

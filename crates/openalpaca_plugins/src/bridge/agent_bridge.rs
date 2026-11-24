@@ -1,6 +1,5 @@
 use std::sync::Arc;
 
-use async_trait::async_trait;
 use openalpaca_api::plugin_traits::PluginAgentExecutor;
 use openalpaca_core::tools::extensions::ExtensionLedger;
 use serde_json::Value;
@@ -43,7 +42,6 @@ impl PluginAgentBridge {
     }
 }
 
-#[async_trait]
 impl PluginAgentExecutor for PluginAgentBridge {
     async fn spawn(
         &self,

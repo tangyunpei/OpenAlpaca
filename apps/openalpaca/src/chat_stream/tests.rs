@@ -577,6 +577,7 @@ event: done\ndata: {\"content\":\"hi\",\"model\":\"qwen3\",\"tokens_in\":1,\"tok
         .expect("the turn is read");
     let elapsed = started.elapsed();
 
+    // Not assert_matches!: `StreamResult` has no Debug (the daemon's error text).
     assert!(
         matches!(result, StreamResult::Response(Some(_))),
         "the turn answered, with usage"

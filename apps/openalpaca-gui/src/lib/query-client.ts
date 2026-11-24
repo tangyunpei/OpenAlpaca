@@ -2,8 +2,9 @@
 
 import { QueryClient } from "@tanstack/react-query";
 
+import { ConnectionError, getStopIntent } from "./connection";
 import { ApiError } from "./http";
-import type { ServerEvent } from "./events";
+import { STARTING_RETRY_MS, type ServerEvent } from "./events";
 import { qk } from "./query-keys";
 
 /**
@@ -34,10 +35,51 @@ export function isTerminalRunStatus(status: string): boolean {
   );
 }
 
-/** Retry transport failures and 5xx; never retry a 4xx the daemon meant. */
+/**
+ * The shell's answer that its daemon is up but not serving yet, while the
+ * window waits on it (VIEW-STARTING): `starting`, and no stop intent — the
+ * condition the window's own wait asks again on (`lib/events.ts`,
+ * `parkOrWait`). Never `still_starting` (past the shell's 45 s budget) or
+ * `mismatch`. Read when the ask fails, as TanStack reads `retry` and
+ * `retryDelay`, not again when the retry fires as `parkOrWait`'s timer
+ * does: a stop intent set during the delay lets one more ask go.
+ */
+function isStartingWait(error: unknown): boolean {
+  return (
+    error instanceof ConnectionError &&
+    error.kind === "starting" &&
+    getStopIntent() === null
+  );
+}
+
+/**
+ * Retry transport failures and 5xx; never retry a 4xx the daemon meant.
+ *
+ * A query refused `starting` while the window waits asks again however many
+ * times it has failed, so a view mounted at a cold start shows loading
+ * until the daemon serves rather than an error after its two retries. The
+ * shell bounds the wait: past its budget it answers `still_starting`, which
+ * is retried as any other failure, on the count the query has reached — so
+ * after a long `starting` wait the first `still_starting` ends the query,
+ * and the socket's open refetches it (`lib/events.ts`, the resync).
+ */
 function shouldRetry(failureCount: number, error: unknown): boolean {
+  if (isStartingWait(error)) return true;
   if (error instanceof ApiError && !error.isRetryable) return false;
   return failureCount < 2;
+}
+
+/**
+ * TanStack's own delay (1 s doubling to 30 s), but capped at the window's
+ * own `STARTING_RETRY_MS` for a `starting` wait: the shell answers at once,
+ * so asking less often only leaves a view behind the daemon — up to 30 s
+ * once it serves — and asking more often only asks the shell more.
+ */
+function retryDelay(failureCount: number, error: unknown): number {
+  const doubling = Math.min(1000 * 2 ** failureCount, 30_000);
+  return isStartingWait(error)
+    ? Math.min(doubling, STARTING_RETRY_MS)
+    : doubling;
 }
 
 export function createQueryClient(): QueryClient {
@@ -49,6 +91,7 @@ export function createQueryClient(): QueryClient {
         gcTime: 5 * 60_000,
         refetchOnWindowFocus: false,
         retry: shouldRetry,
+        retryDelay,
       },
       mutations: {
         retry: false,

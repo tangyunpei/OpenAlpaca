@@ -12,7 +12,6 @@
 use crate::common::format_confirmation_prompt;
 use crate::{Connector, ConnectorError};
 use arc_swap::ArcSwap;
-use async_trait::async_trait;
 use dashmap::DashMap;
 use openalpaca_core::{
     bus::EventBus,
@@ -23,6 +22,7 @@ use openalpaca_core::{
 };
 use openalpaca_storage::{Database, IdentityRepository};
 use std::collections::VecDeque;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use tokio_util::sync::CancellationToken;
 use tracing::{debug, error, info, warn};
@@ -30,6 +30,14 @@ use tracing::{debug, error, info, warn};
 use super::reader::ChatDbReader;
 use super::routing::{normalize_handle, IMessageConfig};
 use super::sender::IMessageSender;
+
+/// `chat.db` under `home` (`~/Library/Messages/chat.db`), `home` the user's
+/// as `openalpaca_app_support::paths::user_home` reports it: none when there
+/// is no usable home (unset, empty or relative, 121-1/121-2), never a guess
+/// such as `/Users`.
+pub(super) fn chat_db_path(home: Option<&Path>) -> Option<PathBuf> {
+    home.map(|home| home.join("Library").join("Messages").join("chat.db"))
+}
 
 /// IMessageConnector manages the iMessage integration lifecycle.
 ///
@@ -45,7 +53,9 @@ pub struct IMessageConnector {
     pub(super) gateway: Arc<Gateway>,
     pub(super) daemon_config: Arc<ArcSwap<DaemonConfig>>,
     cancel_token: CancellationToken,
-    chat_db_path: String,
+    /// `~/Library/Messages/chat.db` under the user's home, or none when the
+    /// home is not usable ([`chat_db_path`]).
+    pub(super) chat_db_path: Option<PathBuf>,
     pub(super) local_user_id: Option<String>,
     pub(super) confirmation_broker: Option<Arc<ConfirmationBroker>>,
     /// Maps chat identifier -> queue of request_ids for pending tool
@@ -69,8 +79,7 @@ impl IMessageConnector {
         cancel_token: CancellationToken,
         local_user_id: Option<String>,
     ) -> Self {
-        let home = std::env::var("HOME").unwrap_or_else(|_| "/Users".to_string());
-        let chat_db_path = format!("{}/Library/Messages/chat.db", home);
+        let chat_db_path = chat_db_path(openalpaca_app_support::paths::user_home().as_deref());
         Self {
             db,
             bus,
@@ -104,8 +113,15 @@ impl IMessageConnector {
             self.spawn_confirmation_listener();
         }
 
-        let mut reader =
-            ChatDbReader::new(&self.chat_db_path).map_err(ConnectorError::InitFailed)?;
+        let chat_db_path = self.chat_db_path.as_deref().ok_or_else(|| {
+            ConnectorError::InitFailed(
+                "Failed to determine the home directory, so chat.db's place \
+                 (~/Library/Messages/chat.db) is unknown"
+                    .to_string(),
+            )
+        })?;
+        let mut reader = ChatDbReader::new(&chat_db_path.to_string_lossy())
+            .map_err(ConnectorError::InitFailed)?;
 
         // Restore persisted watermark, or initialize to current max ROWID
         let config_repo = openalpaca_storage::ConfigRepository::new(&self.db);
@@ -145,34 +161,37 @@ impl IMessageConnector {
         );
 
         loop {
-            tokio::select! {
-                _ = self.cancel_token.cancelled() => {
-                    info!("iMessage connector shutting down");
-                    Self::persist_watermark(&self.db, reader.watermark());
-                    return Ok(());
-                }
-                _ = tokio::time::sleep(std::time::Duration::from_secs(2)) => {
-                    // Re-read config each poll cycle so GUI/CLI changes take effect immediately
-                    let imsg_config = Self::load_imessage_config(&self.db);
+            // The poll interval is raced against the token; the poll itself
+            // is not, as it was not under `select!` (an arm's body runs
+            // after the race).
+            let napped = self
+                .cancel_token
+                .run_until_cancelled(tokio::time::sleep(std::time::Duration::from_secs(2)))
+                .await;
+            if napped.is_none() {
+                info!("iMessage connector shutting down");
+                Self::persist_watermark(&self.db, reader.watermark());
+                return Ok(());
+            }
+            // Re-read config each poll cycle so GUI/CLI changes take effect immediately
+            let imsg_config = Self::load_imessage_config(&self.db);
 
-                    match reader.poll_new_messages(imsg_config.allow_from_me) {
-                        Ok(messages) => {
-                            let had_messages = !messages.is_empty();
-                            for msg in messages {
-                                if let Err(e) = self.handle_message(msg, &imsg_config).await {
-                                    tracing::error!("Failed to handle iMessage: {}", e);
-                                }
-                            }
-                            // Persist watermark after processing so offline
-                            // messages are not lost on restart.
-                            if had_messages {
-                                Self::persist_watermark(&self.db, reader.watermark());
-                            }
-                        }
-                        Err(e) => {
-                            warn!("Failed to poll chat.db: {}", e);
+            match reader.poll_new_messages(imsg_config.allow_from_me) {
+                Ok(messages) => {
+                    let had_messages = !messages.is_empty();
+                    for msg in messages {
+                        if let Err(e) = self.handle_message(msg, &imsg_config).await {
+                            tracing::error!("Failed to handle iMessage: {}", e);
                         }
                     }
+                    // Persist watermark after processing so offline
+                    // messages are not lost on restart.
+                    if had_messages {
+                        Self::persist_watermark(&self.db, reader.watermark());
+                    }
+                }
+                Err(e) => {
+                    warn!("Failed to poll chat.db: {}", e);
                 }
             }
         }
@@ -187,12 +206,9 @@ impl IMessageConnector {
         let cancel = self.cancel_token.clone();
         tokio::spawn(async move {
             loop {
-                let event = tokio::select! {
-                    _ = cancel.cancelled() => {
-                        info!("iMessage confirmation listener shutting down");
-                        break;
-                    }
-                    event = rx.recv() => event,
+                let Some(event) = cancel.run_until_cancelled(rx.recv()).await else {
+                    info!("iMessage confirmation listener shutting down");
+                    break;
                 };
                 match event {
                     Ok(SystemEvent::ToolConfirmationRequested {
@@ -288,23 +304,20 @@ impl IMessageConnector {
             .get_or_default("imessage.allow_from_me")
             .ok()
             .flatten()
-            .map(|v| matches!(v.as_str(), "true" | "1" | "yes"))
-            .unwrap_or(true);
+            .is_none_or(|v| matches!(v.as_str(), "true" | "1" | "yes"));
 
         let direct_require_prefix = config_repo
             .get_or_default("imessage.direct_require_prefix")
             .ok()
             .flatten()
-            .map(|v| matches!(v.as_str(), "true" | "1" | "yes"))
-            .unwrap_or(false);
+            .is_some_and(|v| matches!(v.as_str(), "true" | "1" | "yes"));
 
         // Canonical values: "true"/"false". Also accepts "1"/"yes" for convenience.
         let group_require_prefix = config_repo
             .get_or_default("imessage.group_require_prefix")
             .ok()
             .flatten()
-            .map(|v| matches!(v.as_str(), "true" | "1" | "yes"))
-            .unwrap_or(true);
+            .is_none_or(|v| matches!(v.as_str(), "true" | "1" | "yes"));
 
         let mut owner_handles: Vec<String> = config_repo
             .get("imessage.owner_handles")
@@ -363,7 +376,6 @@ impl IMessageConnector {
     }
 }
 
-#[async_trait]
 impl Connector for IMessageConnector {
     fn name(&self) -> &str {
         "imessage"

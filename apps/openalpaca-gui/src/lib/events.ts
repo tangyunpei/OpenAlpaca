@@ -13,6 +13,7 @@
  */
 
 import {
+  ConnectionError,
   bootstrapConnection,
   getStopIntent,
   refreshConnection,
@@ -44,8 +45,8 @@ export type ServerEvent =
   | { type: "heartbeat"; ts: string; instance_id: string; _id: number }
   // The daemon is going away. Sent per socket, immediately before a close with
   // code 1001 — never broadcast, and never replayed. `grace_secs` is the
-  // daemon's force-exit window, so a window can say how long it will be before
-  // the process is gone for certain.
+  // daemon's force-exit window, which bounds its shutdown tail; the process is
+  // gone for certain at most one second after it.
   | { type: "daemon_shutting_down"; grace_secs: number; ts: string; instance_id: string; _id: number }
   | { type: "command_received"; request_id: string; command: string; ts: string; instance_id: string; _id: number }
   | { type: "wake"; wake: unknown; ts: string; instance_id: string; _id: number }
@@ -59,7 +60,7 @@ export type ServerEvent =
   | { type: "orchestrator_config_changed"; model: string; ts: string; instance_id: string; _id: number }
   | { type: "security_violation"; agent_id: string; tool_name: string; reason: string; task_id: string | null; ts: string; instance_id: string; _id: number }
   | { type: "circuit_breaker_tripped"; agent_id: string; tool_name: string; consecutive_failures: number; reset_after_secs: number; task_id: string | null; ts: string; instance_id: string; _id: number }
-  | { type: "tool_executed"; agent_id: string; tool_name: string; success: boolean; duration_ms: number; task_id: string | null; ts: string; instance_id: string; _id: number }
+  | { type: "tool_executed"; agent_id: string; tool_name: string; success: boolean; duration_ms: number; task_id: string | null; reason?: "timeout"; ts: string; instance_id: string; _id: number }
   | { type: "llm_call_completed"; agent_id: string; model: string; input_tokens: number; output_tokens: number; cost_usd: number; task_id: string | null; ts: string; instance_id: string; _id: number }
   | { type: "skill_catalog_updated"; skill_name: string; action: string; ts: string; instance_id: string; _id: number }
   | { type: "skill_invocation_started"; request_id: string; skill_id: string; query_preview: string; ts: string; instance_id: string; _id: number }
@@ -126,14 +127,30 @@ export type ServerEventType = ServerEvent["type"];
 
 // ── Connection status ───────────────────────────────────────────────────────
 
+/**
+ * The socket's state, and two the shell's answers put it in (Q04):
+ * `starting` — the daemon `discovery.json` names is up but does not answer
+ * yet, so the window waits and asks the shell again every
+ * `STARTING_RETRY_MS`, never climbing the ladder; `mismatch` — the daemon
+ * running speaks a protocol this app does not, so the window is parked, as
+ * after a `daemon_shutting_down` it did not ask for: nothing asks again
+ * until Reconnect.
+ */
 export type EventsStatus =
-  "idle" | "connecting" | "connected" | "disconnected" | "error";
+  | "idle"
+  | "connecting"
+  | "connected"
+  | "disconnected"
+  | "error"
+  | "starting"
+  | "mismatch";
 
 /**
  * "You may have missed events" — the only honest signal available, since the
  * server never tells a lagged client that it dropped frames. Emitted whenever
- * the socket comes back after having been down, and whenever the daemon
- * identity changed underneath us.
+ * the socket comes back after having been down, on a first open that a
+ * failed start came before (a query that asked during it may be in error),
+ * and whenever the daemon identity changed underneath us.
  */
 export interface ResyncSignal {
   reason: "reconnected" | "instance_changed";
@@ -145,6 +162,13 @@ export interface ResyncSignal {
 
 export const BACKOFF_BASE_MS = 1000;
 export const BACKOFF_MAX_MS = 30000;
+
+/**
+ * How often the window asks the shell again while the daemon is starting
+ * (Q04): the shell answers at once, judging the daemon afresh each time, and
+ * counts its 45 s budget from its own first look.
+ */
+export const STARTING_RETRY_MS = 1000;
 
 /**
  * Jittered delay for the next reconnect attempt: `backoff × [0.8, 1.2)`,
@@ -217,6 +241,17 @@ export class DaemonEventsClient {
   private nextEventId = 0;
   private instanceId: string | null = null;
   private everConnected = false;
+  /**
+   * Something failed since the socket last opened (or since this client was
+   * made): a bootstrap the shell refused, `starting` included, a rung, or a
+   * socket that closed before it opened. A query that asked meanwhile may
+   * have failed for good — a `starting` it keeps asking on, but past the
+   * shell's budget (`still_starting`), or on any other failure, its retries
+   * (`shouldRetry`) end — so the next open refetches, the window's first
+   * included. A first open with nothing failed before it still signals
+   * nothing.
+   */
+  private failedSinceOpen = false;
   private disconnectedAt: number | null = null;
 
   private status: EventsStatus = "idle";
@@ -284,7 +319,9 @@ export class DaemonEventsClient {
     this.reconnectEnabled = true;
     this.backoffMs = BACKOFF_BASE_MS;
     const gen = ++this.generation;
-    this.setStatus("connecting");
+    // While the daemon is starting each ask is the same wait, not a new
+    // connection attempt to announce.
+    if (this.status !== "starting") this.setStatus("connecting");
 
     try {
       const info = await this.deps.bootstrap();
@@ -298,6 +335,8 @@ export class DaemonEventsClient {
       this.openSocket(info);
     } catch (error) {
       if (gen !== this.generation) return;
+      this.failedSinceOpen = true;
+      if (this.parkOrWait(error)) return;
       this.bootError = error instanceof Error ? error.message : String(error);
       this.setStatus("error");
       this.scheduleReconnect();
@@ -368,9 +407,14 @@ export class DaemonEventsClient {
       this.bootError = null;
       this.backoffMs = BACKOFF_BASE_MS;
       this.setStatus("connected");
-      // A first connect cannot have missed anything; every later one can.
-      if (this.everConnected) this.emitResync("reconnected");
+      // A first connect with nothing failed before it cannot have missed
+      // anything; every later one can, and so can a first one that a failed
+      // start came before: a query that asked during it may be in error.
+      if (this.everConnected || this.failedSinceOpen) {
+        this.emitResync("reconnected");
+      }
       this.everConnected = true;
+      this.failedSinceOpen = false;
       this.disconnectedAt = null;
     };
 
@@ -437,6 +481,7 @@ export class DaemonEventsClient {
   }
 
   private scheduleReconnect(): void {
+    this.failedSinceOpen = true;
     if (this.reconnectTimer !== null || !this.reconnectEnabled) return;
     if (this.disconnectedAt === null) this.disconnectedAt = this.deps.now();
 
@@ -460,11 +505,53 @@ export class DaemonEventsClient {
           this.setStatus("connecting");
           this.openSocket(info);
         })
-        .catch(() => {
+        .catch((error: unknown) => {
           if (gen !== this.generation) return;
+          this.failedSinceOpen = true;
+          // A rung that found another instance re-bootstrapped, and the
+          // shell may have answered that with a Q04 refusal.
+          if (this.parkOrWait(error)) return;
           this.scheduleReconnect();
         });
     }, delay);
+  }
+
+  /**
+   * The two shell refusals no ladder may climb past (Q04), handled; `false`
+   * for any other failure — at boot, or at a rung, whose
+   * `get_connection_info` refuses a live daemon whose file states a protocol
+   * this app does not speak. A `mismatch` parks this client: no rung and no
+   * re-bootstrap of its own, the shell's sentence, with its remedy, the
+   * reason shown, until Reconnect. (The window's other requests bootstrap
+   * through `ensureConnection` while no connection is cached, so they still
+   * ask the shell, which refuses them the same way while that daemon runs
+   * and never spawns beside it.) A `starting` waits: the shell is asked
+   * again in
+   * `STARTING_RETRY_MS` — through `connect()`, so the shell judges the
+   * daemon afresh — unless the window was disconnected or now has no daemon
+   * by intent.
+   */
+  private parkOrWait(error: unknown): boolean {
+    if (!(error instanceof ConnectionError)) return false;
+    if (error.kind === "mismatch") {
+      this.reconnectEnabled = false;
+      this.clearTimer();
+      this.bootError = error.message;
+      this.setStatus("mismatch");
+      return true;
+    }
+    if (error.kind === "starting") {
+      this.clearTimer();
+      this.bootError = error.message;
+      this.setStatus("starting");
+      this.reconnectTimer = setTimeout(() => {
+        this.reconnectTimer = null;
+        if (!this.reconnectEnabled || getStopIntent() !== null) return;
+        void this.connect();
+      }, STARTING_RETRY_MS);
+      return true;
+    }
+    return false;
   }
 }
 

@@ -38,6 +38,16 @@
  * to `Start daemon` — reconnecting to a daemon that is not there is not a
  * thing to offer — and nothing polls.
  *
+ * **Where a daemon this app spawned got its `PATH`** (Q21): the shell's
+ * `daemonPath` on the connection — the login shell's, read once when the app
+ * started (or read again without `-i` when, run interactively, it ended
+ * before it printed its environment: CAPTURE-RETRY), or the app's fallback
+ * list and why — with the capture's
+ * duration, never the `PATH` itself, and the variables passed beside it by
+ * name (`[daemon.env] passthrough_keys`, N-DAEMON-2); nothing for a daemon
+ * this run of the app did not spawn (one started from a terminal logs
+ * `inherited` in its own `daemon.log`).
+ *
  * **Why the daemon would not start** is shown here too, verbatim: the shell's
  * `ensure_daemon_running` rejection ends with what the daemon wrote to its
  * log before it gave up, and `Show daemon log` reads the file directly — both
@@ -58,10 +68,12 @@ import { useConnectionStatus, useDaemonStatus } from "@/hooks/useConnection";
 import { useConnectors } from "@/hooks/useConnectors";
 import {
   readDaemonLogTail,
+  type DaemonPath,
   type StopIntent,
   type StopPhase,
 } from "@/lib/connection";
 import { stopDaemon, stopToast } from "@/lib/daemon-control";
+import type { EventsStatus } from "@/lib/events";
 import { useTasks } from "@/hooks/useTasks";
 import { capsNote, formatSpend, useUsageSummary } from "@/hooks/useUsage";
 import { useChooseProject } from "@/hooks/useWorkspaces";
@@ -122,7 +134,12 @@ export function ConnectionSection() {
       <StatusCard
         ok={!stopped && connection.connected}
         idle={stopped}
-        title={statusTitle(intent, connection.connected, phase)}
+        title={statusTitle(
+          intent,
+          connection.connected,
+          phase,
+          connection.socket,
+        )}
         meta={
           stopped
             ? stoppedMeta(connection.stoppedAt ?? null, phase)
@@ -198,6 +215,12 @@ export function ConnectionSection() {
             started by hand.
           </GapNote>
         )}
+        {!stopped && connection.info?.daemonPath ? (
+          <GapNote>{daemonPathNote(connection.info.daemonPath)}</GapNote>
+        ) : null}
+        {!stopped && connection.note ? (
+          <GapNote>{connection.note}</GapNote>
+        ) : null}
         {!stopped && !connection.connected && connection.lastError ? (
           <LogBlock label="Why the daemon is unreachable">
             {connection.lastError}
@@ -253,12 +276,15 @@ export function ConnectionSection() {
 /**
  * The status card's title, stopped or not (§6.3). A stop from this window is
  * titled by what `await_daemon_stopped` concluded, never by the intent alone:
- * the POST's `200` only says the daemon was asked.
+ * the POST's `200` only says the daemon was asked. With no stop, the two
+ * states the shell's answers put the socket in (Q04) have titles of their
+ * own: a daemon still starting, and one this app cannot use.
  */
 export function statusTitle(
   intent: StopIntent,
   connected: boolean,
   phase: StopPhase = null,
+  socket: EventsStatus | null = null,
 ): string {
   if (intent === "stopped_here") {
     switch (phase) {
@@ -275,7 +301,31 @@ export function statusTitle(
     }
   }
   if (intent === "stopped_elsewhere") return "Daemon stopped from elsewhere";
-  return connected ? "Daemon connected" : "Daemon unreachable";
+  if (connected) return "Daemon connected";
+  if (socket === "starting") return "Daemon is starting";
+  if (socket === "mismatch") return "Daemon version mismatch";
+  return "Daemon unreachable";
+}
+
+/**
+ * Where the `PATH` of the daemon this app spawned came from, and how long
+ * the capture took — never the `PATH` (Q21) — and the variables passed
+ * beside it, by name, never their values (N-DAEMON-2).
+ */
+export function daemonPathNote(path: DaemonPath): string {
+  if (
+    path.source === "login-shell" ||
+    path.source === "login-shell-noninteractive"
+  ) {
+    const note =
+      path.source === "login-shell"
+        ? `This daemon's PATH is your login shell's, read when the app started (${path.captureMs} ms).`
+        : `This daemon's PATH is your login shell's without its interactive startup files (such as ~/.zshrc), read when the app started (${path.captureMs} ms): run interactively, your shell ended before it printed its environment.`;
+    if (path.passedKeys.length === 0) return note;
+    return `${note} Also passed from your login shell, as daemon.toml's [daemon.env] passthrough_keys lists: ${path.passedKeys.join(", ")}.`;
+  }
+  const why = path.reason ?? "the login shell's could not be read";
+  return `This daemon's PATH is the app's fallback list: ${why} (${path.captureMs} ms).`;
 }
 
 function stoppedMeta(stoppedAt: number | null, phase: StopPhase): string {

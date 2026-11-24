@@ -1,28 +1,28 @@
 /**
  * `Reveal in Finder` — show an artifact's file in its folder (Round G, G4).
  *
- * The one action here the daemon cannot do: the daemon may run on another
- * host, but the folder has to open on this one, so the Tauri shell's
- * `reveal_path` command does it. The shell checks the path itself (a regular
- * file in an OpenAlpaca store or under the root of a registered project that
- * is not missing, symlinks resolved) and runs the platform's
- * reveal with the path as an argument. *Opening* a file is the daemon's route
- * (`POST /v1/files/{id}/open`, `useOpenFile`) and is labelled `Open`.
+ * The daemon does it (Q06): `POST /v1/files/{id}/reveal` resolves the file id
+ * to its stored file, checks it (a regular file in an OpenAlpaca store or
+ * under the root of a registered project that is not missing, symlinks
+ * resolved) and runs the platform's reveal on its own host — the one the
+ * app's own shell starts and connects to — answering no path. This window
+ * sends the id only, never a path, so nothing it holds is authority.
+ * *Opening* a file is the daemon's route too (`POST /v1/files/{id}/open`,
+ * `useOpenFile`) and is labelled `Open`.
  */
 
-import { invoke } from "@tauri-apps/api/core";
+import { revealFile } from "./api/files";
+import { host } from "./host";
 
 /**
- * Whether this window can reveal a file: only inside the Tauri shell. In the
- * Vite preview (or jsdom) there is no shell to ask, so nothing draws the
- * button.
+ * Whether this window offers Reveal: only inside the Tauri shell. In the Vite
+ * preview (or jsdom) nothing draws the button.
  *
- * Reads the marker the shell injects — the same one `@tauri-apps/api/core`'s
- * `isTauri()` reads — directly, so a test that mocks that module with
- * `invoke` alone does not have to stub it too.
+ * The host says so (`lib/host/`): TauriHost does; the dev-server and fixture
+ * hosts do not, unless a test sets the fixture's flag.
  */
 export function canReveal(): boolean {
-  return (globalThis as { isTauri?: unknown }).isTauri === true;
+  return host().reveal;
 }
 
 /** "Reveal in Finder" on macOS, where Finder is the name people know; "Show in folder" elsewhere. */
@@ -35,17 +35,12 @@ export function revealLabel(
 }
 
 /**
- * Ask the shell to show `path` in its folder. Rejects with the shell's own
- * sentence — it is written to be shown as it is.
+ * Ask the daemon to show the file `id` in its folder. Rejects with the
+ * daemon's own sentence, written to be shown as it is: `409 REVEAL_REFUSED`
+ * for a file it does not show, `410 ARTIFACT_PROJECT_MISSING` for a missing
+ * project's, `500 REVEAL_FAILED` for one the platform could not show
+ * (`ApiError`, `lib/http.ts`).
  */
-export async function revealInFolder(path: string): Promise<void> {
-  try {
-    await invoke("reveal_path", { path });
-  } catch (cause) {
-    throw new Error(
-      typeof cause === "string"
-        ? cause
-        : "The file could not be shown in its folder.",
-    );
-  }
+export async function revealInFolder(id: string): Promise<void> {
+  await revealFile(id);
 }

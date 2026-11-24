@@ -14,7 +14,7 @@ fn test_resolve_principal_untrusted() {
 
     // Test untrusted
     let (principal, _) = resolve_principal(&repo, "telegram", "user123", Some("Alice")).unwrap();
-    assert!(matches!(principal, Principal::External { id, .. } if id == "user123"));
+    std::assert_matches!(principal, Principal::External { id, .. } if id == "user123");
 }
 
 #[test]
@@ -31,7 +31,7 @@ fn test_resolve_principal_trusted() {
 
     // Test trusted
     let (principal, _) = resolve_principal(&repo, "telegram", "user123", None).unwrap();
-    assert!(matches!(principal, Principal::User { global_id } if global_id == "global1"));
+    std::assert_matches!(principal, Principal::User { global_id } if global_id == "global1");
 }
 
 #[test]
@@ -47,7 +47,7 @@ fn test_handle_link_token_flow() {
 
     // Consume
     let res = handle_link_token(&repo, "TOKEN1", ext.id).unwrap();
-    assert!(matches!(res, LinkResult::Success(uid) if uid == "global1"));
+    std::assert_matches!(res, LinkResult::Success(uid) if uid == "global1");
 
     // Verify linked in DB
     let ext_after = repo
@@ -369,7 +369,7 @@ mod confirmation {
         let response = rx.try_recv().expect("broker should deliver response");
         assert!(response.approved);
         // Queue drained
-        assert!(pending.get(&42u64).map(|q| q.is_empty()).unwrap_or(true));
+        assert!(pending.get(&42u64).is_none_or(|q| q.is_empty()));
     }
 
     #[test]
@@ -894,9 +894,9 @@ mod attachments {
     impl HomeStoreGuard {
         fn set(path: &Path) -> Self {
             let lock = ENV_LOCK.lock().unwrap_or_else(|p| p.into_inner());
-            let prev = std::env::var_os(openalpaca_storage::store::HOME_STORE_ENV);
+            let prev = std::env::var_os(openalpaca_app_support::paths::HOME_STORE_ENV);
             // SAFETY: serialized by ENV_LOCK — this module's only writer.
-            unsafe { std::env::set_var(openalpaca_storage::store::HOME_STORE_ENV, path) };
+            unsafe { std::env::set_var(openalpaca_app_support::paths::HOME_STORE_ENV, path) };
             Self { _lock: lock, prev }
         }
     }
@@ -906,9 +906,11 @@ mod attachments {
             // SAFETY: as above — still holding ENV_LOCK.
             match self.prev.take() {
                 Some(v) => unsafe {
-                    std::env::set_var(openalpaca_storage::store::HOME_STORE_ENV, v)
+                    std::env::set_var(openalpaca_app_support::paths::HOME_STORE_ENV, v)
                 },
-                None => unsafe { std::env::remove_var(openalpaca_storage::store::HOME_STORE_ENV) },
+                None => unsafe {
+                    std::env::remove_var(openalpaca_app_support::paths::HOME_STORE_ENV)
+                },
             }
         }
     }
@@ -973,6 +975,36 @@ mod attachments {
             5,
             "a dedup hit inserts no second row"
         );
+    }
+
+    /// ATTACH-PLACEHOLDER: a file re-sent through a connector dedups to its
+    /// existing row; when that row's extraction failed, the attachment says
+    /// so (the model then reads the failed note, not "pending"), and the
+    /// row's error text is carried nowhere. A new upload is not failed.
+    #[test]
+    fn a_resent_file_whose_extraction_failed_is_marked_failed() {
+        let home = tempdir().unwrap();
+        let _guard = HomeStoreGuard::set(&home.path().canonicalize().unwrap());
+        let db = test_db();
+
+        let first = store(&db, "owner-1", "notes.txt", b"hello");
+        assert!(!first.extraction_failed, "a new upload is pending");
+        openalpaca_storage::FileAssetRepository::new(&db)
+            .update_status(
+                &first.file_id,
+                &openalpaca_storage::FileAssetStatus::Error,
+                None,
+                Some("[attempt:2] SENTINEL-CONNECTOR failure"),
+            )
+            .unwrap();
+
+        let again = store(&db, "owner-1", "notes.txt", b"hello");
+        assert_eq!(again.file_id, first.file_id);
+        assert!(again.extraction_failed);
+        assert!(again.extracted_text.is_none());
+        let carried = format!("{again:?}");
+        assert!(!carried.contains("SENTINEL-CONNECTOR"), "{carried}");
+        assert!(!carried.contains("[attempt:"), "{carried}");
     }
 
     #[test]

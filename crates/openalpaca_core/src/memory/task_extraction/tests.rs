@@ -608,8 +608,7 @@ mod through_the_service {
             )
             .unwrap();
         let outcome = extract_task_memories(&scene.deps(), scene.params(OWNER, true)).await;
-        assert!(
-            matches!(&outcome, TaskExtractionOutcome::Extracted(r) if r.stored == 1),
+        std::assert_matches!(&outcome, TaskExtractionOutcome::Extracted(r) if r.stored == 1,
             "{outcome:?}"
         );
         let prompt = scene
@@ -656,8 +655,9 @@ mod through_the_service {
         let scene = Scene::new(r#"{"extractions": []}"#);
         extract_task_memories(&scene.deps(), scene.params(OWNER, true)).await;
         let request = scene.provider.first_request();
-        assert!(
-            matches!(request.thinking, Some(ThinkingConfig::Disabled)),
+        std::assert_matches!(
+            request.thinking,
+            Some(ThinkingConfig::Disabled),
             "the task extractor must ask for no reasoning, got {:?}",
             request.thinking
         );
@@ -709,10 +709,7 @@ mod through_the_service {
                 })
                 .await;
             let outcome = extract_task_memories(&deps, scene.params(OWNER, true)).await;
-            assert!(
-                matches!(outcome, TaskExtractionOutcome::Extracted(_)),
-                "{outcome:?}"
-            );
+            std::assert_matches!(outcome, TaskExtractionOutcome::Extracted(_), "{outcome:?}");
         } // One scene at a time: each holds the home-store lock.
 
         // Today's spend over the cap binds, with no call.

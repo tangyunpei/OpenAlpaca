@@ -172,6 +172,7 @@ mod tests {
             default_model: None,
             default_max_tokens: None,
             request_timeout_secs: None,
+            model_aliases: None,
         };
 
         let reload_keys = build_api_keys_from_provider_config(

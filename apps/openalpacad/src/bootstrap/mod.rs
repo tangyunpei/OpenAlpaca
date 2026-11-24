@@ -4,6 +4,7 @@ mod config;
 mod content;
 mod interrupted;
 mod migration;
+mod path_source;
 mod persona;
 mod repoints;
 
@@ -13,6 +14,7 @@ mod tests;
 pub use config::{resolve_config_base_dir, seed_default_configs};
 pub use interrupted::{announce_interrupted, sweep_interrupted_runs};
 pub use migration::{close_orphaned_spans, is_same_file_path, resolve_local_user_id};
+pub use path_source::{PathSource, parse_path_source, path_source_line};
 pub use persona::{
     PERSONA_MAX_BACKUPS, bootstrap_bootstrap_document, bootstrap_identity_document,
     bootstrap_system_persona, bootstrap_user_document, load_bootstrap_document_from_file,

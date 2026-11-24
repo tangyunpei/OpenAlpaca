@@ -228,6 +228,19 @@ pub(crate) fn command_stub_budget(data: &Value) -> Option<usize> {
 /// [`command_stub_marker`]'s `form`: [`command_spill_stub`]'s head and tail.
 const COMMAND_STUB_FORM: &str = "head_tail";
 
+/// What the model is handed in place of a successful result with nothing to
+/// read — empty, or whitespace alone — that sits inline (N-TOOL-6, Z1-15):
+/// a line naming the tool, so a silent success (a command that printed
+/// nothing, an MCP result with no content) is not read as a missing result.
+/// `None` for any other text. The record keeps the tool's own output; the
+/// loop and a replay both take the line from here, so they agree.
+pub(crate) fn no_output_line(tool: &str, result: &str) -> Option<String> {
+    result
+        .trim()
+        .is_empty()
+        .then(|| format!("({tool} completed with no output)"))
+}
+
 /// The first [`PREVIEW_CHARS`] characters of a result — the same bytes the
 /// record, the stub and `tool_execution_log.result_preview` all carry, so the
 /// expanded-turn view renders without touching `results/` and a replay can

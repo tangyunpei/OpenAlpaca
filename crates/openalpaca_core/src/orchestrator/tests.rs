@@ -6,7 +6,6 @@ use crate::security::policy::{Principal, Scope};
 use crate::security::sandbox::SandboxManager;
 use crate::test_util::{make_agent, template_from_agent};
 use crate::tools::ToolRegistry;
-use async_trait::async_trait;
 use base64::Engine as _;
 use openalpaca_llm::{ChatRequest, ContentPart, ImageSource};
 use openalpaca_storage::{OutcomeKind, TaskStatus};
@@ -58,7 +57,6 @@ fn make_orchestrator_with_fixed_llm_response(response: &str) -> Orchestrator {
         response: String,
     }
 
-    #[async_trait]
     impl LlmProvider for FixedMockLlm {
         fn name(&self) -> &str {
             "fixed-mock"
@@ -80,6 +78,7 @@ fn make_orchestrator_with_fixed_llm_response(response: &str) -> Orchestrator {
                 },
                 finish_reason: FinishReason::Stop,
                 thinking: None,
+                echo: None,
                 parts: None,
             })
         }
@@ -90,7 +89,7 @@ fn make_orchestrator_with_fixed_llm_response(response: &str) -> Orchestrator {
             response: response.to_string(),
         }),
         ProviderType::Anthropic,
-        "claude-sonnet-4-5-20250929".to_string(),
+        "claude-sonnet-5-5".to_string(),
     );
 
     make_orchestrator_with_llm_and_agents(Arc::new(router), vec![])
@@ -105,7 +104,6 @@ fn make_orchestrator_with_capturing_llm(
         captured_requests: Arc<std::sync::Mutex<Vec<ChatRequest>>>,
     }
 
-    #[async_trait]
     impl LlmProvider for CapturingMockLlm {
         fn name(&self) -> &str {
             "capturing-mock"
@@ -130,6 +128,7 @@ fn make_orchestrator_with_capturing_llm(
                 },
                 finish_reason: FinishReason::Stop,
                 thinking: None,
+                echo: None,
                 parts: None,
             })
         }
@@ -138,7 +137,7 @@ fn make_orchestrator_with_capturing_llm(
     let router = openalpaca_llm::LlmRouter::single_provider(
         Arc::new(CapturingMockLlm { captured_requests }),
         ProviderType::Anthropic,
-        "claude-sonnet-4-5-20250929".to_string(),
+        "claude-sonnet-5-5".to_string(),
     );
     make_orchestrator_with_llm_and_agents(Arc::new(router), vec![])
 }
@@ -267,7 +266,6 @@ async fn test_permission_denied_external() {
 
 #[tokio::test]
 async fn test_simple_query_with_mock_llm() {
-    use async_trait::async_trait;
     use openalpaca_llm::{
         ChatRequest, ChatResponse, FinishReason, LlmError, LlmProvider, LlmRouter, ProviderType,
         Usage,
@@ -275,7 +273,6 @@ async fn test_simple_query_with_mock_llm() {
 
     struct MockLlm;
 
-    #[async_trait]
     impl LlmProvider for MockLlm {
         fn name(&self) -> &str {
             "mock"
@@ -295,6 +292,7 @@ async fn test_simple_query_with_mock_llm() {
                 },
                 finish_reason: FinishReason::Stop,
                 thinking: None,
+                echo: None,
                 parts: None,
             })
         }
@@ -308,7 +306,7 @@ async fn test_simple_query_with_mock_llm() {
     let router = LlmRouter::single_provider(
         Arc::new(MockLlm),
         ProviderType::Anthropic,
-        "claude-sonnet-4-5-20250929".to_string(),
+        "claude-sonnet-5-5".to_string(),
     );
     let orch = Orchestrator::new(
         ctx,
@@ -402,7 +400,6 @@ async fn test_security_gate_replaces_trust_gate() {
 
 /// Helper: create a mock LLM that returns a fixed response string.
 fn make_planning_mock_llm(response: &str) -> Arc<LlmRouter> {
-    use async_trait::async_trait;
     use openalpaca_llm::{ChatRequest, ChatResponse, FinishReason, LlmError, LlmProvider, Usage};
     use std::sync::atomic::{AtomicUsize, Ordering};
 
@@ -411,7 +408,6 @@ fn make_planning_mock_llm(response: &str) -> Arc<LlmRouter> {
         call_count: AtomicUsize,
     }
 
-    #[async_trait]
     impl LlmProvider for PlanningMockLlm {
         fn name(&self) -> &str {
             "planning-mock"
@@ -432,6 +428,7 @@ fn make_planning_mock_llm(response: &str) -> Arc<LlmRouter> {
                 },
                 finish_reason: FinishReason::Stop,
                 thinking: None,
+                echo: None,
                 parts: None,
             })
         }
@@ -444,7 +441,7 @@ fn make_planning_mock_llm(response: &str) -> Arc<LlmRouter> {
     let router = openalpaca_llm::LlmRouter::single_provider(
         Arc::new(mock),
         openalpaca_llm::ProviderType::Anthropic,
-        "claude-sonnet-4-5-20250929".to_string(),
+        "claude-sonnet-5-5".to_string(),
     );
     Arc::new(router)
 }
@@ -480,13 +477,11 @@ fn make_orchestrator_with_llm_and_agents(
 
 #[tokio::test]
 async fn test_slash_commands_bypass_llm() {
-    use async_trait::async_trait;
     use openalpaca_llm::{ChatRequest, ChatResponse, LlmError, LlmProvider};
 
     // Mock LLM that panics if called — slash commands must bypass it
     struct PanickingLlm;
 
-    #[async_trait]
     impl LlmProvider for PanickingLlm {
         fn name(&self) -> &str {
             "panicking"
@@ -502,7 +497,7 @@ async fn test_slash_commands_bypass_llm() {
     let router = openalpaca_llm::LlmRouter::single_provider(
         Arc::new(PanickingLlm),
         openalpaca_llm::ProviderType::Anthropic,
-        "claude-sonnet-4-5-20250929".to_string(),
+        "claude-sonnet-5-5".to_string(),
     );
     let orch = make_orchestrator_with_llm_and_agents(Arc::new(router), vec![]);
 
@@ -542,7 +537,6 @@ fn make_security_gate_with_registry(
 
 struct MockBuiltInTool;
 
-#[async_trait::async_trait]
 impl BuiltInTool for MockBuiltInTool {
     async fn execute(&self, _arguments: &serde_json::Value) -> Result<String, String> {
         Ok("mock tool result".to_string())
@@ -558,7 +552,7 @@ fn make_mock_tool(name: &str) -> RegisteredTool {
             strict: None,
             input_examples: None,
         },
-        backend: ToolBackend::BuiltIn(Arc::new(MockBuiltInTool)),
+        backend: ToolBackend::built_in(MockBuiltInTool),
         provides_capabilities: vec![],
         exempt_from_timeout: false,
         annotations: None,
@@ -616,7 +610,6 @@ mod request_workspace_threading {
     /// Records the `ToolContext` every invocation was handed.
     struct RecordingTool(Arc<Mutex<Vec<ToolContext>>>);
 
-    #[async_trait]
     impl BuiltInTool for RecordingTool {
         async fn execute(&self, _arguments: &serde_json::Value) -> Result<String, String> {
             Err("needs context".to_string())
@@ -639,7 +632,6 @@ mod request_workspace_threading {
         calls: AtomicUsize,
     }
 
-    #[async_trait]
     impl LlmProvider for CallsTheToolOnce {
         fn name(&self) -> &str {
             "records-ctx"
@@ -673,6 +665,7 @@ mod request_workspace_threading {
                 },
                 finish_reason,
                 thinking: None,
+                echo: None,
                 parts: None,
             })
         }
@@ -684,7 +677,7 @@ mod request_workspace_threading {
         let recorded = Arc::new(Mutex::new(Vec::new()));
         let registry = ToolRegistry::default();
         let mut tool = make_mock_tool("record_ctx");
-        tool.backend = ToolBackend::BuiltIn(Arc::new(RecordingTool(recorded.clone())));
+        tool.backend = ToolBackend::built_in(RecordingTool(recorded.clone()));
         registry.register(tool).unwrap();
         let registry = Arc::new(registry);
 
@@ -698,7 +691,7 @@ mod request_workspace_threading {
                 calls: AtomicUsize::new(0),
             }),
             openalpaca_llm::ProviderType::Anthropic,
-            "claude-sonnet-4-5-20250929".to_string(),
+            "claude-sonnet-5-5".to_string(),
         );
         let bus = EventBus::default();
         let gate = make_security_gate_with_registry(&bus, registry.clone());
@@ -799,6 +792,7 @@ mod a_list_change_mid_turn {
             remote_name: remote.to_string(),
             server_name: "srv".to_string(),
             generation: 1,
+            output_schema: None,
         };
         tool.author = "mcp:srv".to_string();
         tool
@@ -809,7 +803,6 @@ mod a_list_change_mid_turn {
     /// turn's tool call is still running.
     struct TheServerChangesItsList(Arc<ToolRegistry>);
 
-    #[async_trait]
     impl BuiltInTool for TheServerChangesItsList {
         async fn execute(&self, _arguments: &serde_json::Value) -> Result<String, String> {
             self.0.remove("srv__dropped");
@@ -829,7 +822,6 @@ mod a_list_change_mid_turn {
         offered: Arc<Mutex<Vec<Vec<String>>>>,
     }
 
-    #[async_trait]
     impl LlmProvider for CallsChangeListOnce {
         fn name(&self) -> &str {
             "calls-change-list-once"
@@ -872,6 +864,7 @@ mod a_list_change_mid_turn {
                 },
                 finish_reason,
                 thinking: None,
+                echo: None,
                 parts: None,
             })
         }
@@ -892,8 +885,7 @@ mod a_list_change_mid_turn {
         ledger.upsert(&ext, true, ExtensionState::Enabled);
         ledger.record_tools(&ext, ["srv__dropped", "srv__kept"]);
         let mut change_list = make_mock_tool("change_list");
-        change_list.backend =
-            ToolBackend::BuiltIn(Arc::new(TheServerChangesItsList(registry.clone())));
+        change_list.backend = ToolBackend::built_in(TheServerChangesItsList(registry.clone()));
         registry.register(change_list).unwrap();
 
         // "full" puts the whole registry on the main-loop surface, so the
@@ -908,7 +900,7 @@ mod a_list_change_mid_turn {
                 offered: offered.clone(),
             }),
             openalpaca_llm::ProviderType::Anthropic,
-            "claude-sonnet-4-5-20250929".to_string(),
+            "claude-sonnet-5-5".to_string(),
         );
         let gate = make_security_gate_with_registry(&bus, registry.clone());
         let orch = Orchestrator::new(
@@ -985,7 +977,6 @@ mod project_turn_offers {
     /// Answers at once and keeps every request it was handed.
     struct Capturing(Arc<Mutex<Vec<ChatRequest>>>);
 
-    #[async_trait]
     impl LlmProvider for Capturing {
         fn name(&self) -> &str {
             "capturing"
@@ -1009,6 +1000,7 @@ mod project_turn_offers {
                 },
                 finish_reason: FinishReason::Stop,
                 thinking: None,
+                echo: None,
                 parts: None,
             })
         }
@@ -1021,7 +1013,7 @@ mod project_turn_offers {
         let router = openalpaca_llm::LlmRouter::single_provider(
             Arc::new(Capturing(captured.clone())),
             openalpaca_llm::ProviderType::Anthropic,
-            "claude-sonnet-4-5-20250929".to_string(),
+            "claude-sonnet-5-5".to_string(),
         );
         let orch = make_orchestrator_with_tools_and_llm(Arc::new(router), tools);
         orch.handle_message(HandleRequest {
@@ -1130,7 +1122,6 @@ async fn test_tool_intent_detected_and_executes() {
         call_count: AtomicUsize,
     }
 
-    #[async_trait::async_trait]
     impl LlmProvider for ToolMockLlm {
         fn name(&self) -> &str {
             "tool-mock"
@@ -1149,6 +1140,7 @@ async fn test_tool_intent_detected_and_executes() {
                     usage: Usage { input_tokens: 10, output_tokens: 20, ..Default::default() },
                     finish_reason: FinishReason::Stop,
                     thinking: None,
+                    echo: None,
                     parts: None,
                 }),
                 // Call 1: agentic loop — return tool use
@@ -1163,6 +1155,7 @@ async fn test_tool_intent_detected_and_executes() {
                     usage: Usage { input_tokens: 10, output_tokens: 20, ..Default::default() },
                     finish_reason: FinishReason::ToolUse,
                     thinking: None,
+                    echo: None,
                     parts: None,
                 }),
                 // Call 2+: return final answer with Stop
@@ -1173,6 +1166,7 @@ async fn test_tool_intent_detected_and_executes() {
                     usage: Usage { input_tokens: 10, output_tokens: 20, ..Default::default() },
                     finish_reason: FinishReason::Stop,
                     thinking: None,
+                    echo: None,
                     parts: None,
                 }),
             }
@@ -1185,7 +1179,7 @@ async fn test_tool_intent_detected_and_executes() {
     let router = openalpaca_llm::LlmRouter::single_provider(
         Arc::new(mock),
         openalpaca_llm::ProviderType::Anthropic,
-        "claude-sonnet-4-5-20250929".to_string(),
+        "claude-sonnet-5-5".to_string(),
     );
     let orch = make_orchestrator_with_tools_and_llm(Arc::new(router), &["web_fetch"]);
 
@@ -1223,7 +1217,6 @@ async fn test_tool_max_rounds_enforcement() {
         call_count: AtomicUsize,
     }
 
-    #[async_trait::async_trait]
     impl LlmProvider for AlwaysToolUseLlm {
         fn name(&self) -> &str {
             "always-tool"
@@ -1242,6 +1235,7 @@ async fn test_tool_max_rounds_enforcement() {
                     usage: Usage { input_tokens: 10, output_tokens: 20, ..Default::default() },
                     finish_reason: FinishReason::Stop,
                     thinking: None,
+                    echo: None,
                     parts: None,
                 });
             }
@@ -1261,6 +1255,7 @@ async fn test_tool_max_rounds_enforcement() {
                 },
                 finish_reason: FinishReason::ToolUse,
                 thinking: None,
+                echo: None,
                 parts: None,
             })
         }
@@ -1272,7 +1267,7 @@ async fn test_tool_max_rounds_enforcement() {
     let router = openalpaca_llm::LlmRouter::single_provider(
         Arc::new(mock),
         openalpaca_llm::ProviderType::Anthropic,
-        "claude-sonnet-4-5-20250929".to_string(),
+        "claude-sonnet-5-5".to_string(),
     );
     let orch = make_orchestrator_with_tools_and_llm(Arc::new(router), &["web_fetch"]);
 
@@ -1338,6 +1333,7 @@ fn make_attachment_with_text(extracted_text: &str) -> ResolvedAttachment {
         size_bytes: extracted_text.len() as i64,
         extracted_text: Some(extracted_text.to_string()),
         storage_path: "/tmp/note.txt".to_string(),
+        extraction_failed: false,
     }
 }
 
@@ -1418,7 +1414,7 @@ async fn test_empty_content_with_attachments_forces_simple_query() {
 // The round-7 acceptance run attached an image and a text file to an
 // Ollama-only install and got `[image attached — …]` and
 // `[document attached — …]` back: the adaptation asked the registry about
-// `claude-haiku-4-5-20251001`, the *configured* default, which a local-only
+// `claude-haiku-5-5`, the *configured* default, which a local-only
 // install has pruned from the catalogue entirely. These build the same shape.
 
 /// A router shaped like a local-only install: Anthropic and OpenAI are
@@ -1451,7 +1447,7 @@ fn local_only_router(
         Arc::new(CostTracker::new(cost_registry)),
         // Exactly what a shipped `llm.toml` names, and exactly what the
         // acceptance run's install could not route.
-        "claude-haiku-4-5-20251001".to_string(),
+        "claude-haiku-5-5".to_string(),
     );
     router.model_registry().register(
         model_id.to_string(),
@@ -1467,6 +1463,9 @@ fn local_only_router(
             supports_reasoning: false,
             supports_tools: true,
             declared: false,
+            long_prompt: None,
+            cache_rates: None,
+            request_contract: openalpaca_llm::RequestContract::NONE,
         },
     );
     // `RecordingProvider` is not `OllamaProvider`, so it keeps the trait's
@@ -1475,7 +1474,7 @@ fn local_only_router(
     // *adaptation*, not L1's keyless slot.
     router.register_provider(
         ProviderType::Ollama,
-        provider,
+        openalpaca_llm::DynLlmProvider::from_arc(provider),
         openalpaca_llm::keys::key_pool::KeyPool::new(
             vec![openalpaca_llm::keys::ApiKey::new(
                 "default".to_string(),
@@ -1545,6 +1544,7 @@ async fn an_image_survives_for_a_local_vision_model_the_ladder_picked() {
             size_bytes: image_bytes.len() as i64,
             extracted_text: None,
             storage_path: img_path.to_string_lossy().to_string(),
+            extraction_failed: false,
         }],
     )
     .await
@@ -1592,6 +1592,7 @@ async fn an_image_is_withheld_from_a_local_model_that_cannot_see_and_is_reported
             size_bytes: 3,
             extracted_text: None,
             storage_path: img_path.to_string_lossy().to_string(),
+            extraction_failed: false,
         }],
     )
     .await
@@ -1639,6 +1640,7 @@ async fn a_documents_text_reaches_a_model_without_native_document_support() {
             size_bytes: 40,
             extracted_text: Some("the codeword is PLATYPUS".to_string()),
             storage_path: "/dev/null".to_string(),
+            extraction_failed: false,
         }],
     )
     .await
@@ -1685,6 +1687,7 @@ async fn a_document_with_no_extracted_text_keeps_the_placeholder() {
             size_bytes: 1024,
             extracted_text: None,
             storage_path: "/dev/null".to_string(),
+            extraction_failed: false,
         }],
     )
     .await
@@ -1718,7 +1721,7 @@ fn a_native_document_model_still_gets_the_native_part() {
     let router = make_planning_mock_llm(r#"{"classification":"simple_query","assignments":[]}"#);
     let orch = make_orchestrator_with_llm_and_agents(router, vec![]);
     let model = orch
-        .answering_model(Some("claude-sonnet-4-5-20250929"))
+        .answering_model(Some("claude-sonnet-5-5"))
         .expect("the configured default is routable here");
 
     let adapted = orch.adapt_parts_for_model(
@@ -1732,7 +1735,7 @@ fn a_native_document_model_still_gets_the_native_part() {
     );
 
     assert_eq!(adapted.len(), 1);
-    assert!(matches!(adapted[0], ContentPart::Document { .. }));
+    std::assert_matches!(adapted[0], ContentPart::Document { .. });
 }
 
 /// **U2 — bounded, and never silently.** The extraction cap
@@ -1772,6 +1775,7 @@ async fn an_over_long_document_is_cut_at_the_extraction_cap_and_says_so() {
             size_bytes: 100,
             extracted_text: Some("y".repeat(100)),
             storage_path: "/dev/null".to_string(),
+            extraction_failed: false,
         }],
     )
     .await
@@ -1811,6 +1815,7 @@ async fn test_attachment_image_is_converted_to_base64_part() {
         size_bytes: image_bytes.len() as i64,
         extracted_text: None,
         storage_path: img_path.to_string_lossy().to_string(),
+        extraction_failed: false,
     }];
 
     let _ = orch
@@ -1873,6 +1878,7 @@ async fn test_attachment_image_read_failure_inserts_placeholder_text() {
         size_bytes: 0,
         extracted_text: None,
         storage_path: "/tmp/openalpaca-does-not-exist.jpg".to_string(),
+        extraction_failed: false,
     }];
 
     let _ = orch
@@ -1926,6 +1932,7 @@ async fn test_attachment_document_pending_adds_pending_text_part() {
         size_bytes: 123,
         extracted_text: None,
         storage_path: "/tmp/resume.pdf".to_string(),
+        extraction_failed: false,
     }];
 
     let _ = orch
@@ -1966,6 +1973,228 @@ async fn test_attachment_document_pending_adds_pending_text_part() {
     )));
 }
 
+/// ATTACH-PLACEHOLDER: one row in a scratch database, resolved the way a
+/// chat turn resolves it (no wait).
+async fn resolve_stored_attachment(
+    db: &openalpaca_storage::Database,
+    id: &str,
+    mime_type: &str,
+    storage_path: &str,
+    status: openalpaca_storage::FileAssetStatus,
+    extract_error: Option<&str>,
+) -> ResolvedAttachment {
+    openalpaca_storage::repository::FileAssetRepository::new(db)
+        .insert(&openalpaca_storage::FileAsset {
+            id: id.to_string(),
+            owner_id: "u1".to_string(),
+            sha256: format!("sha-{id}"),
+            filename: format!("{id}.bin"),
+            mime_type: mime_type.to_string(),
+            size_bytes: 6,
+            storage_path: storage_path.to_string(),
+            status,
+            extracted_text: None,
+            extract_error: extract_error.map(ToString::to_string),
+            metadata_json: None,
+            created_at: String::new(),
+            updated_at: String::new(),
+        })
+        .unwrap();
+    let refs = vec![openalpaca_storage::AttachmentRef {
+        file_id: id.to_string(),
+        caption: None,
+    }];
+    let mut resolved =
+        crate::chat::ChatService::resolve_attachments_with_wait(db.clone(), &refs, "u1", 0, 20)
+            .await
+            .unwrap();
+    resolved.remove(0)
+}
+
+/// Every text the provider was handed across the turn: each message's
+/// content and each part, as the request's own debug form.
+fn everything_the_model_saw(captured: &Arc<std::sync::Mutex<Vec<ChatRequest>>>) -> String {
+    let guard = captured.lock().unwrap();
+    assert!(!guard.is_empty(), "expected at least one captured request");
+    guard.iter().map(|r| format!("{r:?}\n")).collect()
+}
+
+fn text_parts_the_model_saw(captured: &Arc<std::sync::Mutex<Vec<ChatRequest>>>) -> Vec<String> {
+    let guard = captured.lock().unwrap();
+    guard
+        .iter()
+        .flat_map(|r| r.messages.iter())
+        .filter_map(|m| m.parts.as_ref())
+        .flatten()
+        .filter_map(|p| match p {
+            ContentPart::Text { text } => Some(text.clone()),
+            _ => None,
+        })
+        .collect()
+}
+
+/// ATTACH-PLACEHOLDER (review k1-followup, lens person, finding 4): a
+/// document whose extraction failed — an ordinary failure, and one a stop
+/// interrupted — reaches the model with the one fixed failed sentence,
+/// never "pending", and the row's own `extract_error` (its attempt tag, its
+/// reason, its third-party text) reaches no part of the model's input.
+#[tokio::test]
+async fn a_failed_document_reaches_the_model_as_failed_and_its_error_text_does_not() {
+    let captured = Arc::new(std::sync::Mutex::new(Vec::<ChatRequest>::new()));
+    let orch = make_orchestrator_with_capturing_llm(captured.clone());
+    let dir = tempfile::tempdir().unwrap();
+    let db = openalpaca_storage::Database::open(&dir.path().join("t.db")).unwrap();
+    let ordinary = resolve_stored_attachment(
+        &db,
+        "doc-ordinary",
+        "application/pdf",
+        "/nonexistent/doc-ordinary.pdf",
+        openalpaca_storage::FileAssetStatus::Error,
+        Some("[attempt:1] PDF parse failed: SENTINEL-THIRD-PARTY xref broken"),
+    )
+    .await;
+    let interrupted = resolve_stored_attachment(
+        &db,
+        "doc-cut-by-a-stop",
+        "application/pdf",
+        "/nonexistent/doc-cut-by-a-stop.pdf",
+        openalpaca_storage::FileAssetStatus::Error,
+        Some("[attempt:2] extraction was interrupted: the daemon stopped before it finished"),
+    )
+    .await;
+
+    let _ = orch
+        .handle_message_with_attachments(
+            attachment_request(Uuid::new_v4(), "summarize these"),
+            vec![ordinary, interrupted],
+        )
+        .await
+        .unwrap();
+
+    // Per request, not summed across the turn: every request that carries
+    // the failed note carries it once for each of the two documents.
+    let per_request: Vec<usize> = {
+        let guard = captured.lock().unwrap();
+        guard
+            .iter()
+            .map(|r| {
+                r.messages
+                    .iter()
+                    .filter_map(|m| m.parts.as_ref())
+                    .flatten()
+                    .filter(|p| {
+                        matches!(p, ContentPart::Text { text }
+                            if text == super::attachment_adapt::NOTE_EXTRACTION_FAILED)
+                    })
+                    .count()
+            })
+            .collect()
+    };
+    assert!(
+        per_request.iter().any(|&n| n > 0),
+        "no request carried the failed note: {per_request:?}"
+    );
+    assert!(
+        per_request.iter().all(|&n| n == 0 || n == 2),
+        "one failed note per document in each request: {per_request:?}"
+    );
+    let seen = everything_the_model_saw(&captured);
+    for leaked in [
+        "text extraction pending",
+        "SENTINEL-THIRD-PARTY",
+        "[attempt:",
+        "interrupted",
+        "daemon stopped",
+    ] {
+        assert!(
+            !seen.contains(leaked),
+            "{leaked:?} reached the model: {seen}"
+        );
+    }
+}
+
+/// Regression guard (green with the status mapping and wording taken
+/// out): a document still `Processing`
+/// — its attempt tag in `extract_error` — reads the pending note byte for
+/// byte, and the tag reaches nothing.
+#[tokio::test]
+async fn a_processing_document_still_reads_the_pending_note_byte_for_byte() {
+    let captured = Arc::new(std::sync::Mutex::new(Vec::<ChatRequest>::new()));
+    let orch = make_orchestrator_with_capturing_llm(captured.clone());
+    let dir = tempfile::tempdir().unwrap();
+    let db = openalpaca_storage::Database::open(&dir.path().join("t.db")).unwrap();
+    let processing = resolve_stored_attachment(
+        &db,
+        "doc-processing",
+        "application/pdf",
+        "/nonexistent/doc-processing.pdf",
+        openalpaca_storage::FileAssetStatus::Processing,
+        Some("[attempt:1] extraction in progress"),
+    )
+    .await;
+
+    let _ = orch
+        .handle_message_with_attachments(
+            attachment_request(Uuid::new_v4(), "summarize this"),
+            vec![processing],
+        )
+        .await
+        .unwrap();
+
+    assert!(
+        text_parts_the_model_saw(&captured)
+            .iter()
+            .any(|t| t == "[document attached — text extraction pending]")
+    );
+    let seen = everything_the_model_saw(&captured);
+    assert!(!seen.contains("text extraction failed"), "{seen}");
+    assert!(!seen.contains("[attempt:"), "{seen}");
+}
+
+/// ATTACH-PLACEHOLDER: an image is read by the model itself, so a failed
+/// extraction on its row adds no failed note — the image still goes as an
+/// image.
+#[tokio::test]
+async fn a_failed_image_row_still_goes_as_its_image_with_no_failed_note() {
+    let captured = Arc::new(std::sync::Mutex::new(Vec::<ChatRequest>::new()));
+    let orch = make_orchestrator_with_capturing_llm(captured.clone());
+    let dir = tempfile::tempdir().unwrap();
+    let img_path = dir.path().join("image.jpg");
+    std::fs::write(&img_path, [0xFF, 0xD8, 0xFF, 0xE0, 0x12, 0x34]).unwrap();
+    let db = openalpaca_storage::Database::open(&dir.path().join("t.db")).unwrap();
+    let image = resolve_stored_attachment(
+        &db,
+        "img-failed",
+        "image/jpeg",
+        &img_path.to_string_lossy(),
+        openalpaca_storage::FileAssetStatus::Error,
+        Some("[attempt:1] SENTINEL-IMAGE"),
+    )
+    .await;
+
+    let _ = orch
+        .handle_message_with_attachments(
+            attachment_request(Uuid::new_v4(), "what is in this image?"),
+            vec![image],
+        )
+        .await
+        .unwrap();
+
+    let guard = captured.lock().unwrap();
+    assert!(
+        guard
+            .iter()
+            .flat_map(|r| r.messages.iter())
+            .filter_map(|m| m.parts.as_ref())
+            .flatten()
+            .any(|p| matches!(p, ContentPart::Image { .. }))
+    );
+    drop(guard);
+    let seen = everything_the_model_saw(&captured);
+    assert!(!seen.contains("text extraction failed"), "{seen}");
+    assert!(!seen.contains("SENTINEL-IMAGE"), "{seen}");
+}
+
 #[tokio::test]
 async fn test_attachment_context_does_not_trigger_file_write_tool() {
     use openalpaca_llm::{ChatResponse, FinishReason, LlmError, LlmProvider, ProviderType, Usage};
@@ -1974,7 +2203,6 @@ async fn test_attachment_context_does_not_trigger_file_write_tool() {
         captured_requests: Arc<std::sync::Mutex<Vec<ChatRequest>>>,
     }
 
-    #[async_trait::async_trait]
     impl LlmProvider for CapturingToolAwareLlm {
         fn name(&self) -> &str {
             "capturing-tool-aware"
@@ -1999,6 +2227,7 @@ async fn test_attachment_context_does_not_trigger_file_write_tool() {
                 },
                 finish_reason: FinishReason::Stop,
                 thinking: None,
+                echo: None,
                 parts: None,
             })
         }
@@ -2010,7 +2239,7 @@ async fn test_attachment_context_does_not_trigger_file_write_tool() {
             captured_requests: captured_requests.clone(),
         }),
         ProviderType::Anthropic,
-        "claude-sonnet-4-5-20250929".to_string(),
+        "claude-sonnet-5-5".to_string(),
     );
     let orch = make_orchestrator_with_tools_and_llm(Arc::new(router), &["file_write"]);
 
@@ -2024,6 +2253,7 @@ async fn test_attachment_context_does_not_trigger_file_write_tool() {
             "Please update README.md and append notes for this profile".to_string(),
         ),
         storage_path: "/tmp/resume.docx".to_string(),
+        extraction_failed: false,
     }];
 
     let _ = orch
@@ -2517,7 +2747,6 @@ async fn test_slash_skill_takes_deterministic_tier_with_router() {
         call_count: Arc<AtomicUsize>,
     }
 
-    #[async_trait]
     impl LlmProvider for CountingMockLlm {
         fn name(&self) -> &str {
             "counting-mock"
@@ -2538,6 +2767,7 @@ async fn test_slash_skill_takes_deterministic_tier_with_router() {
                 },
                 finish_reason: FinishReason::Stop,
                 thinking: None,
+                echo: None,
                 parts: None,
             })
         }
@@ -2549,7 +2779,7 @@ async fn test_slash_skill_takes_deterministic_tier_with_router() {
             call_count: call_count.clone(),
         }),
         openalpaca_llm::ProviderType::Anthropic,
-        "claude-sonnet-4-5-20250929".to_string(),
+        "claude-sonnet-5-5".to_string(),
     );
     let (_tmp, catalog) = make_review_skill_catalog();
     let orch = make_orchestrator_with_llm_and_skills(Arc::new(router), catalog);
@@ -2578,7 +2808,6 @@ async fn test_slash_skill_takes_deterministic_tier_with_router() {
     assert_eq!(call_count.load(Ordering::SeqCst), 1);
 
     let mut saw_skill_started = false;
-    let mut saw_intent_classified = false;
     let mut stage_mode = None;
     while let Ok(event) = rx.try_recv() {
         match event {
@@ -2586,16 +2815,11 @@ async fn test_slash_skill_takes_deterministic_tier_with_router() {
                 assert_eq!(skill_id, "Code Review");
                 saw_skill_started = true;
             }
-            SystemEvent::IntentClassified { intent_type, .. } => {
-                assert_eq!(intent_type, "skill_invocation");
-                saw_intent_classified = true;
-            }
             SystemEvent::OrchestrationStage { mode, .. } => stage_mode = Some(mode),
             _ => {}
         }
     }
     assert!(saw_skill_started, "handle_skill_invocation was not reached");
-    assert!(saw_intent_classified, "IntentClassified was not emitted");
     assert_eq!(stage_mode.as_deref(), Some("skill_command"));
 }
 
@@ -2648,32 +2872,31 @@ async fn test_slash_skill_no_router_still_invokes_skill() {
     );
 
     let mut saw_skill_started = false;
-    let mut intent_classified_count = 0;
+    let mut stage_modes = Vec::new();
     while let Ok(event) = rx.try_recv() {
         match event {
             SystemEvent::SkillInvocationStarted { .. } => saw_skill_started = true,
-            SystemEvent::IntentClassified { intent_type, .. } => {
-                assert_eq!(intent_type, "skill_invocation");
-                intent_classified_count += 1;
-            }
+            SystemEvent::OrchestrationStage { mode, .. } => stage_modes.push(mode),
             _ => {}
         }
     }
     assert!(saw_skill_started, "handle_skill_invocation was not reached");
     assert_eq!(
-        intent_classified_count, 1,
-        "IntentClassified must be emitted exactly once"
+        stage_modes,
+        vec!["skill_command".to_string()],
+        "the turn is routed once, by the skill tier"
     );
 }
 
 #[tokio::test]
 async fn test_plugin_skill_invoked_via_executor_with_sandboxed_tool_callback() {
     use crate::tools::registry::{BuiltInTool, RegisteredTool, ToolBackend};
-    use openalpaca_api::plugin_traits::{PluginSkillExecutor, ToolCallbackExecutor};
+    use openalpaca_api::plugin_traits::{
+        DynToolCallbackExecutor, PluginSkillExecutor, ToolCallbackExecutor,
+    };
 
     // Builtin the plugin skill calls back into through the sandbox.
     struct EchoTool;
-    #[async_trait]
     impl BuiltInTool for EchoTool {
         async fn execute(&self, arguments: &serde_json::Value) -> Result<String, String> {
             Ok(format!(
@@ -2688,13 +2911,12 @@ async fn test_plugin_skill_invoked_via_executor_with_sandboxed_tool_callback() {
     struct StubSkillExecutor {
         received_query: std::sync::Mutex<Option<String>>,
     }
-    #[async_trait]
     impl PluginSkillExecutor for StubSkillExecutor {
         async fn invoke(
             &self,
             query: &str,
             _context: &serde_json::Value,
-            tool_executor: &dyn ToolCallbackExecutor,
+            tool_executor: &DynToolCallbackExecutor<'_>,
         ) -> Result<String, String> {
             *self.received_query.lock().unwrap() = Some(query.to_string());
             let tool_result = tool_executor
@@ -2720,7 +2942,7 @@ async fn test_plugin_skill_invoked_via_executor_with_sandboxed_tool_callback() {
                 strict: None,
                 input_examples: None,
             },
-            backend: ToolBackend::BuiltIn(Arc::new(EchoTool)),
+            backend: ToolBackend::built_in(EchoTool),
             provides_capabilities: vec![],
             exempt_from_timeout: false,
             annotations: None,
@@ -3110,7 +3332,6 @@ struct ToolModeMockLlm {
     requests: Arc<std::sync::Mutex<Vec<ChatRequest>>>,
 }
 
-#[async_trait]
 impl openalpaca_llm::LlmProvider for ToolModeMockLlm {
     fn name(&self) -> &str {
         "tool-mode-mock"
@@ -3148,6 +3369,7 @@ impl openalpaca_llm::LlmProvider for ToolModeMockLlm {
                     },
                     finish_reason: FinishReason::ToolUse,
                     thinking: None,
+                    echo: None,
                     parts: None,
                 });
             }
@@ -3163,6 +3385,7 @@ impl openalpaca_llm::LlmProvider for ToolModeMockLlm {
             },
             finish_reason: FinishReason::Stop,
             thinking: None,
+            echo: None,
             parts: None,
         })
     }
@@ -3192,7 +3415,7 @@ fn make_tool_mode_orchestrator_with_db(
             requests: requests.clone(),
         }),
         openalpaca_llm::ProviderType::Anthropic,
-        "claude-sonnet-4-5-20250929".to_string(),
+        "claude-sonnet-5-5".to_string(),
     );
     let orch = make_orchestrator_with_llm_agents_and_config(Arc::new(router), agents, config, db);
     (orch, requests)
@@ -3671,25 +3894,204 @@ async fn test_task_query_emits_task_ops_stage() {
     assert_eq!(orchestration_modes(&mut rx), vec!["task_ops".to_string()]);
 }
 
+// ── N-ROUTE-1: `/pause` and `/resume` say pause is unsupported ──
+//
+// A paused row never stopped its run: the lead kept spending and its
+// completion overwrote `paused`. So the two chat commands answer one
+// sentence naming `/cancel` and change nothing — no status, no lane, no
+// `TaskUpdated` — whatever the lane holds and whether an id is given.
+
+/// The one sentence, told apart from the task-control JSON a status change
+/// answers with.
+fn assert_pause_unsupported(reply: &str) {
+    assert!(reply.contains("not supported"), "unexpected reply: {reply}");
+    assert!(reply.contains("/cancel"), "unexpected reply: {reply}");
+    assert!(!reply.contains("new_status"), "a status changed: {reply}");
+    assert!(!reply.contains('\n'), "more than one sentence: {reply}");
+}
+
+/// Drain the bus: the `(task_id, status)` of every `TaskUpdated` and the mode
+/// of every `OrchestrationStage`, in the order they came.
+fn task_updates_and_modes(
+    rx: &mut tokio::sync::broadcast::Receiver<SystemEvent>,
+) -> (Vec<(String, String)>, Vec<String>) {
+    let (mut updates, mut modes) = (Vec::new(), Vec::new());
+    while let Ok(event) = rx.try_recv() {
+        match event {
+            SystemEvent::TaskUpdated {
+                task_id, status, ..
+            } => updates.push((task_id, status)),
+            SystemEvent::OrchestrationStage { mode, .. } => modes.push(mode),
+            _ => {}
+        }
+    }
+    (updates, modes)
+}
+
+/// An orchestrator over `db` whose lane `user1:cli` runs `task-1`, its row and
+/// its registry entry `status`.
+fn orchestrator_with_one_workflow(
+    db: openalpaca_storage::Database,
+    status: TaskStatus,
+) -> Orchestrator {
+    openalpaca_storage::repository::TaskRepository::new(&db)
+        .create(&openalpaca_storage::Task {
+            status,
+            completed_at: None,
+            ..make_test_task()
+        })
+        .unwrap();
+    let ctx = Arc::new(SharedContext::new());
+    ctx.task_registry
+        .register("task-1".to_string(), "Test task".to_string());
+    let entry_status = match status {
+        TaskStatus::Running => crate::context::TaskEntryStatus::Running,
+        TaskStatus::Paused => crate::context::TaskEntryStatus::Paused,
+        other => panic!("not a live status: {other:?}"),
+    };
+    ctx.task_registry.update_status("task-1", entry_status);
+    ctx.register_workflow_for_lane("user1:cli", "task-1");
+    let bus = EventBus::default();
+    let gate = make_security_gate(&bus);
+    Orchestrator::new(
+        ctx,
+        Arc::new(LaneManager::new()),
+        bus,
+        SystemPersona::default(),
+        None,
+        LoopConfig::default(),
+        gate,
+        make_tool_registry(),
+        Some(db),
+        Arc::new(skill_catalog::SkillCatalog::new()),
+        Arc::new(skill_router::SkillRouter::new(0.65, 0.45)),
+        Arc::new(ArcSwap::from_pointee(DaemonConfig::default())),
+    )
+}
+
+/// Send `command` to an orchestrator whose lane runs one workflow with a row
+/// at `status`, and check that the sentence came back and that nothing
+/// moved: the row, the registry entry, the bus.
+async fn assert_command_changes_nothing(command: &str, status: TaskStatus) {
+    let dir = tempfile::tempdir().unwrap();
+    let db = openalpaca_storage::Database::open(&dir.path().join("t.db")).unwrap();
+    let orch = orchestrator_with_one_workflow(db, status);
+    let mut rx = orch.bus.subscribe();
+
+    let reply = send_steer(&orch, command).await;
+
+    assert_pause_unsupported(&reply);
+    let db = orch.db.as_ref().unwrap();
+    let row = openalpaca_storage::repository::TaskRepository::new(db)
+        .get("task-1")
+        .unwrap()
+        .unwrap();
+    assert_eq!(row.status, status, "{command} changed the row");
+    assert_eq!(
+        orch.shared_context
+            .task_registry
+            .get("task-1")
+            .unwrap()
+            .status
+            .as_str(),
+        status.as_str(),
+        "{command} changed the registry entry"
+    );
+    let (updates, modes) = task_updates_and_modes(&mut rx);
+    assert!(updates.is_empty(), "{command} published {updates:?}");
+    // Still a task op: answered with no model, and observable as one.
+    assert_eq!(modes, vec!["task_ops".to_string()], "{command}");
+}
+
 #[tokio::test]
-async fn test_bare_pause_resume_resolve_via_lane() {
-    let orch = make_orchestrator();
-    orch.shared_context
-        .task_registry
-        .register("task-1".to_string(), "Runner".to_string());
-    orch.shared_context
-        .task_registry
-        .update_status("task-1", crate::context::TaskEntryStatus::Running);
-    orch.shared_context
-        .register_workflow_for_lane("user1:cli", "task-1");
+async fn bare_pause_on_one_running_workflow_answers_the_sentence_and_changes_nothing() {
+    assert_command_changes_nothing("/pause", TaskStatus::Running).await;
+}
 
-    let reply = send_steer(&orch, "/pause").await;
-    let json: serde_json::Value = serde_json::from_str(&reply).unwrap();
-    assert_eq!(json["new_status"], "paused");
+#[tokio::test]
+async fn pause_with_an_id_answers_the_sentence_and_changes_nothing() {
+    assert_command_changes_nothing("/pause task-1", TaskStatus::Running).await;
+}
 
-    let reply = send_steer(&orch, "/resume").await;
+#[tokio::test]
+async fn bare_resume_on_one_running_workflow_answers_the_sentence_and_changes_nothing() {
+    assert_command_changes_nothing("/resume", TaskStatus::Running).await;
+}
+
+#[tokio::test]
+async fn resume_with_an_id_answers_the_sentence_and_changes_nothing() {
+    assert_command_changes_nothing("/resume task-1", TaskStatus::Running).await;
+}
+
+/// A row an earlier build — or the route, which still pauses — left `paused`
+/// is not un-paused from the chat either: its run never stopped, and its
+/// completion writes over `paused` as it always did.
+#[tokio::test]
+async fn resume_on_a_paused_row_answers_the_sentence_and_leaves_it_paused() {
+    for command in ["/resume", "/resume task-1"] {
+        assert_command_changes_nothing(command, TaskStatus::Paused).await;
+    }
+}
+
+/// The bare forms answer before any target is resolved: with no workflow or
+/// with several on the lane, the same sentence — not "No running workflow"
+/// and not "Which task should I pause?".
+#[tokio::test]
+async fn bare_pause_and_resume_answer_the_sentence_with_no_or_several_workflows() {
+    for command in ["/pause", "/resume"] {
+        let orch = make_orchestrator();
+        assert_pause_unsupported(&send_steer(&orch, command).await);
+
+        let orch = make_orchestrator();
+        for id in ["task-1", "task-2"] {
+            orch.shared_context
+                .task_registry
+                .register(id.to_string(), format!("Title {id}"));
+            orch.shared_context
+                .task_registry
+                .update_status(id, crate::context::TaskEntryStatus::Running);
+            orch.shared_context
+                .register_workflow_for_lane("user1:cli", id);
+        }
+        let mut rx = orch.bus.subscribe();
+        assert_pause_unsupported(&send_steer(&orch, command).await);
+        for id in ["task-1", "task-2"] {
+            assert_eq!(
+                orch.shared_context.task_registry.get(id).unwrap().status,
+                crate::context::TaskEntryStatus::Running,
+                "{command} changed {id}"
+            );
+        }
+        let (updates, _) = task_updates_and_modes(&mut rx);
+        assert!(updates.is_empty(), "{command} published {updates:?}");
+    }
+}
+
+/// `/cancel` is untouched: on the same lane it still stops the run, writes
+/// the row and publishes the change.
+#[tokio::test]
+async fn cancel_on_one_running_workflow_still_cancels_and_publishes() {
+    let dir = tempfile::tempdir().unwrap();
+    let db = openalpaca_storage::Database::open(&dir.path().join("t.db")).unwrap();
+    let orch = orchestrator_with_one_workflow(db, TaskStatus::Running);
+    let mut rx = orch.bus.subscribe();
+
+    let reply = send_steer(&orch, "/cancel").await;
+
     let json: serde_json::Value = serde_json::from_str(&reply).unwrap();
-    assert_eq!(json["new_status"], "running");
+    assert_eq!(json["new_status"], "cancelled");
+    let db = orch.db.as_ref().unwrap();
+    let row = openalpaca_storage::repository::TaskRepository::new(db)
+        .get("task-1")
+        .unwrap()
+        .unwrap();
+    assert_eq!(row.status, TaskStatus::Cancelled);
+    let (updates, modes) = task_updates_and_modes(&mut rx);
+    assert_eq!(
+        updates,
+        vec![("task-1".to_string(), "cancelled".to_string())]
+    );
+    assert_eq!(modes, vec!["task_ops".to_string()]);
 }
 
 // ── C4: S4 moment 2 on the legacy `tools.allow` branch (design §6.2 #10) ──
@@ -3707,6 +4109,7 @@ fn registry_with_a_disabled_server(bus: &EventBus) -> Arc<ToolRegistry> {
         remote_name: "create_issue".to_string(),
         server_name: "github".to_string(),
         generation: 1,
+        output_schema: None,
     };
     tool.author = "mcp:github".to_string();
     registry.register(tool).unwrap();
@@ -3831,7 +4234,7 @@ async fn a_legacy_tools_allow_skill_is_attributed_on_both_the_top_level_and_the_
     let router = Arc::new(openalpaca_llm::LlmRouter::single_provider(
         Arc::new(SilentMockLlm),
         openalpaca_llm::ProviderType::Anthropic,
-        "claude-sonnet-4-5-20250929".to_string(),
+        "claude-sonnet-5-5".to_string(),
     ));
     let nested = crate::orchestrator::skill::invoke_executor::SkillInvocationToolExecutor::new(
         catalog,
@@ -3847,6 +4250,8 @@ async fn a_legacy_tools_allow_skill_is_attributed_on_both_the_top_level_and_the_
         true,
         crate::daemon_config::CircuitBreakerConfig::default(),
         30,
+        120,
+        600,
     );
     let mut rx = bus.subscribe();
     let _ = nested
@@ -3869,7 +4274,6 @@ async fn a_legacy_tools_allow_skill_is_attributed_on_both_the_top_level_and_the_
 
 struct SilentMockLlm;
 
-#[async_trait]
 impl openalpaca_llm::LlmProvider for SilentMockLlm {
     fn name(&self) -> &str {
         "silent-mock"
@@ -3892,6 +4296,7 @@ impl openalpaca_llm::LlmProvider for SilentMockLlm {
             },
             finish_reason: openalpaca_llm::FinishReason::Stop,
             thinking: None,
+            echo: None,
             parts: None,
         })
     }
@@ -4082,7 +4487,7 @@ fn nested_executor(
     let router = Arc::new(openalpaca_llm::LlmRouter::single_provider(
         Arc::new(SilentMockLlm),
         openalpaca_llm::ProviderType::Anthropic,
-        "claude-sonnet-4-5-20250929".to_string(),
+        "claude-sonnet-5-5".to_string(),
     ));
     crate::orchestrator::skill::invoke_executor::SkillInvocationToolExecutor::new(
         catalog,
@@ -4098,6 +4503,8 @@ fn nested_executor(
         true,
         crate::daemon_config::CircuitBreakerConfig::default(),
         30,
+        120,
+        600,
     )
 }
 
@@ -4187,7 +4594,6 @@ async fn a_skill_loop_honours_the_configured_inline_threshold() {
     const INLINE_BYTES: usize = 1024;
 
     struct BigOutputTool;
-    #[async_trait]
     impl BuiltInTool for BigOutputTool {
         async fn execute(&self, _arguments: &serde_json::Value) -> Result<String, String> {
             Ok("q".repeat(RESULT_BYTES))
@@ -4201,7 +4607,6 @@ async fn a_skill_loop_honours_the_configured_inline_threshold() {
         seen: Arc<Mutex<Vec<ChatRequest>>>,
     }
 
-    #[async_trait]
     impl LlmProvider for DumpThenAnswer {
         fn name(&self) -> &str {
             "dump-then-answer"
@@ -4229,7 +4634,7 @@ async fn a_skill_loop_honours_the_configured_inline_threshold() {
                 } else {
                     vec![]
                 },
-                model: "claude-sonnet-4-5-20250929".to_string(),
+                model: "claude-sonnet-5-5".to_string(),
                 usage: Usage::default(),
                 finish_reason: if first {
                     FinishReason::ToolUse
@@ -4237,6 +4642,7 @@ async fn a_skill_loop_honours_the_configured_inline_threshold() {
                     FinishReason::Stop
                 },
                 thinking: None,
+                echo: None,
                 parts: None,
             })
         }
@@ -4252,7 +4658,7 @@ async fn a_skill_loop_honours_the_configured_inline_threshold() {
                 strict: None,
                 input_examples: None,
             },
-            backend: ToolBackend::BuiltIn(Arc::new(BigOutputTool)),
+            backend: ToolBackend::built_in(BigOutputTool),
             provides_capabilities: vec![],
             exempt_from_timeout: false,
             annotations: None,
@@ -4296,7 +4702,7 @@ Dump.
             seen: seen.clone(),
         }),
         openalpaca_llm::ProviderType::Anthropic,
-        "claude-sonnet-4-5-20250929".to_string(),
+        "claude-sonnet-5-5".to_string(),
     );
 
     let mut config = DaemonConfig::default();
@@ -4623,13 +5029,12 @@ async fn a_withdrawn_plugin_skill_is_attributed_to_its_plugin_on_slash() {
 
 struct TombstoneStubExecutor;
 
-#[async_trait]
 impl openalpaca_api::plugin_traits::PluginSkillExecutor for TombstoneStubExecutor {
     async fn invoke(
         &self,
         _query: &str,
         _context: &serde_json::Value,
-        _tool_executor: &dyn openalpaca_api::plugin_traits::ToolCallbackExecutor,
+        _tool_executor: &openalpaca_api::plugin_traits::DynToolCallbackExecutor<'_>,
     ) -> Result<String, String> {
         Ok(String::new())
     }
@@ -4872,7 +5277,7 @@ async fn a_named_model_reaches_the_loop_config_for_that_turn() {
     let orch = make_orchestrator_with_capturing_llm(captured.clone());
 
     orch.handle_message(HandleRequest {
-        model_override: Some("claude-opus-4-6".to_string()),
+        model_override: Some("claude-opus-5-5".to_string()),
         unattended: false,
         ..HandleRequest::new(
             Uuid::new_v4(),
@@ -4893,7 +5298,7 @@ async fn a_named_model_reaches_the_loop_config_for_that_turn() {
     );
     assert_eq!(
         requests[0].model.as_deref(),
-        Some("claude-opus-4-6"),
+        Some("claude-opus-5-5"),
         "the override should be the model this request runs on"
     );
 }
@@ -4923,7 +5328,7 @@ async fn the_override_dies_with_its_request() {
         )
     };
 
-    orch.handle_message(turn(Some("claude-opus-4-6")))
+    orch.handle_message(turn(Some("claude-opus-5-5")))
         .await
         .expect("first turn");
     let first = captured.lock().unwrap().len();
@@ -4935,7 +5340,7 @@ async fn the_override_dies_with_its_request() {
     let requests = captured.lock().unwrap();
     assert_eq!(
         requests[first].model.as_deref(),
-        Some("claude-sonnet-4-5-20250929"),
+        Some("claude-sonnet-5-5"),
         "the next turn runs on the daemon default, not the previous override"
     );
     assert_eq!(
@@ -4964,7 +5369,7 @@ async fn a_bootstrap_turn_still_gets_the_named_model() {
     }));
 
     orch.handle_message(HandleRequest {
-        model_override: Some("claude-opus-4-6".to_string()),
+        model_override: Some("claude-opus-5-5".to_string()),
         unattended: false,
         ..HandleRequest::new(
             Uuid::new_v4(),
@@ -4985,7 +5390,7 @@ async fn a_bootstrap_turn_still_gets_the_named_model() {
     );
     assert_eq!(
         requests[0].model.as_deref(),
-        Some("claude-opus-4-6"),
+        Some("claude-opus-5-5"),
         "the override must reach the bootstrap branch's LoopConfig.model"
     );
 }
@@ -5000,7 +5405,7 @@ async fn an_attachment_only_turn_still_gets_the_named_model() {
 
     orch.handle_message_with_attachments(
         HandleRequest {
-            model_override: Some("claude-opus-4-6".to_string()),
+            model_override: Some("claude-opus-5-5".to_string()),
             unattended: false,
             ..HandleRequest::new(
                 Uuid::new_v4(),
@@ -5023,7 +5428,7 @@ async fn an_attachment_only_turn_still_gets_the_named_model() {
     );
     assert_eq!(
         requests[0].model.as_deref(),
-        Some("claude-opus-4-6"),
+        Some("claude-opus-5-5"),
         "the override must reach the attachment-only branch's LoopConfig.model"
     );
 }
@@ -5036,7 +5441,7 @@ async fn the_social_fast_path_still_gets_the_named_model() {
     let orch = make_orchestrator_with_capturing_llm(captured.clone());
 
     orch.handle_message(HandleRequest {
-        model_override: Some("claude-opus-4-6".to_string()),
+        model_override: Some("claude-opus-5-5".to_string()),
         unattended: false,
         ..HandleRequest::new(
             Uuid::new_v4(),
@@ -5057,7 +5462,7 @@ async fn the_social_fast_path_still_gets_the_named_model() {
     );
     assert_eq!(
         requests[0].model.as_deref(),
-        Some("claude-opus-4-6"),
+        Some("claude-opus-5-5"),
         "the override must reach the social fast path's LoopConfig.model"
     );
 }
@@ -5075,7 +5480,6 @@ fn make_orchestrator_with_streaming_llm() -> Orchestrator {
 
     struct StreamingMockLlm;
 
-    #[async_trait]
     impl LlmProvider for StreamingMockLlm {
         fn name(&self) -> &str {
             "streaming-mock"
@@ -5101,6 +5505,7 @@ fn make_orchestrator_with_streaming_llm() -> Orchestrator {
                 },
                 finish_reason: FinishReason::Stop,
                 thinking: None,
+                echo: None,
                 parts: None,
             })
         }
@@ -5137,7 +5542,7 @@ fn make_orchestrator_with_streaming_llm() -> Orchestrator {
     let router = openalpaca_llm::LlmRouter::single_provider(
         Arc::new(StreamingMockLlm),
         ProviderType::Anthropic,
-        "claude-sonnet-4-5-20250929".to_string(),
+        "claude-sonnet-5-5".to_string(),
     );
     make_orchestrator_with_llm_and_agents(Arc::new(router), vec![])
 }
@@ -5315,7 +5720,7 @@ Echo.
 }
 
 fn orchestrator_with_skill(
-    provider: Arc<dyn openalpaca_llm::LlmProvider>,
+    provider: Arc<impl openalpaca_llm::LlmProvider + 'static>,
     registry: Arc<ToolRegistry>,
     catalog: Arc<skill_catalog::SkillCatalog>,
 ) -> Orchestrator {
@@ -5323,7 +5728,7 @@ fn orchestrator_with_skill(
 }
 
 fn orchestrator_with_skill_and_config(
-    provider: Arc<dyn openalpaca_llm::LlmProvider>,
+    provider: Arc<impl openalpaca_llm::LlmProvider + 'static>,
     registry: Arc<ToolRegistry>,
     catalog: Arc<skill_catalog::SkillCatalog>,
     config: DaemonConfig,
@@ -5331,7 +5736,9 @@ fn orchestrator_with_skill_and_config(
     let router = openalpaca_llm::LlmRouter::single_provider(
         provider,
         openalpaca_llm::ProviderType::Anthropic,
-        "claude-sonnet-4-5-20250929".to_string(),
+        // A model that takes a forced tool choice (Haiku 5.5's request
+        // contract), so the skill's forced first round reaches the wire.
+        "claude-haiku-5-5".to_string(),
     );
     let bus = EventBus::default();
     let gate = make_security_gate_with_registry(&bus, registry.clone());
@@ -5358,7 +5765,6 @@ struct ParkedStreamingSkillLlm {
     release: std::sync::Mutex<Option<tokio::sync::oneshot::Receiver<()>>>,
 }
 
-#[async_trait]
 impl openalpaca_llm::LlmProvider for ParkedStreamingSkillLlm {
     fn name(&self) -> &str {
         "parked-streaming-skill-mock"
@@ -5388,6 +5794,7 @@ impl openalpaca_llm::LlmProvider for ParkedStreamingSkillLlm {
             },
             finish_reason: FinishReason::Stop,
             thinking: None,
+            echo: None,
             parts: None,
         })
     }
@@ -5603,7 +6010,6 @@ struct StreamingSendSkillLlm {
     seen: Arc<Mutex<Vec<ChatRequest>>>,
 }
 
-#[async_trait]
 impl openalpaca_llm::LlmProvider for StreamingSendSkillLlm {
     fn name(&self) -> &str {
         "streaming-send-skill-mock"
@@ -5715,11 +6121,10 @@ async fn a_streaming_skill_keeps_its_forced_tool_choice() {
 
     let requests = seen.lock().unwrap_or_else(|p| p.into_inner());
     assert_eq!(requests.len(), 2, "one forced tool round, then the answer");
-    assert!(
-        matches!(
+    std::assert_matches!(
             requests[0].tool_choice,
             Some(openalpaca_llm::ToolChoice::Tool(ref t)) if t == "send"
-        ),
+        ,
         "the forced initial tool choice must reach the streaming request, got {:?}",
         requests[0].tool_choice
     );
@@ -5735,7 +6140,6 @@ async fn a_streaming_skill_keeps_its_forced_tool_choice() {
 
 struct FailingBuiltInTool;
 
-#[async_trait::async_trait]
 impl BuiltInTool for FailingBuiltInTool {
     async fn execute(&self, _arguments: &serde_json::Value) -> Result<String, String> {
         Err("missing required parameter: target".to_string())
@@ -5760,7 +6164,7 @@ async fn a_skill_turn_that_reaches_no_answer_says_why() {
                 strict: None,
                 input_examples: None,
             },
-            backend: ToolBackend::BuiltIn(Arc::new(FailingBuiltInTool)),
+            backend: ToolBackend::built_in(FailingBuiltInTool),
             provides_capabilities: vec![],
             exempt_from_timeout: false,
             annotations: None,
@@ -5822,7 +6226,6 @@ struct StreamingToolMockLlm {
     call_count: std::sync::atomic::AtomicUsize,
 }
 
-#[async_trait]
 impl openalpaca_llm::LlmProvider for StreamingToolMockLlm {
     fn name(&self) -> &str {
         "streaming-tool-mock"
@@ -5907,7 +6310,7 @@ async fn a_streamed_tool_call_runs_with_its_arguments() {
             call_count: std::sync::atomic::AtomicUsize::new(0),
         }),
         openalpaca_llm::ProviderType::Anthropic,
-        "claude-sonnet-4-5-20250929".to_string(),
+        "claude-sonnet-5-5".to_string(),
     );
     let orch = make_orchestrator_with_llm_agents_and_config(
         Arc::new(router),
@@ -5956,7 +6359,6 @@ async fn a_streamed_tool_call_runs_with_its_arguments() {
 /// parameter", then an empty answer.
 struct AlwaysToolCallingMock;
 
-#[async_trait]
 impl openalpaca_llm::LlmProvider for AlwaysToolCallingMock {
     fn name(&self) -> &str {
         "always-tool-calling-mock"
@@ -5993,6 +6395,7 @@ impl openalpaca_llm::LlmProvider for AlwaysToolCallingMock {
             },
             finish_reason: FinishReason::ToolUse,
             thinking: None,
+            echo: None,
             parts: None,
         })
     }
@@ -6009,7 +6412,7 @@ async fn a_turn_that_reaches_no_answer_says_why() {
     let router = openalpaca_llm::LlmRouter::single_provider(
         Arc::new(AlwaysToolCallingMock),
         openalpaca_llm::ProviderType::Anthropic,
-        "claude-sonnet-4-5-20250929".to_string(),
+        "claude-sonnet-5-5".to_string(),
     );
     let orch = make_orchestrator_with_llm_agents_and_config(
         Arc::new(router),
@@ -6140,7 +6543,7 @@ fn ollama_only_router(
     let router = openalpaca_llm::LlmRouter::single_provider(
         provider,
         openalpaca_llm::ProviderType::Ollama,
-        "claude-sonnet-4-6".to_string(),
+        "claude-sonnet-5-5".to_string(),
     );
     router.model_registry().register(
         "qwen3:8b".to_string(),
@@ -6156,6 +6559,9 @@ fn ollama_only_router(
             supports_reasoning: false,
             supports_tools: true,
             declared: false,
+            long_prompt: None,
+            cache_rates: None,
+            request_contract: openalpaca_llm::RequestContract::NONE,
         },
     );
     Arc::new(router)
@@ -6370,7 +6776,7 @@ fn scripted_turn_orchestrator_with_builtins(
     let router = openalpaca_llm::LlmRouter::single_provider(
         Arc::new(ScriptedTurnLlm::new(steps, requests.clone())),
         openalpaca_llm::ProviderType::Anthropic,
-        "claude-sonnet-4-5-20250929".to_string(),
+        "claude-sonnet-5-5".to_string(),
     );
     (
         orchestrator_with_builtins(Arc::new(router), Some(db)),
@@ -6934,6 +7340,7 @@ async fn a_slash_turns_own_document_reaches_the_skills_model() {
             size_bytes: 40,
             extracted_text: Some("the codeword is PLATYPUS".to_string()),
             storage_path: "/dev/null".to_string(),
+            extraction_failed: false,
         }],
     )
     .await
@@ -6997,6 +7404,7 @@ async fn a_slash_turns_image_reaches_the_skills_vision_model() {
             size_bytes: image_bytes.len() as i64,
             extracted_text: None,
             storage_path: img_path.to_string_lossy().to_string(),
+            extraction_failed: false,
         }],
     )
     .await
@@ -7025,16 +7433,15 @@ async fn a_slash_turns_image_reaches_the_skills_vision_model() {
 /// so the attachment is reported skipped with a reason that says why.
 #[tokio::test]
 async fn a_plugin_skills_turn_reports_the_attachment_skipped() {
-    use openalpaca_api::plugin_traits::{PluginSkillExecutor, ToolCallbackExecutor};
+    use openalpaca_api::plugin_traits::{DynToolCallbackExecutor, PluginSkillExecutor};
 
     struct EchoPluginSkill;
-    #[async_trait::async_trait]
     impl PluginSkillExecutor for EchoPluginSkill {
         async fn invoke(
             &self,
             query: &str,
             _c: &serde_json::Value,
-            _t: &dyn ToolCallbackExecutor,
+            _t: &DynToolCallbackExecutor<'_>,
         ) -> Result<String, String> {
             Ok(format!("plugin saw: {query}"))
         }
@@ -7092,6 +7499,7 @@ async fn a_plugin_skills_turn_reports_the_attachment_skipped() {
                 size_bytes: 40,
                 extracted_text: Some("the codeword is PLATYPUS".to_string()),
                 storage_path: "/dev/null".to_string(),
+                extraction_failed: false,
             }],
         )
         .await
@@ -7138,6 +7546,7 @@ async fn a_deterministic_tier_reports_the_turns_attachments_skipped() {
             size_bytes: 20,
             extracted_text: Some("the codeword is PLATYPUS".to_string()),
             storage_path: "/dev/null".to_string(),
+            extraction_failed: false,
         }],
     )
     .await
@@ -7169,7 +7578,6 @@ async fn a_deterministic_tier_reports_the_turns_attachments_skipped() {
 #[tokio::test]
 async fn a_direct_send_reports_the_turns_attachments_skipped() {
     struct RecordingSender;
-    #[async_trait::async_trait]
     impl crate::orchestrator::ConnectorSendProvider for RecordingSender {
         async fn send_message(
             &self,
@@ -7226,6 +7634,7 @@ async fn a_direct_send_reports_the_turns_attachments_skipped() {
                 size_bytes: 20,
                 extracted_text: Some("the codeword is PLATYPUS".to_string()),
                 storage_path: "/dev/null".to_string(),
+                extraction_failed: false,
             }],
         )
         .await
@@ -7259,7 +7668,6 @@ async fn a_direct_send_reports_the_turns_attachments_skipped() {
 #[tokio::test]
 async fn the_direct_send_and_send_context_read_the_same_default_recipient() {
     struct AllChannels;
-    #[async_trait::async_trait]
     impl crate::orchestrator::ConnectorSendProvider for AllChannels {
         async fn send_message(
             &self,
@@ -7405,6 +7813,7 @@ async fn a_turns_audio_attachment_is_judged_as_audio() {
             size_bytes: 4096,
             extracted_text: None,
             storage_path: "/dev/null".to_string(),
+            extraction_failed: false,
         }],
     )
     .await
@@ -7475,6 +7884,7 @@ async fn an_attachment_turn_is_not_replayed_as_its_own_history() {
         size_bytes: 40,
         extracted_text: Some("the codeword is WOMBAT".to_string()),
         storage_path: "/dev/null".to_string(),
+        extraction_failed: false,
     };
 
     // Exactly what `Gateway::handle_event` does before calling the handler.
@@ -7553,7 +7963,6 @@ impl ScriptedTurnLlm {
     }
 }
 
-#[async_trait]
 impl openalpaca_llm::LlmProvider for ScriptedTurnLlm {
     fn name(&self) -> &str {
         "scripted-turn-mock"
@@ -7581,6 +7990,7 @@ impl openalpaca_llm::LlmProvider for ScriptedTurnLlm {
                 usage,
                 finish_reason: FinishReason::Stop,
                 thinking: None,
+                echo: None,
                 parts: None,
             });
         }
@@ -7605,6 +8015,7 @@ impl openalpaca_llm::LlmProvider for ScriptedTurnLlm {
                 usage,
                 finish_reason: FinishReason::ToolUse,
                 thinking: None,
+                echo: None,
                 parts: None,
             },
             Some(ScriptStep::Say(text)) => ChatResponse {
@@ -7614,6 +8025,7 @@ impl openalpaca_llm::LlmProvider for ScriptedTurnLlm {
                 usage,
                 finish_reason: FinishReason::Stop,
                 thinking: None,
+                echo: None,
                 parts: None,
             },
             // The script ran out — anything the loop asks beyond it is a bug
@@ -7625,6 +8037,7 @@ impl openalpaca_llm::LlmProvider for ScriptedTurnLlm {
                 usage,
                 finish_reason: FinishReason::Stop,
                 thinking: None,
+                echo: None,
                 parts: None,
             },
         })
@@ -7655,7 +8068,7 @@ fn scripted_turn_orchestrator(
     let router = openalpaca_llm::LlmRouter::single_provider(
         Arc::new(ScriptedTurnLlm::new(steps, requests.clone())),
         openalpaca_llm::ProviderType::Anthropic,
-        "claude-sonnet-4-5-20250929".to_string(),
+        "claude-sonnet-5-5".to_string(),
     );
     let orch = make_orchestrator_with_llm_agents_and_config(
         Arc::new(router),
@@ -8157,7 +8570,7 @@ async fn the_main_loop_prompt_says_search_pick_read_in_one_line() {
     {
         let reqs = requests.lock().unwrap();
         let system = &reqs[0].messages[0];
-        assert!(matches!(system.role, openalpaca_llm::Role::System));
+        std::assert_matches!(system.role, openalpaca_llm::Role::System);
         assert_eq!(
             system.content.matches(guidance).count(),
             1,
@@ -8674,7 +9087,7 @@ fn filer_skill_orchestrator(
             requests: requests.clone(),
         }),
         openalpaca_llm::ProviderType::Anthropic,
-        "claude-sonnet-4-5-20250929".to_string(),
+        "claude-sonnet-5-5".to_string(),
     );
     let bus = EventBus::default();
     let gate = make_security_gate(&bus);
@@ -8833,7 +9246,6 @@ impl MarkerExtractorLlm {
     }
 }
 
-#[async_trait]
 impl openalpaca_llm::LlmProvider for MarkerExtractorLlm {
     fn name(&self) -> &str {
         "marker-extractor-mock"
@@ -8873,6 +9285,7 @@ impl openalpaca_llm::LlmProvider for MarkerExtractorLlm {
             },
             finish_reason: FinishReason::Stop,
             thinking: None,
+            echo: None,
             parts: None,
         })
     }
@@ -8956,7 +9369,6 @@ impl ExtractionScene {
 /// turn to the orchestrator.
 struct OrchestratorTurns(Arc<Orchestrator>);
 
-#[async_trait]
 impl crate::gateway::MessageHandler for OrchestratorTurns {
     async fn handle(&self, request: HandleRequest) -> Result<crate::gateway::HandleResult, String> {
         self.0
@@ -8994,7 +9406,7 @@ impl LearningStack {
                 requests: requests.clone(),
             }),
             openalpaca_llm::ProviderType::Anthropic,
-            "claude-sonnet-4-5-20250929".to_string(),
+            "claude-sonnet-5-5".to_string(),
         ));
         let config = DaemonConfig::default();
         let orch = make_orchestrator_with_llm_agents_and_config(
@@ -9118,6 +9530,7 @@ async fn a_preference_that_appears_only_in_an_attachments_text_yields_no_note() 
             size_bytes: 40,
             extracted_text: Some("The user prefers vim for editing.".to_string()),
             storage_path: "/dev/null".to_string(),
+            extraction_failed: false,
         }],
         ..user1_turn(typed)
     };
@@ -9291,14 +9704,14 @@ async fn onboarding_completes_from_the_files_update_persona_wrote_with_no_backgr
 
     assert!(!bootstrap.exists(), "onboarding completed from the files");
     assert!(!orch.is_bootstrapping());
-    assert!(matches!(
+    std::assert_matches!(
         events.try_recv(),
         Ok(SystemEvent::BootstrapCompleted {
             identity_populated: true,
             user_populated: true,
             ..
         })
-    ));
+    );
 }
 
 /// The other half: a `USER.md` that is still the seeded template does not
@@ -9580,7 +9993,7 @@ async fn a_main_loop_turn_carries_the_working_state_ahead_of_its_rows() {
 /// model's window 4 096 tokens and the compaction buffer forced high: a turn
 /// over ten 800-character rows compacts at `LlmSummary` without the assembly
 /// trimming a row, and a turn over four does not compact. The summariser's
-/// model is `claude-haiku-4-5-20251001`; the recent window holds `recent`
+/// model is `claude-haiku-5-5`; the recent window holds `recent`
 /// rows.
 fn a_4k_orchestrator(
     reply: &str,
@@ -9590,15 +10003,15 @@ fn a_4k_orchestrator(
     let mut config = DaemonConfig::default();
     config.orchestrator.memory.prompt_recent_messages = recent;
     config.execution.context.autocompact_buffer_ratio = 0.3;
-    config.orchestrator.costs.summary_model = Some("claude-haiku-4-5-20251001".to_string());
+    config.orchestrator.costs.summary_model = Some("claude-haiku-5-5".to_string());
     let (orch, requests) =
         make_tool_mode_orchestrator_with_db(None, reply, config, Vec::new(), Some(db.clone()));
     let registry = orch.llm_router.as_ref().unwrap().model_registry();
     let mut info = registry
-        .get_model_info("claude-sonnet-4-5-20250929")
+        .get_model_info("claude-sonnet-5-5")
         .expect("the tool-mode model is in the catalogue");
     info.context_window = 4096;
-    registry.register("claude-sonnet-4-5-20250929".to_string(), info);
+    registry.register("claude-sonnet-5-5".to_string(), info);
     (orch, requests)
 }
 
@@ -9672,7 +10085,7 @@ async fn a_compacting_turn_writes_its_state_and_the_next_request_carries_it() {
             .unwrap()
             .model
             .as_deref(),
-        Some("claude-haiku-4-5-20251001"),
+        Some("claude-haiku-5-5"),
         "on `summary_model` (CQ-3)"
     );
     let row = openalpaca_storage::ConversationRepository::new(&db)
@@ -10594,7 +11007,7 @@ async fn a_skill_turn_says_what_it_continued_from() {
             requests: requests.clone(),
         }),
         openalpaca_llm::ProviderType::Anthropic,
-        "claude-sonnet-4-5-20250929".to_string(),
+        "claude-sonnet-5-5".to_string(),
     );
     let (_tmp, catalog) = make_review_skill_catalog();
     let bus = EventBus::default();
@@ -10804,3 +11217,114 @@ mod memory_store_on_a_turn_with_no_project {
         assert!(!scene.home_store.join("projects").exists());
     }
 }
+
+// ── N-TOOL-1b (B-11): the file-skill tier's per-tool bound ──────────────
+
+/// A file skill's tool calls are cut at `[execution.agent_defaults]
+/// max_tool_runtime_secs` (1 s here) — the bound every loop reads — and its
+/// `shell_execute` definition states that figure and the configured ceiling
+/// (7 s here, not the default 600).
+#[tokio::test]
+async fn the_skill_tier_cuts_a_tool_at_the_daemons_per_tool_bound() {
+    let tmp = tempfile::tempdir().unwrap();
+    let skill_dir = tmp.path().join("builder");
+    std::fs::create_dir_all(&skill_dir).unwrap();
+    std::fs::write(
+        skill_dir.join("SKILL.md"),
+        r#"---
+name: "Builder"
+description: "Builds things"
+tools:
+  allow:
+    - shell_execute
+---
+
+## Instructions
+
+Build it.
+"#,
+    )
+    .unwrap();
+    let catalog = skill_catalog::SkillCatalog::new();
+    catalog.scan_directory(tmp.path(), crate::middleware::skill::SkillScope::Project);
+    let registry = Arc::new(ToolRegistry::default());
+    registry.register(crate::test_util::slow_shell()).unwrap();
+    let provider = crate::test_util::CallsOneTool::new(
+        "shell_execute",
+        serde_json::json!({"command": "make"}),
+    );
+    let router = Arc::new(openalpaca_llm::LlmRouter::single_provider(
+        provider.clone(),
+        openalpaca_llm::ProviderType::Anthropic,
+        "claude-sonnet-5-5".to_string(),
+    ));
+    let bus = EventBus::default();
+    let gate = make_security_gate_with_registry(&bus, registry.clone());
+    let orch = Orchestrator::new(
+        Arc::new(SharedContext::new()),
+        Arc::new(LaneManager::new()),
+        bus,
+        SystemPersona::default(),
+        Some(router),
+        LoopConfig::default(),
+        gate,
+        registry,
+        None,
+        Arc::new(catalog),
+        Arc::new(skill_router::SkillRouter::new(0.65, 0.45)),
+        Arc::new(ArcSwap::from_pointee(
+            crate::test_util::daemon_config_with_agent_defaults(
+                "max_tool_runtime_secs = 1\nmax_tool_runtime_ceiling_secs = 7",
+            ),
+        )),
+    );
+
+    orch.handle_skill_invocation(
+        Uuid::new_v4(),
+        "cli",
+        "Builder",
+        "build it",
+        "test:cli",
+        None,
+        &ConversationContext::default(),
+        None,
+        &crate::memory::scope_context::MemoryScopeContext::new(None),
+        None,
+        false,
+        None,
+        false,
+        None,
+        None,
+    )
+    .await
+    .expect("the skill runs");
+
+    let result = provider.tool_result();
+    assert!(
+        result.contains("Tool 'shell_execute' timed out after 1s"),
+        "the skill's call ran past the daemon's bound: {result:?}"
+    );
+    let description = provider.description_of("shell_execute");
+    assert!(
+        description.contains("still running after 1 second is stopped"),
+        "{description}"
+    );
+    assert!(description.contains("up to 7 seconds"), "{description}");
+}
+
+/// A held connector send provider crosses threads, and each async method's
+/// future is `Send` (the declared `+ Send`, the default body included).
+#[test]
+fn a_held_connector_send_provider_is_send_and_sync() {
+    fn send_and_sync<T: Send + Sync + ?Sized>() {}
+    send_and_sync::<Arc<DynConnectorSendProvider<'static>>>();
+
+    fn is_send<T: Send>(_: &T) {}
+    fn futures_are_send<P: ConnectorSendProvider + ?Sized>(provider: &P) {
+        is_send(&provider.send_message("telegram", "someone", "hello"));
+        is_send(&provider.send_file("telegram", "someone", "/f", "f", "text/plain", None));
+    }
+    let _ = futures_are_send::<DynConnectorSendProvider<'static>>;
+}
+
+mod usage_rows;

@@ -24,7 +24,7 @@ mod task_ops;
 
 pub use background_jobs::BackgroundJobs;
 pub use task_launch::{RerunOutcome, StartOutcome, TaskLaunchError};
-pub use task_ops::{TaskActionError, apply_task_action};
+pub use task_ops::{PAUSE_UNSUPPORTED, TaskActionError, apply_task_action};
 // Routing V2 shared core, re-exported for the main-loop `task_status` tool.
 pub(crate) use task_ops::task_status_query;
 
@@ -52,7 +52,7 @@ use crate::middleware::bootstrap::BootstrapDocument;
 use crate::middleware::identity::IdentityDocument;
 use crate::middleware::prompt::SystemPersona;
 use crate::middleware::user::UserDocument;
-use crate::prompt_ctx::ContextManager;
+use crate::prompt_ctx::{ContextManager, DynContextSource};
 use crate::runner::LoopConfig;
 use crate::security::gate::SecurityGate;
 use crate::security::policy::Principal;
@@ -81,20 +81,20 @@ pub trait ConnectorStatusProvider: Send + Sync {
 }
 
 /// Outbound message sending via connectors. Implemented at daemon level.
-#[async_trait::async_trait]
+#[dynosaur::dynosaur(pub DynConnectorSendProvider = dyn(box) ConnectorSendProvider)]
 pub trait ConnectorSendProvider: Send + Sync {
     /// Send a message via a channel. Returns Ok(delivery_summary) or Err(reason).
-    async fn send_message(
+    fn send_message(
         &self,
         channel: &str,
         recipient: &str,
         content: &str,
-    ) -> Result<String, String>;
+    ) -> impl Future<Output = Result<String, String>> + Send;
     /// List channels that can currently send (subset of active connectors).
     fn sendable_channels(&self) -> Vec<String>;
 
     /// Send a file via a channel. Returns Ok(delivery_summary) or Err(reason).
-    async fn send_file(
+    fn send_file(
         &self,
         _channel: &str,
         _recipient: &str,
@@ -102,8 +102,8 @@ pub trait ConnectorSendProvider: Send + Sync {
         _filename: &str,
         _mime_type: &str,
         _caption: Option<&str>,
-    ) -> Result<String, String> {
-        Err("File sending not supported on this channel".to_string())
+    ) -> impl Future<Output = Result<String, String>> + Send {
+        async move { Err("File sending not supported on this channel".to_string()) }
     }
 
     /// List channels that support file sending.
@@ -210,7 +210,7 @@ pub struct Orchestrator {
     /// `Arc` wrapping allows sharing with `TaskDispatcher` for pipeline/DAG/lead-agent prompt injection.
     connector_status: Arc<RwLock<Option<Arc<dyn ConnectorStatusProvider>>>>,
     /// Connector send provider for outbound messaging tool (set post-construction).
-    pub connector_sender: Arc<RwLock<Option<Arc<dyn ConnectorSendProvider>>>>,
+    pub connector_sender: Arc<RwLock<Option<Arc<DynConnectorSendProvider<'static>>>>>,
     /// Per-request LLM metadata from query/skill handlers → bridge.
     /// Keyed by request_id to avoid races between concurrent requests.
     /// Populated after LLM response, removed by bridge after reading.
@@ -341,7 +341,10 @@ pub(crate) fn wrap_untrusted_context(
 
 
 impl Orchestrator {
-    #[allow(clippy::too_many_arguments)]
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "the shared services the orchestrator is built from"
+    )]
     pub fn new(
         shared_context: Arc<SharedContext>,
         lane_manager: Arc<LaneManager>,
@@ -358,7 +361,7 @@ impl Orchestrator {
     ) -> Self {
         let connector_status: Arc<RwLock<Option<Arc<dyn ConnectorStatusProvider>>>> =
             Arc::new(RwLock::new(None));
-        let connector_sender: Arc<RwLock<Option<Arc<dyn ConnectorSendProvider>>>> =
+        let connector_sender: Arc<RwLock<Option<Arc<DynConnectorSendProvider<'static>>>>> =
             Arc::new(RwLock::new(None));
         let user_document: Arc<RwLock<Option<UserDocument>>> = Arc::new(RwLock::new(None));
         // The memory service's slot (design §7a): filled by the daemon after
@@ -371,18 +374,20 @@ impl Orchestrator {
         let background = Arc::new(BackgroundJobs::new());
 
         let context_manager = Arc::new(if db.is_some() {
-            let sources: Vec<Box<dyn crate::prompt_ctx::sources::ContextSource>> = vec![
-                Box::new(crate::prompt_ctx::sources::memory::MemorySource::new(
+            let sources: Vec<Box<DynContextSource<'static>>> = vec![
+                DynContextSource::new_box(crate::prompt_ctx::sources::memory::MemorySource::new(
                     memory_service.clone(),
                     daemon_config.clone(),
                 )),
-                Box::new(
+                DynContextSource::new_box(
                     crate::prompt_ctx::sources::conversation::ConversationSource::new(),
                 ),
                 // The user profile is not a source: it is the persona layer's
                 // own block, injected once per turn (plan 3.3, design §5).
-                Box::new(crate::prompt_ctx::sources::skill::SkillContextSource::new()),
-                Box::new(
+                DynContextSource::new_box(
+                    crate::prompt_ctx::sources::skill::SkillContextSource::new(),
+                ),
+                DynContextSource::new_box(
                     crate::prompt_ctx::sources::workspace::WorkspaceSource::new(),
                 ),
             ];
@@ -694,9 +699,9 @@ impl Orchestrator {
     }
 
     /// Set the connector send provider (post-construction).
-    pub fn set_connector_send_provider(&self, p: Arc<dyn ConnectorSendProvider>) {
+    pub fn set_connector_send_provider(&self, p: Arc<impl ConnectorSendProvider + 'static>) {
         if let Ok(mut guard) = self.connector_sender.write() {
-            *guard = Some(p);
+            *guard = Some(DynConnectorSendProvider::from_arc(p));
         }
     }
 
@@ -704,8 +709,7 @@ impl Orchestrator {
     pub fn is_bootstrapping(&self) -> bool {
         self.bootstrap_document
             .read()
-            .map(|guard| guard.is_some())
-            .unwrap_or(false)
+            .is_ok_and(|guard| guard.is_some())
     }
 }
 

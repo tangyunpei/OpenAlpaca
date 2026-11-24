@@ -890,3 +890,29 @@ fn a_re_point_rewrites_a_pointer_rows_path_and_leaves_the_file() {
         mtime
     );
 }
+
+/// Step 9's golden (M26): the text for every step byte for byte, under `{}`
+/// and `{:#}`, with no `source()` — written against the hand-written
+/// `Display` and kept on the derive. The `match` has no `_` arm, so a new
+/// step does not compile without its row.
+#[test]
+fn a_repoint_interrupted_names_its_step_and_has_no_source() {
+    let rows = [
+        RepointStep::Marked,
+        RepointStep::RowsRewritten,
+        RepointStep::Renamed,
+        RepointStep::Cleared,
+    ];
+    for step in rows {
+        let want = match step {
+            RepointStep::Marked => "the re-point stopped after Marked",
+            RepointStep::RowsRewritten => "the re-point stopped after RowsRewritten",
+            RepointStep::Renamed => "the re-point stopped after Renamed",
+            RepointStep::Cleared => "the re-point stopped after Cleared",
+        };
+        let stopped = RepointInterrupted(step);
+        assert_eq!(stopped.to_string(), want);
+        assert_eq!(format!("{stopped:#}"), want);
+        assert!(std::error::Error::source(&stopped).is_none(), "{want}");
+    }
+}

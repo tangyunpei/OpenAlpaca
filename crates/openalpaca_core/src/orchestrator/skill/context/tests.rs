@@ -187,3 +187,12 @@ async fn test_path_within_skill_dir_allowed() {
         "Files within skill directory should be readable"
     );
 }
+
+#[test]
+fn test_simple_glob_match_doublestar_matches_the_tail_against_the_end() {
+    // The text after a `**/` is matched against the end of the path. (Which
+    // `**/` splits first does not show: the recursion reaches the last one.)
+    assert!(simple_glob_match("src/**/main.rs", "anything/main.rs"));
+    assert!(simple_glob_match("a/**/b/**/*.rs", "x/b/y.rs"));
+    assert!(!simple_glob_match("src/**/main.rs", "src/lib.rs"));
+}

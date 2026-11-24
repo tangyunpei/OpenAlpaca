@@ -4,7 +4,8 @@
 
 OpenAlpaca's agentic loop maps 1-to-1 onto Hermes Research's [10-step
 run_conversation loop](https://hermes-agent.nousresearch.com/docs/developer-guide/agent-loop),
-extended with cost budgets, parallel tool execution, a lead-agent
+extended with cost budgets, grouped tool execution (read-only calls
+together, every other call alone), a lead-agent
 multi-agent topology (subagents spawned singly or in batches), and a
 mid-workflow steering rail. The legacy pipeline/DAG topologies and
 mid-execution replanning were deleted in Routing V2 Phase 5.
@@ -25,11 +26,11 @@ siblings); `cache_markers` lives in the provider layer and carries only
 | 3 | `loop.step.cost_check` | Accumulate round cost; return CostExceeded if over `config.max_cost` | step 3 |
 | 4 | `loop.step.compaction` | Graduated budget-aware history compaction | step 4 |
 | 5 | `loop.step.build_request` | Assemble `RouterRequest` for this iteration | step 5 |
-| 6 | `loop.step.pressure_layer` | Compute the ephemeral budget notice (fires only at >=80% cost or rounds, flag-gated) | nested in step 5 |
+| 6 | `loop.step.pressure_layer` | Append the budget notice to the run's list, where it stays (fires only at >=80% cost or rounds, flag-gated) | nested in step 5 |
 | 7 | `loop.step.cache_markers` | Apply the three Anthropic `cache_control: ephemeral` markers (system, last tool, last message) | `providers/anthropic/request.rs` |
-| 8 | `loop.step.llm_call` | Dispatch `backend.complete(...)` under `tokio::select!` with the cancel token | step 8 |
+| 8 | `loop.step.llm_call` | Dispatch `backend.complete(...)` through the cancel token's `run_until_cancelled` (the call polled first) | step 8 |
 | 9 | `loop.step.response_parse` | Parse the `ChatResponse`; split into tool-call branch or final-text branch | step 9 |
-| 10 | `loop.step.persist_or_tools` | Execute tools (parallel via `join_all`) OR persist final text and return | step 10 |
+| 10 | `loop.step.persist_or_tools` | Execute tools in groups, in the model's order (read-only calls together via `join_all`, every other call alone) OR persist final text and return | step 10 |
 
 Two details of the budget checks:
 
@@ -51,10 +52,19 @@ Two details of the budget checks:
   `max_rounds` plus any steering bonus and the answer guard's one bonus
   round, never more than `2 × max_rounds`.
 
+What step 5's request leaves out: it carries no `temperature`.
+`LlmBackend::complete` (`runner/agentic_loop/backend.rs`) sets none on
+any of its paths, so the model answers at its own default. A template's
+`temperature`, and an agent's `preset.temperature`, is accepted and not
+sent, so the shipped templates no longer set it (TEMPLATE-TEMPERATURE).
+One that sets none has none — no default is filled in — and
+`GET /v1/agent-templates` and `GET /v1/agents/{id}/config` leave the
+field out for it (TEMPLATE-TEMP-OPTIONAL).
+
 ## How a Loop Ends
 
 Every invocation returns a `LoopResult` whose `finish_reason` is one of
-six values (`runner/agentic_loop/config.rs`). With a session log
+eight values (`runner/agentic_loop/config.rs`). With a session log
 attached, the exit is also written as a `workflow_done` record using the
 lower-case word in the second column.
 
@@ -66,6 +76,8 @@ lower-case word in the second column.
 | `Truncated` | `truncated` | The model stopped on its output limit three times running. The first two times the loop appends the partial text and a "continue from where you left off" message (`MAX_TOKENS_RETRIES = 2`); the third returns the partial text. |
 | `Cancelled` | `cancelled` | The cancel token fired — at the top of a round, during the LLM call, or during a retry backoff. |
 | `Error(msg)` | `error` | A non-transient LLM error, a transient one that outlived its retries, or a runtime model-access denial. |
+| `ResultSubmitted` | `result_submitted` | A child spawned with a `result_schema` had a `submit_result` call accepted; only such a child ends this way. |
+| `ResultRejected` | `result_rejected` | Such a child's fourth `submit_result` call was rejected. |
 
 `final_content` is the model's answer on `Complete` and the partial text
 on `Truncated`. On every other exit it is the last assistant text the
@@ -128,7 +140,101 @@ block as the main loop, as its last raw block, less the main loop's
 sentence that the user can type a skill's `/slash` command. The lead's `SandboxPolicy` allowlist is extended from the
 final tool definitions at run time (template denials still win);
 subagents stay template-scoped — they get only the capabilities their
-own template declares, never the lead's blanket grant.
+own template declares, never the lead's blanket grant. A template a file
+in `config/agents/` switches off (`disabled: true`) is not offered to the
+lead: its `<agents>` block and both spawn descriptions are built from the
+resolved list, which leaves it out, and a spawn naming it is refused
+with the file's path.
+
+**`general_agent` is the default subagent** (SA-1). `spawn_subagent`'s
+`agent_id` is optional: absent, `null` or empty, the spawn runs
+`general_agent` (`DEFAULT_SUBAGENT_TEMPLATE`, `runner/lead_agent/tools.rs`)
+— the guards run on that id, the run id, span and `subagent_open` record
+name it, the record carries `agent_id_defaulted: true` (`false` when the
+lead named its agent), and the reply says "(the default: no agent_id
+given)". An omitted `agent_id` is refused, with the agents the lead can
+name sorted by id, when the default is the run's own lead or no template
+of the id resolves (a file withholds it or switches it off, or nothing
+holds it) — never a silent pick of another. The shipped specialists are
+capability profiles: each description says what it can do, which is what
+the lead chooses by, and each persona how to work. The lead's
+`<workflow>` step 3 gives each sub-objective to `general_agent` unless its
+brief needs fewer powers (`explore_agent` only reads files and memory),
+and names `system_agent` by what it is, each clause only when that
+template is offered; with `general_agent` not among the lead's `<agents>`,
+step 3 says to name an agent for each and that `agent_id` is required. A
+borrowed lead — the dispatcher's fallback, when every `orchestration`
+template is busy — tries `general_agent` last. Each `spawn_subagents_batch`
+entry goes to `spawn_subagent` whole, and one that cannot spawn (no
+objective, an unknown or withheld agent) is its own `[n] FAILED (…)` line
+while the entries around it are spawned and their run ids returned.
+
+**Which model each runs on** (SA-3, C8; `runner/model_choice.rs`). A
+template's `model:` and a spawn's optional `model` are `inherit` (also no
+value), an alias (`fast`, `balanced`, `strong`) or a model id, resolved
+**before** the loop config is built from the agent, so the window, the
+context budget's telemetry, the cost check and the usage row read the id
+that answers; the router never sees a word. The lead's choice resolves at
+the top of `run_lead_agent`, on a copy of its `SubAgent` (the template and
+the registry's instance keep the word): `inherit` is
+`LlmRouter::effective_default_model()`, an alias `resolve_alias` against
+it, an id itself; a template without `orchestration` borrowed as a lead
+follows `lead_agent`'s choice when its own is `inherit` — the choice a run of
+`lead_agent` gets, a set stored over it included (`AgentRegistry::run_model`).
+`LeadAgentResult.lead_model` carries the resolved id, which the dispatcher's
+usage row and completion report name when no round answered. The lead's
+loop writes the model that answered each round into
+`LoopConfig::answering_model`, a slot `SpawnSubagentTool` reads: a
+subagent's `inherit` is that model (or the lead's resolved one while the
+slot is empty or names a model the router cannot route), and its alias
+resolves against it. A per-call `model` outranks the template's, is checked
+before the spawn reserves anything, and is refused — listing the first 30
+routable ids, how many more, and what each alias names — when nothing
+routable answers it; never substituted. A plugin-backed template refuses one.
+An alias or `inherit` empties the agent's `fallback_models` (its model is
+routable); an id keeps them as its request chain and walks the ladder at the
+call when it is not routable. The template's `max_cost_per_task` caps the
+child whatever model it runs on. Both spawn definitions carry the `model`
+parameter, whose description, built per lead run (`ModelMenu`), names each
+alias's model here, the routable ids and the model the lead's id reaches
+(`LlmRouter::would_answer`), reading the aliases without announcing them
+(`LlmRouter::peek_alias`); both stay
+non-strict (M-9). The reply names the child's model, what chose it and that
+the lead stays on its own; `subagent_open` records `model_choice` (`choice`,
+`per_call`) and `model`.
+
+**A typed result** (SA-4). `spawn_subagent`, and each
+`spawn_subagents_batch` entry, takes an optional `result_schema`: a JSON
+object in a small subset of JSON Schema, which OpenAlpaca's own checker
+(`runner/lead_agent/typed_result/shape.rs`) admits once, before anything
+is reserved, or refuses the spawn with `result_schema is not usable:
+<reason>.` It checks `type`, `enum`, `const`, `anyOf`, `properties`,
+`required`, `additionalProperties` (true or false), `items` (one schema),
+`minItems`, `maxItems`, `minimum`, `maximum`, `exclusiveMinimum` and
+`exclusiveMaximum`; lets `format` and the annotations through unchecked;
+and refuses every other keyword by name (`pattern` and every reference
+keyword among them). A schema is at most 16,384 bytes as compact JSON, 64
+levels of nesting and 10 object levels; `3.0` is an integer and `1`
+equals `1.0`. An absent or `null` `result_schema` is no schema, and one
+that asks for nothing (`{}`, or `format` and annotations only) is
+treated as absent, the reply saying so in one clause. A plugin-backed
+template refuses a schema. A child spawned with one runs on a clone of the
+registry that also holds its own `submit_result` tool (its definition
+wraps the schema, sent strict where strict mode accepts it), its
+`<output-format>` block tells it to deliver the result by calling
+`submit_result`, and its `subagent_open` record carries `typed: true`.
+Each call's `result` (at most 65,536 bytes as compact JSON) is checked
+— raw first, then, if it is a string, as the JSON it parses to — on the
+blocking pool; an accepted one ends the loop `ResultSubmitted` and the lead
+reads `result (matches result_schema): <compact JSON>`; a rejected one is
+answered with at most 19 violation lines, and the fourth rejection ends
+the loop `ResultRejected`. A child that ends a round with text and no call
+is nudged once, while it has a round and a tool call left. Any end but
+an accepted call — and but a cancellation, which closes as any cancelled
+run does — is a typed failure: the lane closes `failed` with a text that
+begins `ended without …`, the usage row says `result_rejected`, and the
+last rejected value (when it was within 65,536 bytes) and the final text
+are kept as its output.
 
 Subagents can be plugin-backed: when the spawned template's source is
 `AgentSource::Plugin` (contributed by a plugin manifest), the spawn path
@@ -138,7 +244,9 @@ instructions, then `step()` polls capped at 50 iterations, with requested
 tool calls proxied through the same `SandboxManager::execute_tool` path
 (capability checks, sanitization, confirmation, timeouts) as internal
 subagents. Depth, concurrency-permit, and cancellation semantics are
-unchanged; the cancel token is checked between steps.
+unchanged; the cancel token is checked between steps and raced against
+the `spawn()` and `step()` RPCs, the poll sleep and each tool call, and
+a cancel sends the plugin `stop()`.
 
 **A spawn never waits** (N-LEAD-2). `spawn_subagent`, and each entry of
 `spawn_subagents_batch`, registers the subagent and returns its run id at
@@ -150,6 +258,59 @@ frees; the bound does not change. Its instance and its lane exist from
 the spawn, so a queued subagent's lane reads `running` in the timeline
 (a span has no queued state). A queued subagent that the run's end or a
 `/cancel` reaches never starts.
+
+**A subagent waiting inside the router reads `running`** (N-LLM-1). A
+subagent holding a slot under the lead's bound is `running` — its status
+and its lane — for its whole run, also while a model call of its waits
+inside the router: the lead and its subagents call the model without a
+stream, so each call takes one of the router's permits (`llm.toml`'s
+`[rate_limits] global_concurrency`, 10 by default), then one of its key's
+(`per_key_concurrency`, 8 by default) and its key's RPM and TPM budget,
+waiting for whichever is short or for a rate-limited key's cooldown;
+neither the tracker nor a span has a waiting state. Eight is a full
+batch, more than the bound's six with the lead beside them, so a run
+alone on a one-key install does not wait for its key's permits (the
+default was 5 before N-LLM-1, and a sixth subagent did); other calls on
+the same key, a `[rate_limits]` table setting fewer, or the budgets still
+can. A watched chat turn streams and takes the router's permit alone,
+and a key's too only on its non-streaming fallback (step 8).
+
+**A run spawns at most 48 subagents** (N-LEAD-6). `[execution.lead_agent_defaults]
+max_subagents_per_run` (48: the concurrency bound's 6 times a batch's 8;
+1–1000) bounds how many subagents one run spawns in all — queued, running
+and finished, retries and a resumed run's earlier ones (those its session
+log still records) included. The next spawn, by `spawn_subagent` or as an
+entry of `spawn_subagents_batch` (the entries before it are spawned), is
+refused before anything is registered, naming the figure ("Maximum
+subagents per run (48) reached — …"), and the lead's prompt states it. The
+figure is read once, at the run's start, so the one the lead is told is the
+one enforced. A lifetime backstop far above normal use; the concurrency
+bound and the queueing are unchanged.
+
+**A subagent's objective is its brief** (SA-2). The lead's prompt
+(`<workflow>` step 2) and both spawn tools — their descriptions and their
+`objective` parameter — say to write each objective as a self-contained
+brief: the goal, the inputs it needs, the constraints, and what to return
+and where, since a subagent is given neither the user's request nor the
+lead's conversation. A file-based template's subagent gets it once, as the
+user turn it answers — the last message, after any memory block or
+working-folder line — and in no system message (SA-2b): the context
+package's task description (`ContextManager::distill`) is left out of the
+bundle the spawn site feeds Layer 3, which would route it to a second
+system message, as it did until SA-2b. The subagent's window no longer
+cuts or drops the brief: `distill` still fits the package's other sections
+beside it into 40% of the window (`SUB_AGENT_CONTEXT_RATIO`), but nothing
+cuts the brief itself; Layer 5's trim never takes the current user turn
+(below); and every compaction tier keeps everything the subagent was
+handed — its kept head (`LoopConfig::kept_head`) is the whole list, the
+brief last. A brief longer than the window goes whole; the provider's
+context-length error, if any, fails the subagent's run, on its first round
+or a later one, and the lead reads that failure as any other. The
+span row and the lane's `subagent_open` record keep the objective's first
+500 characters, and two log lines a preview (80 bytes; 50 characters) —
+records only. A plugin-backed template's executor is
+handed it after the composed system prompt, as `Objective: …` in its
+instructions, and as its context's `objective`.
 
 **Each result reaches the lead once** (N-LEAD-3). `wait_for_subagents`
 returns the subagents it has not reported yet — a finished one's answer as
@@ -170,17 +331,30 @@ the cost cap with its amount and the spend it was checked against
 (`LoopResult::cap_spend`, this attempt's — not the agent's lifetime
 total, which a singleton template's reused id would carry), the error as
 written (never the finish reason's `Debug` form), the last tool error.
-Where a retry
-cannot change the outcome — the cost cap, credentials the provider refused,
-no model the agent can use, a model it may not use — the line says *"A
-retry will not help"*, and the lead prompt's step 5 retries a failure
-unless its failure says so. Credentials the provider refused on every
-attempt reach the loop as the router's `AllKeysRefused` — on the streaming
-and the non-streaming path, and kept past the fallback ladder when no rung
-answers, as `NoApiCompatibleKeys` now is — which the loop does not retry
-as transient; before, the rotation ended as "Max retries exceeded" and the
-ladder's "All fallback models failed", retried three times and then read
-as a failure a retry could fix.
+Where a retry cannot change the outcome — the cost cap, credentials the
+provider refused, no model the agent can use, a model it may not use, a
+local model that used up its whole timeout (`LocalCallTimedOut`, read by
+its text's shape, since the text opens with the model's id;
+LOCAL-TIMEOUT-MARK) — the line says *"A retry will not help"*, and the
+lead prompt's step 5 retries a failure unless its failure says so. The
+local timeout is named only when the spent model is the one the call asked
+for (LTM-1): when a cloud model failed in a way that may pass and its
+fallback ladder then reached a local model that spent its timeout, the
+router's error says so (`LocalCallTimedOut::asked`, false), the loop keeps
+it as `LoopResult::spent_fallback_rung`, and the line leaves the sentence
+out, since a second attempt asks the cloud model first. The text the
+person reads is the same either way. `wait_for_subagents`' summary, which
+cuts a failed line over 512 bytes as its head and tail, keeps that
+sentence whole and cuts the text around it instead (LTM-2,
+`tracker.rs`'s `cut_error`); `check_subagent_status` shows the line
+whole.
+Credentials the provider refused on every attempt reach the loop as the
+router's `AllKeysRefused` — on the streaming and the non-streaming path,
+and kept past the fallback ladder when no rung answers, as
+`NoApiCompatibleKeys` now is — which the loop does not retry as transient;
+before, the rotation ended as "Max retries exceeded" and the ladder's "All
+fallback models failed", retried three times and then read as a failure a
+retry could fix.
 
 **A resumed run knows its subagents again** (N-LEAD-4). Each subagent's
 whole final answer is spilled to the session's `results/` beside its
@@ -209,8 +383,10 @@ the lead's loop returns — an answer, its round or cost cap, an error, a
 cancel — `run_lead_agent` cancels the subagents token first (R45's kill of
 a running command's process group rides on it), waits up to 5 s for each
 subagent to close its lane as cancelled with the detail *"the run ended
-before this subagent finished"*, aborts whatever is still running (a
-plugin agent's RPC is not raced against the token), whose lane guard
+before this subagent finished"* (a plugin agent's spawn and step RPCs
+are raced against the token, so one mid-call is sent `stop()` and ends
+too), aborts whatever is still running (a plugin agent whose `stop()`
+does not answer within the grace), whose lane guard
 closes the lane the same way, and only then returns — so the dispatcher's
 `remove_cancellation_token` strands nothing, and the run's report lists
 the stopped lanes ([The Completion Report](#the-completion-report)). A
@@ -243,26 +419,79 @@ error events stay inside the loop.
 A **plugin-contributed** skill does not stream: `invoke_plugin_skill`
 gets a finished answer back over the plugin protocol, so it keeps the
 chat service's single fallback delta — nothing simulates chunks for it.
-Every caller with nobody watching a stream (scheduled skills,
-connectors, the follow-up runner, the nested `invoke_skill` tool, the
-lead and its subagents) passes no sink and runs the non-streaming path.
+Every other caller with nobody watching a stream (scheduled skills,
+connectors, the follow-up runner, the nested `invoke_skill` tool) passes
+no sink and runs the non-streaming path. The lead and the subagents of a
+built-in template (a plugin's agent runs its plugin's own loop) pass no
+sink either, but ask every round streamed: `LoopConfig::from_defaults`
+sets `LoopConfig.stream_rounds` (OUTPUT-BUDGET, the owner's item 8), and
+step 8 collects the events and forwards them nowhere, so a long answer
+runs under the streamed bounds below, not the non-streaming request
+timeout (`[timeouts] llm_request_timeout_secs`, 120 s seeded). Such a
+round has no 90 s idle clock (`collect_stream_idle` with none; the HTTP
+read gap bounds a silent stream). A streamed round cut at its output
+budget before any text or call is continued (step 9), where asked whole
+it was the router's `EmptyCompletion`; one that ends on thinking alone,
+not cut, is still that error, the backend applying the router's rule
+(`empty_completion_error`) to a round streamed with no sink, and is not
+asked again.
 
-With a callback set and a router backend, step 8 tries
+With a callback set, or `stream_rounds`, and a router backend, step 8 tries
 `LlmRouter::complete_streaming` first and **falls back to the
 non-streaming call** — same round, no extra round charged — when:
 
 - the streaming request itself fails;
-- collecting the stream fails, which includes 90 s of silence between
-  chunks (`STREAM_IDLE_TIMEOUT`, `openalpaca_llm/src/streaming.rs`);
-- the collection outlives `LoopConfig.max_stream_duration` (600 s).
+- collecting the stream fails, which includes, on a turn with a callback,
+  90 s with no stream event (`STREAM_IDLE_TIMEOUT`,
+  `openalpaca_llm/src/streaming.rs`; a `ping` is not an event), and on any
+  round a read gap (`request_timeout_secs`) with no byte;
+- the collection outlives `LoopConfig.max_stream_duration` (600 s),
+  or `LoopConfig.max_keyless_stream_duration` (3,600 s) when the
+  provider serving the round needs no key — a local model, whose call
+  may run up to an hour. The loop reads which from the stream the
+  router hands back (`RoutedStream::requires_key`).
 
-`complete_streaming` returns `RoutedStream { model, stream }`. A stream
-carries no model id of its own, and the router is the only code that
-knows which rung of its fallback ladder it settled on, so the loop takes
-`.stream` and reports `.model`. That id is what reaches
+A local call that used up its whole timeout is not asked again
+(LOCAL-HOUR-NO-RETRY): a streamed round to a provider that needs no key
+that runs its whole `max_keyless_stream_duration`, or whose streaming
+request spends its whole read gap (`request_timeout_secs`) before the
+stream opens, goes to `LlmRouter::complete_elsewhere` instead of the
+non-streaming call. No rung of the fallback ladder served by that
+provider is asked — the model itself included — while a rung on another
+provider may answer; when none does, the round ends with
+`LlmRouterError::LocalCallTimedOut`, which names the model and the
+timeout and is not transient, so the loop does not retry it either; a
+subagent that ends this way tells its lead a retry will not help
+(`subagent_failure`). A stream that opened and then fell silent (its
+90 s idle gap on a turn with a callback, or a read gap that came first)
+is still asked again without streaming.
+
+`complete_streaming` returns `RoutedStream { model, requires_key,
+stream }`. A stream carries no model id of its own, and the router is
+the only code that knows which rung of its fallback ladder it settled
+on, so the loop takes `.stream` and reports `.model`. That id is what reaches
 `LoopResult.model_used`, the cost tracker, the usage row and the SSE
 `done` frame — the model that answered, not the model that was asked
 for.
+
+**A turn's usage row is priced per request** (USAGE-PER-REQUEST). Beside
+its token totals the loop sums what each answered request cost as the
+cost tracker counted it — `LlmBackend::request_cost`, the tracker's
+`calculate_cost_with_cache` on that response's model and usage, its own
+prompt against a long-prompt threshold and its cache reads and writes at
+its row's multiples — as `LoopResult::requests_cost`. A chat turn's row
+(the main loop's and the social fast path's) and a skill invocation's,
+with the `LlmCallCompleted` event each publishes, record that sum, never
+the turn's summed tokens priced at once, which can pass a threshold no
+request passed. So do a workflow's lead row and each subagent's
+(`record_llm_usage`) and a nested skill's execution record
+(`invoke_skill`, `cost_usd`), since UPR-1. `estimated_cost` and
+`cap_spend` are read at the top of a round, before its request, so
+neither holds the request that ended the loop; `estimated_cost`, the
+agent's tracker total, also holds a reused instance id's earlier runs.
+The session log's `workflow_done` record carries both: `estimated_cost_usd`,
+as before, and `requests_cost_usd`, the loop's `requests_cost`, the last
+request included (UPR-1-LOG).
 
 Because a multi-round turn streams the text written before each tool
 call, the deltas of a turn need not add up to its answer.
@@ -280,10 +509,19 @@ everything that survives it to `handle_simple_query` with
 **including while workflows run** (chat-by-default; lanes are never
 captured):
 
-1. **Task ops** — `/status`, `/tasks`, `/cancel|/pause|/resume`. Bare
-   control commands (no task id) resolve against the lane's active
-   workflows (`task_ops.rs::handle_bare_task_control`): exactly one
-   running → act on it; zero → say so; multiple → list ids and ask.
+1. **Task ops** — `/status`, `/tasks`, `/cancel|/pause|/resume`. A bare
+   `/cancel` (no task id) resolves against the lane's active workflows
+   (`task_ops.rs::handle_bare_task_control`): exactly one running → act
+   on it; zero → say so; multiple → list ids and ask. `/pause` and
+   `/resume`, bare or with an id, answer one sentence
+   (`task_ops.rs::PAUSE_UNSUPPORTED`: pause is not supported, `/cancel`
+   stops a run) and change nothing. Every other surface refuses pause
+   too, until a later design: `POST /v1/tasks/{id}/action`'s `pause`
+   answers `409` with the same sentence before `apply_task_action`,
+   `openalpaca tasks pause` prints it without a request, and the Work
+   view offers no Pause — a pause never stopped a run (its work went on
+   and its completion wrote over `paused`). The route's `resume` still
+   un-pauses a row an earlier build left `paused`.
 2. **`/steer <msg>`** — deterministic injection into the lane's sole
    running workflow, bypassing the model
    (`task_ops.rs::handle_steer_prefix`; gated on `steering_enabled`).
@@ -325,8 +563,8 @@ under `"full"`. The static prompt's `<available_skills>` block names the
 skills `invoke_skill` can run: every available skill (the
 availability-filtered `catalog_summary`) by its id, which is what
 `invoke_skill` resolves, with its `/slash` and its description cut at
-100 characters, within `[orchestrator.prompt_budgets]
-skills_catalog_budget` (500 characters of skill lines); over the budget
+250 characters, within `[orchestrator.prompt_budgets]
+skills_catalog_budget` (20,000 characters of skill lines); over the budget
 every skill is listed by its id alone, and none is dropped
 (`orchestrator/skill/catalog/prompt.rs`). When the lane has active workflows AND steering is
 enabled, `steer_workflow` + `queue_followup` join the surface.
@@ -369,7 +607,8 @@ row with no `task_id` gets nothing.
 (`tools/builtins/start_workflow.rs`) enforces `max_workflows_per_lane`
 (tool mode only — never inside `dispatch_lead_agent`), dispatches the
 lead agent detached, records the routing decision **unconditionally**
-(`DispatchDecision` reason `model_tool_call`, not gated on
+(a `dispatch_decisions` row, reason `model_tool_call`, served by
+`GET /v1/orchestrator/decisions`; not gated on
 `dispatch_analysis_enabled`), publishes `WorkflowStarted`, and stores
 the `DispatchOutcome` in a result cell. After the loop the handler reads
 the cell and populates structured `delegation{task_id, title}`
@@ -485,18 +724,18 @@ prompt.
 
 ## Routing Mode Strings
 
-`OrchestrationStage.mode` vocabulary after the Routing V2 default flip
-(`planner_ms` is kept in the event schema and is always 0 in tool mode):
+`OrchestrationStage.mode` vocabulary after the Routing V2 default flip,
+also the `mode` of the turn's `orchestrator_latency` row:
 
 | Status | Mode strings |
 |---|---|
 | **Retired** — deleted with the planner ladder in Phase 5; no longer emitted, but may appear in historical `orchestrator_latency` rows | `two_phase_simple`, `two_phase_complex`, `two_phase_deep_query`, `two_phase_triage_failed`, `planner_simple_query`, `planner_complex_task`, `planner_unknown`, `planner_failed`, `fast_path`, `no_llm` |
-| **New** | `main_loop` (the tool-mode front door), `steered` (the deterministic `/steer ` prefix path), `skill_command` (the deterministic skill tier, both modes), `task_ops` (task queries/control, incl. bare `/cancel` etc.) |
+| **New** | `main_loop` (the tool-mode front door), `steered` (the deterministic `/steer ` prefix path), `skill_command` (the deterministic skill tier, both modes), `task_ops` (task queries/control, incl. bare `/cancel` etc.), `memory_command` (`/remember`, `/forget`, `/memories`), `skill_withdrawn` (a `/slash` naming a skill a disabled plugin provided; the tombstone answer) |
 | **Unchanged** | `bootstrap`, `forced_simple_query`, `social_fast_path` |
 
 There is no `workflow_started` mode string: a turn that starts a
 workflow is `main_loop` with `delegation{task_id, title}` on the
-response and a `DispatchDecision` with reason `model_tool_call`.
+response and a dispatch-decision row with reason `model_tool_call`.
 Model-routed steering (`steer_workflow`) is likewise a `main_loop` turn;
 only the `/steer ` prefix emits `steered`.
 
@@ -512,8 +751,8 @@ Hermes step      OpenAlpaca      Notes
 5. build API     Compliant       3 providers via adapter crate
 6. ephemeral     Compliant       Flag-gated (spec P0)
 7. cache marks   Compliant       3 Anthropic breakpoints (spec P1)
-8. interrupt     Compliant       tokio::select + CancellationToken
-9a. tools+loop   Compliant       Parallel tool exec
+8. interrupt     Compliant       CancellationToken::run_until_cancelled (future polled first)
+9a. tools+loop   Compliant       Grouped tool exec (reads in parallel)
 9b. text+return  Compliant       Background memory extraction
 10. persistence  Compliant       Optimistic-lock state_version
 ```
@@ -536,12 +775,29 @@ Prefer concluding the current task over opening new tool calls. ...
 [/budget_notice]
 ```
 
-Placement: Anthropic — second element of `system` array, no `cache_control`.
-OpenAI/Ollama — tail `system`-role message in the `messages` array.
+Placement: last in the request it is sent with, never in the system
+prompt, and kept there (BUDGET-NOTICE-KEPT, the owner's "Budget notice: A"
+of 2026-11-17, reversing spec P0b's "never appended"). The loop appends it
+to the run's list as `ChatMessage::notice` after compaction and the
+steering drain, one per round from 80%, and leaves it there, so every
+later request carries each notice in its place and the history before
+every turn is what that turn saw. Anthropic — a `user` message of one text
+block in its place (after the tool results; the API combines consecutive
+user messages into one turn), with no `cache_control` (ANTHROPIC-THINKING;
+Anthropic's preserved-thinking pages, read 2026-11-14: keep `system` the
+same and "Put every update in a new message at the end, and leave it
+there"). OpenAI/Ollama — a `system`-role message in its place in the
+`messages` array (on OpenAI's Responses API, C7b, an item of the `input`
+array).
 
-The notice is stateless (recomputed per iteration), never persisted to
-conversation history, and never mutates the `Arc<Vec<ChatMessage>>` the
-loop holds.
+The notice is recomputed per iteration and lives only in the loop's list:
+it is never written as sent to the session log or a conversation's
+history, though a compaction's working state may sum it up with the
+older messages it folds in. A request that fails takes its notice back
+before the retry, which sends its own. A turn produced under a notice
+keeps its thinking or reasoning like any other (see *Thinking blocks
+within one run*). The notices are part of what a compaction reads and of
+the cached prefix of every later request.
 
 ## Cache Breakpoint Topology (Anthropic)
 
@@ -549,7 +805,8 @@ Three of Anthropic's four allowed `cache_control: ephemeral` markers:
 
 1. System prompt block.
 2. Last tool definition.
-3. Last message's last content block (spec P1).
+3. Last message's last content block (spec P1); never a budget notice's: with
+   one sent last, the block before it, and a notice carries no marker.
 
 Verify via `usage.cache_read_input_tokens` in the `ChatResponse`.
 
@@ -587,7 +844,7 @@ that passes none (the social fast path, tests) never compacts.
   |---|---|---|
   | ≥ 60% | `TruncateToolResults` | Cuts tool results longer than 200 bytes to half their size. |
   | ≥ 70% | `DropMultimedia` | Replaces image, audio and document parts with one-line text placeholders. |
-  | ≥ 75% | `DiscardSocial` | Removes small-talk user messages and the replies to them. Keeps the system message, the first query and the last `min_recent_messages` (default 4). |
+  | ≥ 75% | `DiscardSocial` | Removes small-talk user messages and the replies to them. Keeps the kept head — the system message and the first query (a spawned subagent: everything it was handed; a lead: everything through its objective, behind its memory block when it has one) — and the last `min_recent_messages` (default 4). |
   | ≥ 80% | `HeuristicSummary` | Replaces older rounds with a compact summary built without a model (`runner/agentic_loop/context.rs::compress_context`). |
   | ≥ 85% | `LlmSummary` | Folds the older messages into the conversation's **working state** with one model call (below). Cancellable: a cancel restores the messages untouched. |
 
@@ -598,7 +855,9 @@ that passes none (the social fast path, tests) never compacts.
   and answers the state, a fixed-shape JSON object: `topic`, `goal`, `done`,
   `asked`, `decisions`, `open`, `next`, `refs`. It replaces those messages with the
   rendered state at `messages[2]` (a previous state block among them is taken
-  out, so the list never holds two) and is carried out on
+  out, so the list never holds two; for a spawned subagent `2` is its kept
+  head's length, SA-2b, and for a lead the length through its objective, 3
+  behind a memory block, SA-2b-LEAD) and is carried out on
   `LoopResult.working_state`. The call is the one working-state writer the
   turn end and a conversation's close use too
   (`orchestrator/working_state.rs`): `[orchestrator.costs] summary_model`
@@ -623,7 +882,18 @@ that passes none (the social fast path, tests) never compacts.
 - **Never compacted away.** `<user_interjection>` steering messages are
   exempt from discard and truncation. A working-state block is never cut:
   the heuristic summary keeps it whole ahead of its own, and `LlmSummary`
-  replaces it with the state it writes.
+  replaces it with the state it writes. A spawned subagent's brief is in its
+  kept head (SA-2b), and so is a lead's objective, which its opening memory
+  block puts at `messages[2]`: the lead's kept head runs through it
+  (SA-2b-LEAD); the chat's working state, the working-folder line and a
+  replayed history behind it are folded as before.
+- **The assembly's trim** (`compose/assembly.rs`, Layer 5), before the
+  loop: while the stitched request passes 75% of the window
+  (`TRIM_THRESHOLD`) it takes the oldest non-system message, then Layer 3's
+  system blocks — never the system prompt, the working-state block or the
+  current user turn (SA-2b). A current turn that alone passes the threshold
+  goes whole, so no request is sent without a user message (on Anthropic,
+  an empty `messages` list).
 - **Narration.** Each compaction publishes
   `SystemEvent::CompactionTriggered` (utilization and message counts) and,
   with a session log attached, writes a `compaction` record with the tier,
@@ -641,22 +911,33 @@ One threshold decides what happens to a large tool result:
 
 | Result | Loop has a session log | Loop has none |
 |---|---|---|
-| At or under the threshold | Inline, unchanged. | Inline, unchanged. |
+| At or under the threshold | Inline, unchanged, bar a success with nothing to read (below). | Inline, unchanged, bar a success with nothing to read (below). |
 | Over it, succeeded | **Spilled**: the whole result is written to the session's `results/` directory, and the model receives a stub — the size, the first 2 KB, and `result_ref=file:results/…` with the instruction to page it with `read_result`. A **command**'s stub (`shell_execute`, a `Command`-backend tool) shows the output's head **and** tail instead, half the threshold each — the `Err` budget — so a long build's summary is in front of the model (`session_log::command_spill_stub`). | Cut inline at the threshold, at a sentence, line or word boundary, with a marker naming how much is shown. |
 | Over it, failed | The model's copy keeps the **head and tail** (half the threshold each), because a compiler or test failure sits at the end. The full bytes are still spilled to the log. | Head and tail, same cut. |
+| Succeeded with nothing to read — empty, or whitespace alone (N-TOOL-6) | At or under the threshold the model receives `(<tool> completed with no output)`, naming the tool it called, so a command that printed nothing or an MCP result with no content is not read as a missing result (one carrying its data only as `structuredContent` reaches the model as that JSON, pretty-printed, so this line no longer stands in for it; a `"structuredContent": null` is read as absent and still reads as this line); over it, the result spills like any other. The record keeps the tool's own output. | The same line, at any size. |
 
 If the spill record could not be handed to the log writer, the model gets
 the inline cut instead of a stub — a stub must never promise a file that
 will not exist. A resumed run's replay restores the stub the model was
 shown: a command's record names its form and budget (`stub`), so its head
-and tail are rebuilt from the `results/` file.
+and tail are rebuilt from the `results/` file. A spill whose `results/`
+write failed after the model was handed its stub keeps only the 2 KB
+preview in its record, beside `spill_error`, and the replay hands that
+preview back — never the line, whitespace or not. An empty success comes
+back as the line, rebuilt from the record's name and output
+(`session_log::no_output_line`, shared by the loop and the replay), unless
+its record was cut at the 64 KB envelope (whitespace whose JSON escaping
+runs long): like any inline result so cut, it comes back as the cut
+preview. A failure is never the line: its text carries the
+`[tool_error]` mark.
 
 A failed call is the call's own `Err`, never a reading of its text: the
 loop marks the text `[tool_error]` and flags the message (`is_error`). The
 Anthropic provider sends the flag as the `tool_result` block's `is_error`;
 an OpenAI-compatible wire has no such field and reads the mark. A recovery
-hint is the failing tool's own words — or the sandbox's, for a command it
-cut at the time limit — and the loop adds none.
+hint is the failing tool's own words — or the sandbox's, for a command or
+a plugin's tool it cut at the time limit (PLUGIN-WAIT-2) — and the loop
+adds none.
 
 `read_result` is a scoped builtin (`tools/builtins/read_result.rs`) and a
 **grant, not ambient**:
@@ -677,32 +958,140 @@ Beyond the round/cost checks in steps 2–3, the loop enforces:
   error result. When a sandbox policy sets `max_tool_calls`, calls are
   partitioned into executable vs over-budget, with over-budget calls
   returning stub error results instead of executing.
+  A typed child's `submit_result` (SA-4) is an ordinary call at both
+  caps: every executed one counts, and one a cap refuses is not executed,
+  not counted and not a rejection.
+- **Calls run in groups** (N-TOOL-3) — a round's executable calls are cut,
+  in the model's order, into groups: consecutive calls whose tool declares
+  `read_only_hint` (an MCP tool also `idempotent_hint`), or that are the
+  lead's `spawn_subagents_batch`, `check_subagent_status` and
+  `wait_for_subagents` whatever they declare, run together under
+  `join_all`; every other call — a write, a command, a plugin's tool, a
+  tool that declares nothing — runs alone
+  (`ToolRegistry::runs_concurrently`). The groups run one after another,
+  so two edits of one file never interleave once each has passed its
+  approval. The results keep the model's order, a cancellation ends the
+  round wherever it is, and each `tool_result` record's `duration_ms` is
+  its group's wall-clock. Since approval prompts are raised inside the call
+  (below), a round's calls that are not read-only raise their cards one at
+  a time; read-only calls a template's or skill's confirm list names can
+  still ask beside each other.
 - **Runtime model-access check** — the router may fall back to a
   different model than requested; after each response the actual
   `response.model` is checked against the agent's constraints via
   `CapabilityManager::check_model_access`. A violation publishes
   `SystemEvent::ModelAccessDenied` and ends the loop with
   `LoopFinishReason::Error`.
-- **Thinking-block exclusion** — extended-thinking text is logged but
-  explicitly omitted from the `ChatMessage` appended to history. It can
-  be streamed to a watching client (see [Streaming](#streaming)) and is
-  persisted nowhere.
+- **Thinking blocks within one run** (C7a) — a turn that carried
+  Anthropic thinking keeps its content blocks as the provider returned
+  them (`ChatMessage.echo`), and the next request of the loop sends them
+  back unchanged. This holds for a tool call's turn, the `MaxTokens`
+  continuation, the steering drain and the answer guard's round. A
+  compaction takes every kept block out of the run's list for good; never
+  some of them. A turn produced under a budget notice keeps its blocks:
+  the notice stays in the run's list where it was sent, so the next
+  request repeats it in its place (BUDGET-NOTICE-KEPT).
+  A turn cut at `max_tokens` before any text or tool call is continued
+  only when its round streams (a main-loop or skill turn streamed to its
+  chat); a lead's or subagent's round ends its run on an empty-completion
+  error that nothing retries. So does a lead's or subagent's round that
+  ends its turn on thinking alone, no text and no call, on a model whose
+  thinking has text: the built-in Claude rows too, since they are asked
+  for the summary (M2's rule, `empty_completion_error`; while its thinking was
+  omitted, that round came back an empty answer).
+  The loop's `context_management` asks the server to keep every turn's
+  thinking (`clear_thinking_20251015` with `keep` `"all"`; without the
+  `keep` the strategy keeps one turn on every model), under the
+  context-editing page's beta header, `context-management-2025-06-27`
+  (read 2026-11-14), so the model reads every block the loop sends back.
+  On the built-in Claude rows (`claude-fable-5-2`, `claude-opus-5-5`,
+  `claude-sonnet-5-5`, `claude-haiku-5-5`), whose thinking `display`
+  defaults to `"omitted"`, a request that thinks asks for `"summarized"`,
+  so the streamed thinking has text (a per-row fact of the request
+  contract; ANTHROPIC-THINKING, MODELS-LATEST).
+  OpenAI's Responses API (C7b, a request with tools to OpenAI's own API)
+  keeps a turn's output items the same way when the turn carried a
+  reasoning item, and sends them back before the turn's tool results, its
+  reasoning encrypted as OpenAI returned it; only a compaction takes them
+  out. A budget notice stays in its place as an `input` item, so each
+  request is a prefix of the next ("Keep the prefix unchanged", read
+  2026-11-12) and a turn produced under a notice goes back with its
+  reasoning (BUDGET-NOTICE-KEPT). Each arm sends back only a turn its own
+  API returned.
+  The thinking text can be streamed to a watching client (see
+  [Streaming](#streaming)). It is persisted nowhere: the field is never
+  serialized, so no session log, row or history line holds it.
 - **Transient LLM-error retry** (router backend only) — a transient
   failure is retried up to 3 times in a row, with a 2 s, 4 s, 8 s backoff
   (capped at 30 s) that a cancellation interrupts. Each retry **costs a
   round**, and retries stop once `max_rounds` is used up. The counter
   resets to zero on any success. Anything else ends the loop with
-  `Error`.
+  `Error` — among them `LocalCallTimedOut`, a call to a provider that
+  needs no key that used up its whole timeout, which the router neither
+  repeats nor walks down the ladder to the same provider
+  (LOCAL-HOUR-NO-RETRY; a keyed provider's timeout keeps the retry,
+  unless a local rung of its ladder used up its own whole timeout in
+  that call, which then ends the turn naming the local model).
 - **Per-call time limit** — the sandbox cuts a tool call (all but the few
   exempt ones) at its policy's `max_tool_runtime_secs`, and a command it
-  cuts is killed with every process it started. A chat turn's limit is
-  `[execution.agent_defaults] max_tool_runtime_secs` (60 s), read per
-  turn; a lead's and a subagent's is their template's `timeout_seconds`,
-  60 s when it sets none (`SandboxPolicy::from_constraints`). The loop
-  writes its policy's figure into `shell_execute`'s definition before the
-  first request — or the shell's own 300 s, where that comes first — so
-  the model is told the limit it really runs under; the registered
-  definition names none.
+  cuts is killed with every process it started. The exempt ones bound
+  themselves: the lead's `check_subagent_status` and `wait_for_subagents`
+  by deadlines of their own, and a skill — `invoke_skill`, from the main
+  loop or the lead, as a skill's nested `invoke_skill:<id>` — by its own
+  loop: its rounds, its cost cap, and each of its tools under the limit
+  (SKILL-NO-CUT); a lead's cancelled run still drops it mid-call. Every
+  loop's limit is
+  `[execution.agent_defaults] max_tool_runtime_secs` (120 s) — a chat
+  turn's read per turn, the lead's at its run's start, a subagent's at its
+  spawn, both skill tiers' per invocation. A template's `timeout_seconds`
+  is accepted and not enforced: it is no tool's limit (N-TOOL-1b) and
+  nothing else enforces it, so the shipped templates no longer set it
+  (TEMPLATE-TIMEOUT). A call to `shell_execute`, a `Command`-backend
+  tool or a plugin's tool may send `timeout_secs` (a plugin's tool is
+  handed it as sent, PLUGIN-WAIT): the sandbox cuts it at that figure, a
+  larger one at `max_tool_runtime_ceiling_secs` (600 s) — clamped, never
+  refused. The sandbox is the one clock for a `Command`-backend, an
+  `Http`-backend, a plugin's and an MCP tool (TIMEOUT-ONE-CLOCK): each
+  backend's own clock stands back past the sandbox's cut. A
+  `Command`-backend tool's author's own `timeout_secs` (its TOML's, 30 s
+  by default) is its calls' default: a call that sends none is cut there
+  by the sandbox, clamped to the ceiling, below `max_tool_runtime_secs`
+  (120 s) as above it, and one that sends `timeout_secs` lifts it
+  (CMD-TIMEOUT); an `Http`-backend tool's TOML `timeout_secs` (30 s by
+  default) and an MCP tool's server's `request_timeout_secs`
+  (`config/mcp.toml`, 30 s by default) are cut there by the sandbox where
+  below the bound, else at the bound, so each such call ends when it did
+  before (an MCP reconnect before the call keeps the server's figure); an
+  MCP call that reports progress is cut there all the same, since progress
+  resets no clock, and every round of one the server answers
+  `input_required` runs under the same cut. A cut or a run's `/cancel`
+  drops the MCP request in flight, and rmcp sends the server exactly one
+  `notifications/cancelled` naming it ("request abandoned by the caller";
+  on a `2026-07-28` streamable-HTTP session the request's stream is
+  dropped instead, no notification POSTed). A
+  builtin stops at a deadline of its own where it has one, `web_fetch`'s
+  among them, with its own error. A plugin tool waits for its plugin's
+  answer past the sandbox's figure (PLUGIN-WAIT); only a call made
+  outside the sandbox still waits 60 s, which no key sets ("timeout
+  waiting for plugin response"), as an `Http` or MCP call outside it
+  keeps its own figure. A cut plugin call leaves no request waiting in
+  its plugin's channel, and its late answer is discarded; the plugin
+  itself is not told — no cancel is sent — and runs the call on
+  (PLUGIN-WAIT-2). **A call the sandbox cuts is a failed tool run:**
+  `tool_executed` with `success: false` and `reason: "timeout"`, counted
+  by the circuit breaker as before, never a `security_violation`, so a
+  confirmed call's approval row settles ("timed out after …"). A call the
+  sandbox cuts below the most it may run — the ceiling — is told the
+  ceiling, whether a command or a plugin's tool, in one text, and to ask
+  for it with a larger `timeout_secs` only where its parameters take one
+  (its schema names it, or the call sent one); otherwise its own limit
+  beside the ceiling, with no `timeout_secs` advised, and to split the
+  work (item 19). At the ceiling it is told that is
+  the most this tool may run here (item 21, kept). The loop
+  writes both figures into `shell_execute`'s definition before the first
+  request, so the model is told the limits it really runs under; the
+  registered definition names none, and the shell's own bound (3600 s,
+  the ceiling's highest setting) never comes first.
 - **A tool call's arguments are read, never guessed.** The provider layer
   reads them with one reader (`openalpaca_llm`'s stream collector and the
   OpenAI-compatible response parser): nothing or `null` is `{}`, a JSON
@@ -711,11 +1100,17 @@ Beyond the round/cost checks in steps 2–3, the loop enforces:
   with the tool's name, the byte length and the problem (never the text),
   and the call is refused by the registry with a sentence naming the
   problem; it never runs with `{}`. A call that breaks its tool's schema is
-  told every problem in one result. Only the provider layer reads a string
-  as an object: the registry decodes nothing, so a JSON string that reaches
-  it by another path (a plugin's proxied call) stays a string, which a
-  schema asking for an object refuses as it always did — the sandbox's
-  sanitizer checked only its outer text.
+  told every problem in one result. A call that reader never read — a
+  plugin agent's proxied call, a plugin skill's tool callback, a `tool_use`
+  in an Anthropic-compatible server's non-streamed answer, whose `input`
+  its parser passes as sent — reaches the sandbox as its producer sent it,
+  and there a top-level JSON string whose text is an object is read as that
+  object, once, with one `warn` naming the tool and the agent it came from
+  (never the text), before the sanitizer: the sanitizer, the schema check,
+  the approval card and the tool all read the object, and a string inside
+  it is never decoded. The registry decodes nothing: a string that still
+  reaches it stays a string, which a schema asking for an object refuses as
+  it always did.
 - **Approval prompts live in the sandbox, not the loop.** A tool on the
   confirm list blocks inside `SandboxManager::execute_tool` until it is
   approved, denied, times out or is withdrawn; the loop only sees the

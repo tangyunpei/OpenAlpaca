@@ -1,12 +1,13 @@
 //! The CLI's crypto edge.
 //!
 //! The master key is one file, `~/.openalpaca/state/.master_key`. The daemon
-//! resolves it through `store::master_key_dir()`; so must every CLI command, or
+//! resolves it through `paths::master_key_dir()`; so must every CLI command, or
 //! `openalpaca ai config set-key` writes secrets the daemon cannot read.
 
 use super::llm_config_path;
 use crate::commands::ai_config::{get_ai_value, set_ai_value};
 use crate::test_util::EnvSandbox;
+use openalpaca_app_support::paths;
 use openalpaca_llm::keys::key_encryption::KeyEncryptor;
 use std::path::{Path, PathBuf};
 use tempfile::tempdir;
@@ -39,7 +40,7 @@ fn the_cli_keeps_one_master_key_and_it_is_the_state_dir_one() {
 
     set_ai_value("ai.anthropic.api_key", "sk-secret-value").unwrap();
 
-    let state = openalpaca_storage::store::master_key_dir().unwrap();
+    let state = paths::master_key_dir().unwrap();
     assert_eq!(
         master_key_files(tmp.path()),
         vec![state.join(".master_key")],
@@ -60,7 +61,7 @@ fn the_daemons_master_key_decrypts_what_the_cli_wrote() {
 
     // Exactly what the daemon does at boot (`apps/openalpacad/src/main.rs`):
     // resolve the state dir, load the key that lives there.
-    let daemon_dir = openalpaca_storage::store::master_key_dir().unwrap();
+    let daemon_dir = paths::master_key_dir().unwrap();
     let daemon = KeyEncryptor::load_or_generate_at(&daemon_dir).unwrap();
 
     let config = openalpaca_llm::config::read_config(&llm_config_path().unwrap()).unwrap();
@@ -75,4 +76,50 @@ fn the_daemons_master_key_decrypts_what_the_cli_wrote() {
 
     assert!(KeyEncryptor::is_encrypted(&encrypted));
     assert_eq!(daemon.decrypt(&encrypted).unwrap(), "sk-secret-value");
+}
+
+/// MODELS-LATEST (the design's §4.9.5, ML-8): the CLI's own default — the
+/// orchestrator model a config without one starts with, the one a
+/// `fallback_models` set inserts beside it — and the `ai.default_model`
+/// schema default all name `claude-sonnet-5-5`, a compiled row, so no site
+/// names a retired id. Red on the parent's `claude-sonnet-4-5-20250929`.
+#[test]
+fn the_cli_and_schema_defaults_name_the_latest_sonnet() {
+    use super::{apply_to_config, default_config};
+    use openalpaca_llm::ModelRegistry;
+    use openalpaca_llm::config::LlmRouterConfig;
+    use openalpaca_llm::keys::secret_store::MemorySecretStore;
+
+    let registry = ModelRegistry::with_defaults();
+    let compiled = |id: &str| {
+        assert!(
+            registry.get_model_info(id).is_some(),
+            "{id} is a compiled row"
+        );
+        id.to_string()
+    };
+
+    let config = default_config();
+    let model = config.orchestrator.expect("an orchestrator").model;
+    assert_eq!(compiled(&model), "claude-sonnet-5-5");
+
+    let mut config = LlmRouterConfig::default();
+    apply_to_config(
+        "ai.fallback_models",
+        "gpt-6-luna",
+        &mut config,
+        &MemorySecretStore::new(),
+        None,
+    )
+    .expect("applied");
+    let model = config.orchestrator.expect("inserted").model;
+    assert_eq!(compiled(&model), "claude-sonnet-5-5");
+
+    let schema = openalpaca_storage::config_schema::lookup("ai.default_model")
+        .expect("the key is in the schema")
+        .default
+        .expect("with a default");
+    assert_eq!(compiled(schema), "claude-sonnet-5-5");
+    // One value: the schema's default is the router's.
+    assert_eq!(schema, openalpaca_llm::config::DEFAULT_ORCHESTRATOR_MODEL);
 }

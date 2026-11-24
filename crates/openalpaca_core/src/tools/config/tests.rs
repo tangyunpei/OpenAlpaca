@@ -300,9 +300,8 @@ fn toml_with_invalid_annotation_in_provides_capabilities_fails() {
     "#;
     let tmp = write_temp(toml);
     let result = load_tools_from_file(tmp.path());
-    let err = match result {
-        Ok(_) => panic!("expected Err, got Ok"),
-        Err(e) => e,
+    let Err(err) = result else {
+        panic!("expected Err, got Ok");
     };
     assert!(err.contains("unknown annotation capability"));
     assert!(err.contains("annotation:redaonly"));

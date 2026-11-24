@@ -76,7 +76,7 @@ fn a_malformed_edit_is_aborted_with_the_file_untouched() {
     // makes `toml_edit` synthesize a table with no `transport` tag.
     let err = atomic_write_toml(&path, set_enabled("vanished", false), reparse_servers)
         .expect_err("the re-parse must reject a synthesized block");
-    assert!(matches!(err, ConfigWriteError::Reparse { .. }), "{err}");
+    std::assert_matches!(err, ConfigWriteError::Reparse { .. }, "{err}");
     assert!(err.to_string().contains("no transport"), "{err}");
 
     assert_eq!(
@@ -85,12 +85,12 @@ fn a_malformed_edit_is_aborted_with_the_file_untouched() {
         "a failed re-parse leaves the file byte-identical"
     );
     // Nothing was rotated either — there was no successful write.
-    let backups = openalpaca_storage::store::backups_dir().unwrap();
+    let backups = openalpaca_app_support::paths::backups_dir().unwrap();
     assert_eq!(std::fs::read_dir(&backups).unwrap().count(), 0);
 
     // An edit closure that refuses is the same shape.
     let err = atomic_write_toml(&path, |_| Err("nope".to_string()), reparse_servers).unwrap_err();
-    assert!(matches!(err, ConfigWriteError::Edit(_)), "{err}");
+    std::assert_matches!(err, ConfigWriteError::Edit(_), "{err}");
     assert_eq!(std::fs::read_to_string(&path).unwrap(), HAND_AUTHORED);
 }
 
@@ -105,7 +105,7 @@ fn five_backups_are_kept_and_the_sixth_is_rotated_out() {
         atomic_write_toml(&path, set_enabled("github", i % 2 == 0), reparse_servers).unwrap();
     }
 
-    let backups = openalpaca_storage::store::backups_dir().unwrap();
+    let backups = openalpaca_app_support::paths::backups_dir().unwrap();
     let mut kept: Vec<String> = std::fs::read_dir(&backups)
         .unwrap()
         .flatten()
@@ -145,7 +145,7 @@ fn the_byte_writer_replaces_the_file_and_keeps_what_it_replaced() {
     atomic_write_with_backup(&path, "second = 2\n").unwrap();
 
     assert_eq!(std::fs::read_to_string(&path).unwrap(), "second = 2\n");
-    let backups = openalpaca_storage::store::backups_dir().unwrap();
+    let backups = openalpaca_app_support::paths::backups_dir().unwrap();
     let kept: Vec<PathBuf> = std::fs::read_dir(&backups)
         .unwrap()
         .flatten()
@@ -164,7 +164,7 @@ fn the_byte_writer_keeps_five_versions_and_creates_a_missing_parent() {
 
     // A first write into a directory that does not exist yet rotates nothing.
     atomic_write_with_backup(&path, "n = 0\n").unwrap();
-    let backups = openalpaca_storage::store::backups_dir().unwrap();
+    let backups = openalpaca_app_support::paths::backups_dir().unwrap();
     assert_eq!(std::fs::read_dir(&backups).unwrap().count(), 0);
 
     for n in 1..=7 {
@@ -198,7 +198,7 @@ fn an_unparseable_file_is_copied_once() {
     let second = copy_unparseable_once(&path).expect("the same copy comes back");
     assert_eq!(first, second, "a boot loop must not fill the directory");
 
-    let backups = openalpaca_storage::store::backups_dir().unwrap();
+    let backups = openalpaca_app_support::paths::backups_dir().unwrap();
     let copies = std::fs::read_dir(&backups)
         .unwrap()
         .flatten()
@@ -238,6 +238,58 @@ fn a_store_that_does_not_exist_yet_is_created() {
 
     assert!(std::fs::read_to_string(&path).unwrap().contains("enabled = false"));
     // Nothing to rotate on a first write.
-    let backups = openalpaca_storage::store::backups_dir().unwrap();
+    let backups = openalpaca_app_support::paths::backups_dir().unwrap();
     assert_eq!(std::fs::read_dir(&backups).unwrap().count(), 0);
+}
+
+/// M17: `<path>.lock` excludes a second writer in this same process, not only
+/// in another one. The lock is a `flock` lock, which belongs to the open file
+/// description, so a writer on another thread waits until the holder drops
+/// it — the lost-update race between two in-process writers of one file is
+/// closed. `lock()` has no timeout, so this test bounds itself: the waiting
+/// writer reports on a channel read with `recv_timeout`, never a bare join.
+#[test]
+fn a_second_writer_in_this_process_waits_for_the_lock() {
+    use std::sync::mpsc::{RecvTimeoutError, channel};
+    use std::time::Duration;
+
+    let tmp = tempfile::tempdir().unwrap();
+    let _home = HomeStoreGuard::set(&tmp.path().join("home"));
+    let path = tmp.path().join("mcp.toml");
+    std::fs::write(&path, HAND_AUTHORED).unwrap();
+
+    let held = acquire_write_lock(&path).unwrap();
+    let (done, finished) = channel();
+    let writer = {
+        let path = path.clone();
+        std::thread::spawn(move || {
+            let result = atomic_write_toml(&path, set_enabled("github", false), reparse_servers);
+            let _ = done.send(result.map_err(|e| e.to_string()));
+        })
+    };
+
+    let while_held = finished.recv_timeout(Duration::from_millis(500));
+    let untouched = std::fs::read_to_string(&path).unwrap();
+    // Released before any assert can panic, so the writer is never left
+    // blocked behind a failed test.
+    drop(held);
+
+    std::assert_matches!(
+        while_held,
+        Err(RecvTimeoutError::Timeout),
+        "the second writer finished while the first held the lock: {while_held:?}"
+    );
+    assert_eq!(
+        untouched, HAND_AUTHORED,
+        "the file changed under a held lock"
+    );
+    let result = finished
+        .recv_timeout(Duration::from_secs(10))
+        .expect("the second writer did not finish once the lock was released");
+    result.unwrap();
+    writer.join().unwrap();
+    assert_eq!(
+        std::fs::read_to_string(&path).unwrap(),
+        HAND_AUTHORED.replacen("enabled = true", "enabled = false", 1)
+    );
 }

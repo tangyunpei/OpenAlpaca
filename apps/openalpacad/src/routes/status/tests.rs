@@ -249,7 +249,7 @@ async fn names_the_daemon_log_only_once_the_file_exists() {
         "no CLI-written log means no path: {body}"
     );
 
-    let log = openalpaca_storage::store::daemon_log_path().unwrap();
+    let log = openalpaca_app_support::paths::daemon_log_path().unwrap();
     std::fs::create_dir_all(log.parent().unwrap()).unwrap();
     std::fs::write(&log, b"boot\n").unwrap();
 
@@ -268,7 +268,7 @@ async fn an_unmanaged_daemon_reports_null_even_when_a_log_file_exists() {
     let _guard = HomeStoreGuard::set(&home);
     let db = test_db(&tmp);
 
-    let log = openalpaca_storage::store::daemon_log_path().unwrap();
+    let log = openalpaca_app_support::paths::daemon_log_path().unwrap();
     std::fs::create_dir_all(log.parent().unwrap()).unwrap();
     std::fs::write(&log, b"a previous CLI daemon's run\n").unwrap();
 
@@ -423,7 +423,7 @@ async fn no_router_means_no_llm_block() {
 }
 
 /// **L3.** `[orchestrator] model` names a Claude id — right when Anthropic is
-/// configured, and exactly what every shipped agent template pins — while the
+/// configured, and what every shipped agent template pinned before C8 — while the
 /// only enabled provider is a local Ollama. The ladder substitutes, and the
 /// substitution is reported rather than left in the log: a client can say
 /// "configured: X — not available, using Y".
@@ -635,4 +635,57 @@ async fn busy_counts_live_runs_pending_prompts_and_connected_clients() {
         !body.to_string().contains("never serialised"),
         "a count must not carry the prompt's arguments: {body}"
     );
+}
+
+/// `GET /v1/status`'s sample for the API contract's folder (API-CONTRACT):
+/// every optional block present — a router, a broker, a swept session log
+/// and a project named by the request.
+pub(crate) async fn contract_samples(out: &mut crate::contract::Samples) {
+    let tmp = TempDir::new().unwrap();
+    let root = tmp.path().canonicalize().unwrap();
+    let _guard = HomeStoreGuard::set(&root.join("home").join(".openalpaca"));
+    let db = test_db(&tmp);
+    let project = root.join("checkout");
+    std::fs::create_dir_all(project.join(".git")).unwrap();
+    let config_path = tmp.path().join("llm.toml");
+    std::fs::write(
+        &config_path,
+        r#"[orchestrator]
+model = "qwen3:8b"
+
+[providers.ollama]
+enabled = true
+base_url = "http://127.0.0.1:1/v1"
+
+[models."qwen3:8b"]
+provider = "ollama"
+context = 32768
+"#,
+    )
+    .unwrap();
+    let router = openalpaca_llm::build_router(&config_path).expect("router");
+    let broker = ConfirmationBroker::new();
+    let service = SessionLogService::new(
+        tmp.path().join("sessions"),
+        None,
+        SessionLogLimits::default(),
+        "test".to_string(),
+    )
+    .with_last_sweep(SweepReport {
+        sessions_visited: 1,
+        sessions_evicted: 0,
+        files_removed: 0,
+        bytes_freed: 0,
+        bytes_before: 0,
+        bytes_after: 0,
+        over_cap_after: false,
+        index_rows_cleared: 0,
+    });
+    let mut ins = inputs(&db, Utc::now());
+    ins.llm_router = Some(&router);
+    ins.confirmation_broker = Some(&broker);
+    ins.session_log = Some(&service);
+    let body =
+        crate::contract::ok_body(status_response(&ins, &headers_with(project.to_str()))).await;
+    out.response("get-status", body);
 }

@@ -163,7 +163,10 @@ fn not_found(id: &str) -> Response {
 /// The `Err` arm is the finished `Response` a handler returns unchanged, which
 /// is the point — boxing an `axum::Response` here only to unbox it at five call
 /// sites would buy nothing, so `result_large_err` is silenced deliberately.
-#[allow(clippy::result_large_err)]
+#[expect(
+    clippy::result_large_err,
+    reason = "the Err is the not-found or store-error Response, returned as is"
+)]
 fn visible(db: &Database, owner_id: &str, id: &str) -> Result<ArtifactRecord, Response> {
     match ArtifactStore::new(db).get(id, owner_id) {
         Ok(Some(record)) => Ok(record),
@@ -374,11 +377,14 @@ pub(crate) fn get_artifact(db: &Database, owner_id: &str, id: &str) -> Response 
 /// with a null `agent_id`, which is the honest attribution for a version
 /// OpenAlpaca did not write. Announcing is not part of reading, so a context
 /// with no bus reads exactly the same.
-#[allow(clippy::too_many_arguments)]
+#[expect(
+    clippy::too_many_arguments,
+    reason = "the content route's token, row, version and bus inputs"
+)]
 pub(crate) async fn artifact_content(
     db: &Database,
     owner_id: &str,
-    expected_token: &str,
+    expected_token: &(impl crate::discovery_rotation::AcceptsToken + ?Sized),
     headers: &HeaderMap,
     query_token: Option<&str>,
     id: &str,
@@ -564,7 +570,7 @@ pub async fn get_artifact_content_handler(
     artifact_content(
         &state.db,
         &state.local_user_id,
-        &state.token,
+        &*state.tokens,
         &headers,
         params.token.as_deref(),
         &id,
@@ -583,7 +589,7 @@ pub async fn get_artifact_version_content_handler(
     artifact_content(
         &state.db,
         &state.local_user_id,
-        &state.token,
+        &*state.tokens,
         &headers,
         params.token.as_deref(),
         &id,
@@ -624,4 +630,4 @@ pub async fn pin_artifact_handler(
 }
 
 #[cfg(test)]
-mod tests;
+pub(crate) mod tests;

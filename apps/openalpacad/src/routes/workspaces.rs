@@ -243,7 +243,10 @@ pub struct DeleteDataView {
 ///
 /// A relative path is refused rather than resolved: it would be read against
 /// the *daemon's* working directory, which is the bug ruling R22 fixed.
-#[allow(clippy::result_large_err)]
+#[expect(
+    clippy::result_large_err,
+    reason = "the Err is the 400 the workspace routes answer with"
+)]
 fn written_path(input: &str) -> Result<String, Response> {
     let trimmed = input.trim();
     if trimmed.is_empty() || !Path::new(trimmed).is_absolute() {
@@ -267,7 +270,10 @@ fn without_trailing_slash(text: &str) -> String {
 
 /// A client's path, canonicalized and nothing more — not resolved to a
 /// project's root here. As [`written_path`] refuses it.
-#[allow(clippy::result_large_err)]
+#[expect(
+    clippy::result_large_err,
+    reason = "the Err is written_path's 400, returned as it is"
+)]
 fn canonical_path(input: &str) -> Result<String, Response> {
     Ok(canonical_of(&written_path(input)?))
 }
@@ -334,7 +340,10 @@ fn projects_unreadable(e: &anyhow::Error) -> Response {
 /// until the next start finishes it — answers `409 WORKSPACE_BUSY` at either
 /// path, naming that restart, as `register` does there: re-pointed or
 /// deleted now, it would be split from the rows already moved.
-#[allow(clippy::result_large_err)]
+#[expect(
+    clippy::result_large_err,
+    reason = "the Err is the busy, not-found or I/O Response the routes send"
+)]
 fn registered_project(written: &str, path: &str) -> Result<Project, Response> {
     let named = if written == path {
         vec![written]
@@ -430,7 +439,10 @@ async fn quiesce_project(
 /// or delete of this id can start, so it stays so until the slot is let go.
 /// Anything else — moved, deleted, re-registered under a new id, or marked
 /// mid re-point — is `409 WORKSPACE_BUSY`, saying `nothing was <done>`.
-#[allow(clippy::result_large_err)]
+#[expect(
+    clippy::result_large_err,
+    reason = "the Err is the busy or unreadable Response the routes send"
+)]
 fn still_the_project(project: &Project, done: &str) -> Result<Project, Response> {
     match projects::by_id(&project.id) {
         Ok(Some(now))
@@ -1235,4 +1247,4 @@ pub async fn purge_workspace_handler(
 mod tests;
 
 #[cfg(test)]
-mod life_tests;
+pub(crate) mod life_tests;

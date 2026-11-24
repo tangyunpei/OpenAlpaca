@@ -14,12 +14,19 @@ fn parse_usage(frame: &serde_json::Value) -> Option<Usage> {
             .get("completion_tokens")
             .and_then(|v| v.as_u64())
             .unwrap_or(0) as u32,
+        // CACHE-WRITE: the stream's usage chunk carries the same
+        // `prompt_tokens_details` as a whole answer (the streaming-events
+        // reference, read 2026-11-14).
+        cache_creation_input_tokens: u
+            .get("prompt_tokens_details")
+            .and_then(|d| d.get("cache_write_tokens"))
+            .and_then(|v| v.as_u64())
+            .unwrap_or(0) as u32,
         cache_read_input_tokens: u
             .get("prompt_tokens_details")
             .and_then(|d| d.get("cached_tokens"))
             .and_then(|v| v.as_u64())
             .unwrap_or(0) as u32,
-        ..Default::default()
     })
 }
 
@@ -158,9 +165,8 @@ pub(super) fn parse_openai_sse(
                         continue;
                     }
 
-                    let data = match line.strip_prefix("data: ") {
-                        Some(d) => d,
-                        None => continue,
+                    let Some(data) = line.strip_prefix("data: ") else {
+                        continue;
                     };
 
                     if data == "[DONE]" {
@@ -189,7 +195,7 @@ pub(super) fn parse_openai_sse(
                     }
                     Some(Err(e)) => {
                         return Some((
-                            Err(LlmError::Stream(e.to_string())),
+                            Err(LlmError::Stream(crate::providers::transport_message(&e))),
                             (stream, buffer, pending),
                         ));
                     }

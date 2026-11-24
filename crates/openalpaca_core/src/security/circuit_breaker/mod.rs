@@ -82,9 +82,8 @@ impl ToolCircuitBreaker {
         });
         let key = (agent_id.to_string(), tool_name.to_string());
 
-        let entry = match map.get_mut(&key) {
-            Some(e) => e,
-            None => return Ok(()), // No state yet — first call, allow it
+        let Some(entry) = map.get_mut(&key) else {
+            return Ok(()); // No state yet — first call, allow it
         };
 
         match entry.state {
@@ -181,7 +180,7 @@ impl ToolCircuitBreaker {
         // Prune stale entries to prevent unbounded memory growth from dynamic agent IDs.
         // When the map exceeds 10_000 entries, remove entries idle for more than 1 hour.
         const MAX_ENTRIES: usize = 10_000;
-        const STALE_THRESHOLD: Duration = Duration::from_secs(3600);
+        const STALE_THRESHOLD: Duration = Duration::from_hours(1);
         if map.len() > MAX_ENTRIES {
             let now = Instant::now();
             map.retain(|_, v| now.duration_since(v.last_updated) < STALE_THRESHOLD);

@@ -19,7 +19,7 @@ import type { Run } from "./run-model";
 const rowBox = (selected: boolean): string =>
   cn(
     "mb-[2px] block w-full cursor-pointer rounded-xl px-[12px] py-[11px] text-left",
-    "transition-[background-color,border-color] duration-[120ms]",
+    "transition-[background-color,border-color] duration-120",
     "focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-blue",
     selected
       ? "border border-line-popover bg-raised"

@@ -89,6 +89,19 @@ pub(crate) const PLACEHOLDER_AUDIO: &str = "[audio attached — model does not s
 pub(crate) const PLACEHOLDER_DOCUMENT: &str =
     "[document attached — model does not support document input]";
 
+/// What the model reads beside a document with no text whose extraction is
+/// still to come (its row `Uploaded` or `Processing`). Unchanged wording.
+pub(crate) const NOTE_EXTRACTION_PENDING: &str = "[document attached — text extraction pending]";
+
+/// What the model reads beside a document whose text extraction failed (its
+/// row `Error`), in place of [`NOTE_EXTRACTION_PENDING`]. One fixed sentence:
+/// it never carries the row's `extract_error` (third-party-influenced text,
+/// with the worker's internal attempt tag), says nothing of a retry (a row
+/// with attempts left is retried at a later poll, one without is not) and
+/// does not say the text can never arrive.
+pub(crate) const NOTE_EXTRACTION_FAILED: &str =
+    "[document attached — text extraction failed; no extracted text is available]";
+
 pub(crate) fn image_fate(model: &AnsweringModel) -> Fate {
     match model.image {
         true => Fate::Native,

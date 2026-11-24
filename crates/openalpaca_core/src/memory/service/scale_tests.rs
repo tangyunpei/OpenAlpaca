@@ -977,7 +977,7 @@ fn a_forgotten_notes_file_put_back_between_reads_is_never_served() {
     assert!(!navigation.contains("Forgotten lighthouse"), "{navigation}");
     assert!(navigation.contains("Kept lighthouse"));
     assert!(!file.exists());
-    assert!(matches!(
+    std::assert_matches!(
         h.service.read(
             &tool,
             ReadInput {
@@ -986,7 +986,7 @@ fn a_forgotten_notes_file_put_back_between_reads_is_never_served() {
             }
         ),
         Err(MemoryError::NotFound(_))
-    ));
+    );
 }
 
 /// A forgotten note's `.history` put back on its own — no note file, so

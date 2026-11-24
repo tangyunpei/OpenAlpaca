@@ -91,6 +91,45 @@ pub(super) fn build_message_content(msg: &ChatMessage) -> serde_json::Value {
     serde_json::Value::Array(blocks)
 }
 
+/// The assistant turn `msg` rebuilds, block for block as the API returned
+/// it, when it carried thinking and can still go back whole (C7a).
+///
+/// The pages ask a tool loop to send each assistant turn back "complete and
+/// unmodified" — its `thinking` blocks with their signatures, empty text
+/// included, its `redacted_thinking` blocks, in the order received — and
+/// refuse "edited, reordered, or partially dropped thinking blocks"
+/// (platform.claude.com/docs/en/models/opus-5-5/migration-guide, read
+/// 2026-11-12). So the turn goes back as kept, or, when its `tool_use` blocks
+/// no longer match the message's tool calls, with none of its thinking; and
+/// from then on no later turn of the request carries thinking ("Leave out
+/// the oldest blocks, the newest, or all of them, but none in between",
+/// .../build-with-claude/preserved-thinking/change-tools-or-instructions).
+fn echoed_blocks(
+    msg: &ChatMessage,
+    thinking_left_out: &mut bool,
+) -> Option<Vec<serde_json::Value>> {
+    // Only a turn this wire returned: an OpenAI Responses turn reaching this
+    // arm after a fallback is rebuilt from its text and tool calls (C7b).
+    let turn = msg
+        .echo
+        .as_ref()
+        .filter(|turn| turn.wire() == EchoWire::AnthropicMessages)?;
+    if *thinking_left_out {
+        return None;
+    }
+    let calls: Vec<&str> = msg
+        .tool_calls
+        .iter()
+        .flatten()
+        .map(|tc| tc.id.as_str())
+        .collect();
+    if turn.tool_use_ids() != calls {
+        *thinking_left_out = true;
+        return None;
+    }
+    Some(turn.blocks().to_vec())
+}
+
 pub(super) fn build_request_body(
     default_model: &str,
     default_max_tokens: u32,
@@ -102,9 +141,42 @@ pub(super) fn build_request_body(
     // Extract system message (Anthropic uses top-level system field)
     let mut system_text = String::new();
     let mut messages = Vec::new();
+    // C7a: once one kept turn cannot go back as it came, no later one goes
+    // back with its thinking either — a block left out between two that are
+    // kept fails the API's check on every block after it.
+    let mut thinking_left_out = false;
+    // Where the kept budget notices went (BUDGET-NOTICE-KEPT): no cache
+    // breakpoint goes on one, so the request that sends a notice caches what
+    // it would have cached without it.
+    let mut notice_slots: Vec<usize> = Vec::new();
 
     for msg in request.messages.iter() {
         match msg.role {
+            // A kept budget notice (BUDGET-NOTICE-KEPT): in its place, a
+            // user text block of its own, never in `system`, and never with
+            // `cache_control` (`notice_slots`, below), so each later request
+            // repeats it as it was sent (ANTHROPIC-THINKING). The pages,
+            // read 2026-11-14: keep `system` the same on every request and
+            // "Put every update in a new message at the end"
+            // (platform.claude.com/docs/en/build-with-claude/
+            // preserved-thinking/prefix-checks); an updated value goes "in
+            // its own text block of the user message you're about to send,
+            // after any tool results" (.../preserved-thinking/
+            // change-tools-or-instructions), and "Consecutive `user` or
+            // `assistant` turns in your request will be combined into a
+            // single turn" (.../api/messages) — so a message of its own
+            // after the tool results' is that block. Not a `role: "system"`
+            // message: .../preserved-thinking/change-tools-or-instructions
+            // says some models don't accept one (every model with preserved
+            // thinking does), and the arm sends the notice to every
+            // Anthropic row.
+            Role::System if msg.notice => {
+                notice_slots.push(messages.len());
+                messages.push(serde_json::json!({
+                    "role": "user",
+                    "content": [{"type": "text", "text": msg.content}],
+                }));
+            }
             Role::System => {
                 if !system_text.is_empty() {
                     system_text.push('\n');
@@ -118,7 +190,12 @@ pub(super) fn build_request_body(
                 }));
             }
             Role::Assistant => {
-                if let Some(ref tool_calls) = msg.tool_calls {
+                if let Some(blocks) = echoed_blocks(msg, &mut thinking_left_out) {
+                    messages.push(serde_json::json!({
+                        "role": "assistant",
+                        "content": blocks,
+                    }));
+                } else if let Some(ref tool_calls) = msg.tool_calls {
                     let mut content: Vec<serde_json::Value> = match &msg.parts {
                         Some(parts) if !parts.is_empty() => {
                             match build_message_content(msg) {
@@ -176,36 +253,10 @@ pub(super) fn build_request_body(
         "messages": messages,
     });
 
-    // Invariant: cache_control is only ever attached to the cached system
-    // block. The ephemeral notice must NEVER carry cache_control. When the
-    // system array is notice-only (empty system_text + notice present), we
-    // must skip the Array arm of the caching block below — otherwise it would
-    // attach cache_control to arr[0], which IS the notice. Track that case
-    // with a local flag rather than pattern-matching content inside the
-    // caching block (which would be brittle).
-    let has_cacheable_system = !system_text.is_empty();
-
     if !system_text.is_empty() {
         // Base form — cache_control is applied in the consolidated caching
-        // block below when request.enable_caching is true. If an ephemeral
-        // system notice is present, emit a two-element array here; the
-        // caching block below mutates element [0] in-place to attach
-        // cache_control. The notice block never carries cache_control.
-        if let Some(ref notice) = request.ephemeral_system_notice {
-            body["system"] = serde_json::Value::Array(vec![
-                serde_json::json!({"type": "text", "text": system_text}),
-                serde_json::json!({"type": "text", "text": notice}),
-            ]);
-        } else {
-            body["system"] = serde_json::Value::String(system_text);
-        }
-    } else if let Some(ref notice) = request.ephemeral_system_notice {
-        // Edge: empty system_text but notice present. arr[0] is the notice —
-        // the caching block's Array arm below must NOT attach cache_control
-        // here. Guarded by `has_cacheable_system == false`.
-        body["system"] = serde_json::Value::Array(vec![
-            serde_json::json!({"type": "text", "text": notice}),
-        ]);
+        // block below when request.enable_caching is true.
+        body["system"] = serde_json::Value::String(system_text);
     }
 
     if let Some(temp) = request.temperature {
@@ -248,39 +299,13 @@ pub(super) fn build_request_body(
         let _span = tracing::info_span!("loop.step.cache_markers", breakpoints = 3).entered();
         tracing::trace!("cache_markers step entered");
 
-        // First breakpoint: system prompt. Attach cache_control to the first
-        // system block — when a notice is present alongside real system text,
-        // `body["system"]` is already an array whose element [0] is the
-        // cacheable system text and element [1] is the notice (must never
-        // carry cache_control). In the notice-only edge case
-        // (has_cacheable_system == false), arr[0] IS the notice — skip the
-        // Array arm entirely so we don't mis-tag it.
-        if body.get("system").is_some() {
-            let system_value = body["system"].clone();
-            match system_value {
-                serde_json::Value::String(s) => {
-                    body["system"] = serde_json::json!([{
-                        "type": "text",
-                        "text": s,
-                        "cache_control": CacheControl::ephemeral(),
-                    }]);
-                }
-                serde_json::Value::Array(mut arr) if has_cacheable_system => {
-                    if let Some(first) = arr.first_mut()
-                        && let Some(obj) = first.as_object_mut()
-                    {
-                        obj.insert(
-                            "cache_control".to_string(),
-                            serde_json::json!(CacheControl::ephemeral()),
-                        );
-                    }
-                    body["system"] = serde_json::Value::Array(arr);
-                }
-                // Notice-only array (has_cacheable_system == false): leave
-                // body["system"] untouched — the notice must not carry
-                // cache_control.
-                _ => {}
-            }
+        // First breakpoint: the system prompt, one block.
+        if let Some(serde_json::Value::String(s)) = body.get("system").cloned() {
+            body["system"] = serde_json::json!([{
+                "type": "text",
+                "text": s,
+                "cache_control": CacheControl::ephemeral(),
+            }]);
         }
 
         // Second breakpoint: last tool in the list.
@@ -295,9 +320,13 @@ pub(super) fn build_request_body(
         }
 
         // Third breakpoint: conversation tail. Attach cache_control to the
-        // last message's last content block. (Introduced in P1 / Task 1.)
+        // last message's last content block (introduced in P1 / Task 1) —
+        // the last but a kept budget notice sent after it.
         if let Some(serde_json::Value::Array(msgs_arr)) = body.get_mut("messages")
-            && let Some(last_msg) = msgs_arr.last_mut()
+            && let Some(last_msg) = (0..msgs_arr.len())
+                .rev()
+                .find(|at| !notice_slots.contains(at))
+                .and_then(|at| msgs_arr.get_mut(at))
         {
             let content = &mut last_msg["content"];
             match content {
@@ -341,8 +370,15 @@ pub(super) fn build_request_body(
                 // Anthropic requires temperature=1.0 (or unset) for thinking
                 body.as_object_mut().unwrap().remove("temperature");
             }
-            ThinkingConfig::Adaptive => {
-                body["thinking"] = serde_json::json!({ "type": "adaptive" });
+            ThinkingConfig::Adaptive { display } => {
+                body["thinking"] = match display {
+                    ThinkingDisplay::ModelDefault => serde_json::json!({ "type": "adaptive" }),
+                    // Asked only of a row whose model's thinking page gives
+                    // `"omitted"` as its default (`RequestContract`).
+                    ThinkingDisplay::Summarized => {
+                        serde_json::json!({ "type": "adaptive", "display": "summarized" })
+                    }
+                };
                 body.as_object_mut().unwrap().remove("temperature");
             }
             ThinkingConfig::Disabled => {

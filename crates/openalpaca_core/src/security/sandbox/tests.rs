@@ -1,5 +1,4 @@
 use super::*;
-use async_trait::async_trait;
 use crate::bus::EventBus;
 use crate::security::confirmation::{ConfirmationBroker, ConfirmationResponse};
 use crate::tools::registry::{BuiltInTool, RegisteredTool, ToolBackend, ToolContext};
@@ -7,7 +6,6 @@ use crate::tools::ToolRegistry;
 
 struct MockTool;
 
-#[async_trait]
 impl BuiltInTool for MockTool {
     async fn execute(&self, arguments: &serde_json::Value) -> Result<String, String> {
         // Check for the slow_tool marker in arguments
@@ -29,7 +27,7 @@ fn make_registry() -> Arc<ToolRegistry> {
             strict: None,
             input_examples: None,
         },
-        backend: ToolBackend::BuiltIn(Arc::new(MockTool)),
+        backend: ToolBackend::built_in(MockTool),
         provides_capabilities: vec![],
         exempt_from_timeout: false,
         annotations: None,
@@ -45,7 +43,7 @@ fn make_registry() -> Arc<ToolRegistry> {
             strict: None,
             input_examples: None,
         },
-        backend: ToolBackend::BuiltIn(Arc::new(MockTool)),
+        backend: ToolBackend::built_in(MockTool),
         provides_capabilities: vec![],
         exempt_from_timeout: false,
         annotations: None,
@@ -74,6 +72,7 @@ fn make_policy(agent_id: &str) -> SandboxPolicy {
         require_confirmation_for: vec![],
         max_tool_calls: None,
         max_tool_runtime_secs: 60,
+        max_tool_runtime_ceiling_secs: 600,
         stream_id: None,
         lane_key: None,
         confirmation_timeout_secs: None,
@@ -571,10 +570,10 @@ async fn an_expired_confirmation_announces_itself_as_timed_out() {
     assert!(result.unwrap_err().contains("timed out"));
 
     // The request frame first, then its twin.
-    assert!(matches!(
+    std::assert_matches!(
         rx.try_recv().unwrap(),
         SystemEvent::ToolConfirmationRequested { .. }
-    ));
+    );
     match rx.try_recv().unwrap() {
         SystemEvent::ToolConfirmationResolved {
             outcome,
@@ -631,10 +630,10 @@ async fn an_answered_confirmation_announces_the_answer() {
 
         let _ = sandbox.execute_tool(&tc, &policy, &ctx).await;
 
-        assert!(matches!(
+        std::assert_matches!(
             rx.try_recv().unwrap(),
             SystemEvent::ToolConfirmationRequested { .. }
-        ));
+        );
         match rx.try_recv().unwrap() {
             SystemEvent::ToolConfirmationResolved { outcome, .. } => {
                 assert_eq!(outcome, expected);
@@ -687,6 +686,7 @@ async fn a_withheld_capability_never_opens_the_circuit_breaker() {
                 remote_name: "create_issue".to_string(),
                 server_name: "github".to_string(),
                 generation,
+                output_schema: None,
             },
             provides_capabilities: vec!["github__create_issue".to_string()],
             exempt_from_timeout: false,
@@ -755,7 +755,7 @@ fn make_registry_with_destructive() -> Arc<ToolRegistry> {
                 strict: None,
                 input_examples: None,
             },
-            backend: ToolBackend::BuiltIn(Arc::new(MockTool)),
+            backend: ToolBackend::built_in(MockTool),
             provides_capabilities: vec![],
             exempt_from_timeout: false,
             annotations: Some(openalpaca_mcp::ToolAnnotations::new().destructive(true)),
@@ -774,7 +774,7 @@ fn make_registry_with_destructive() -> Arc<ToolRegistry> {
                 strict: None,
                 input_examples: None,
             },
-            backend: ToolBackend::BuiltIn(Arc::new(MockTool)),
+            backend: ToolBackend::built_in(MockTool),
             provides_capabilities: vec![],
             exempt_from_timeout: false,
             annotations: Some(openalpaca_mcp::ToolAnnotations::new().destructive(false)),
@@ -1256,7 +1256,6 @@ struct Recorder {
     refuse_preview: Option<String>,
 }
 
-#[async_trait]
 impl BuiltInTool for Recorder {
     async fn execute(&self, _arguments: &serde_json::Value) -> Result<String, String> {
         Err("needs a context".to_string())
@@ -1313,7 +1312,7 @@ fn per_call_sandbox(
                     strict: None,
                     input_examples: None,
                 },
-                backend: ToolBackend::BuiltIn(backend),
+                backend: ToolBackend::built_in_arc(backend),
                 provides_capabilities: vec![],
                 exempt_from_timeout: false,
                 annotations: None,
@@ -1439,7 +1438,7 @@ async fn auto_approve_still_prompts_a_per_call_tool() {
                 strict: None,
                 input_examples: None,
             },
-            backend: ToolBackend::BuiltIn(quiet.clone()),
+            backend: ToolBackend::built_in_arc(quiet.clone()),
             provides_capabilities: vec![],
             exempt_from_timeout: false,
             annotations: None,
@@ -1596,7 +1595,7 @@ async fn no_broker_refuses_it() {
                 strict: None,
                 input_examples: None,
             },
-            backend: ToolBackend::BuiltIn(confirm.clone()),
+            backend: ToolBackend::built_in_arc(confirm.clone()),
             provides_capabilities: vec![],
             exempt_from_timeout: false,
             annotations: None,
@@ -1723,7 +1722,7 @@ fn traversal_sandbox(skill_dir: &std::path::Path) -> SandboxManager {
     };
     let registry = ToolRegistry::default();
     registry
-        .register(tool("note_tool", ToolBackend::BuiltIn(Arc::new(MockTool))))
+        .register(tool("note_tool", ToolBackend::built_in(MockTool)))
         .unwrap();
     registry
         .register(tool(
@@ -1743,6 +1742,7 @@ fn traversal_sandbox(skill_dir: &std::path::Path) -> SandboxManager {
                 remote_name: "echo".to_string(),
                 server_name: "srv".to_string(),
                 generation: 0,
+                output_schema: None,
             },
         ))
         .unwrap();
@@ -1758,10 +1758,11 @@ fn traversal_sandbox(skill_dir: &std::path::Path) -> SandboxManager {
             interpreter: Some("sh".to_string()),
             timeout_secs: 5,
         },
+        crate::tools::builtins::SkillRoots::default(),
     )
     .unwrap();
     registry
-        .register(tool("skill_script:noop", ToolBackend::BuiltIn(Arc::new(script))))
+        .register(tool("skill_script:noop", ToolBackend::built_in(script)))
         .unwrap();
     SandboxManager::new(
         Arc::new(registry),
@@ -1861,4 +1862,624 @@ fn an_explicit_confirmation_list_naming_file_write_also_asks_for_file_edit() {
     );
     assert_eq!(set(&["file_read"]), ["file_read"]);
     assert_eq!(set(&["shell_execute"]), ["shell_execute"]);
+}
+
+// ── N-TOOL-1b (B-11): one per-tool bound, a model-settable timeout_secs ──
+
+fn bounded(max_tool_runtime_secs: u64, max_tool_runtime_ceiling_secs: u64) -> SandboxPolicy {
+    SandboxPolicy {
+        max_tool_runtime_secs,
+        max_tool_runtime_ceiling_secs,
+        ..make_policy("agent1")
+    }
+}
+
+/// A template's `timeout_seconds` is the task's budget, not a tool's: the
+/// policy built from a template's constraints takes the daemon's bound and
+/// ceiling, whatever the template says.
+#[test]
+fn a_policy_from_a_template_takes_the_daemons_bound_not_its_timeout_seconds() {
+    let constraints = AgentConstraints {
+        timeout_seconds: Some(600),
+        ..Default::default()
+    };
+    let policy = SandboxPolicy::from_constraints(
+        "builder-1",
+        &constraints,
+        &crate::daemon_config::AgentDefaults::default(),
+    );
+    assert_eq!(policy.max_tool_runtime_secs, 120);
+    assert_eq!(policy.max_tool_runtime_ceiling_secs, 600);
+}
+
+/// A command's `timeout_secs` is clamped to the ceiling, never refused; a
+/// smaller one is its own bound; nothing usable asks for nothing; a tool
+/// that runs no command keeps the bound whatever its arguments hold.
+#[test]
+fn a_commands_timeout_secs_is_its_bound_up_to_the_ceiling() {
+    let policy = bounded(120, 600);
+    let asks = |arguments: serde_json::Value| policy.runtime_secs_for(&arguments, true, None);
+    assert_eq!(asks(serde_json::json!({"command": "make"})), 120);
+    assert_eq!(asks(serde_json::json!({"timeout_secs": 3600})), 600);
+    assert_eq!(asks(serde_json::json!({"timeout_secs": 600})), 600);
+    assert_eq!(asks(serde_json::json!({"timeout_secs": 300})), 300);
+    assert_eq!(asks(serde_json::json!({"timeout_secs": 5})), 5);
+    for nothing in [
+        serde_json::json!({"timeout_secs": 0}),
+        serde_json::json!({"timeout_secs": -5}),
+        serde_json::json!({"timeout_secs": 2.5}),
+        serde_json::json!({"timeout_secs": "300"}),
+        serde_json::json!({"timeout_secs": null}),
+        serde_json::json!("not an object"),
+    ] {
+        assert_eq!(asks(nothing.clone()), 120, "{nothing}");
+    }
+    assert_eq!(
+        policy.runtime_secs_for(&serde_json::json!({"timeout_secs": 300}), false, None),
+        120,
+        "a tool that runs no command keeps the bound"
+    );
+    // What was asked, apart from the bound: what a `Command`-backend tool's
+    // own figure gives way to (CMD-TIMEOUT).
+    let asked =
+        |arguments: serde_json::Value, runs: bool| policy.asked_runtime_secs(&arguments, runs);
+    assert_eq!(asked(serde_json::json!({"command": "make"}), true), None);
+    assert_eq!(asked(serde_json::json!({"timeout_secs": 0}), true), None);
+    assert_eq!(asked(serde_json::json!({"timeout_secs": 5}), true), Some(5));
+    assert_eq!(
+        asked(serde_json::json!({"timeout_secs": 3600}), true),
+        Some(600)
+    );
+    assert_eq!(asked(serde_json::json!({"timeout_secs": 300}), false), None);
+}
+
+/// TIMEOUT-ONE-CLOCK: a call that asks for nothing runs under the bound,
+/// under a `Command`-backend tool's own figure clamped to the ceiling — below
+/// the bound as above it (CMD-TIMEOUT-2 floored it at the bound) — or under
+/// an `Http`-backend tool's or an MCP server's own figure where it is below
+/// the bound, never past it; what a call asks for still comes first. Was
+/// `a_command_tools_own_figure_above_the_bound_is_its_unasked_cut`.
+#[test]
+fn every_tools_own_figure_is_the_sandboxs_unasked_cut() {
+    let policy = bounded(120, 600);
+    let unasked = serde_json::json!({});
+    let cut = |own: Option<OwnFigure>| policy.runtime_secs_for(&unasked, true, own);
+    assert_eq!(cut(None), 120);
+    assert_eq!(
+        cut(Some(OwnFigure::Default(30))),
+        30,
+        "below the bound: the sandbox's cut"
+    );
+    assert_eq!(cut(Some(OwnFigure::Default(120))), 120);
+    assert_eq!(cut(Some(OwnFigure::Default(300))), 300);
+    assert_eq!(
+        cut(Some(OwnFigure::Default(900))),
+        600,
+        "clamped to the ceiling"
+    );
+    assert_eq!(
+        cut(Some(OwnFigure::Limit(30))),
+        30,
+        "a limit below the bound cuts there"
+    );
+    assert_eq!(cut(Some(OwnFigure::Limit(120))), 120);
+    assert_eq!(
+        cut(Some(OwnFigure::Limit(300))),
+        120,
+        "a limit never lifts the bound"
+    );
+    assert_eq!(
+        policy.runtime_secs_for(
+            &serde_json::json!({"timeout_secs": 5}),
+            true,
+            Some(OwnFigure::Default(300))
+        ),
+        5,
+        "what a call asks for comes first"
+    );
+    assert_eq!(
+        bounded(120, 200).default_runtime_secs(Some(OwnFigure::Default(300))),
+        200,
+        "a ceiling below the author's figure clamps it"
+    );
+}
+
+/// Through the sandbox: a tool that runs no command is cut at the bound,
+/// whatever `timeout_secs` it was sent, and is not told about one.
+#[tokio::test]
+async fn a_tool_that_runs_no_command_is_cut_at_the_bound_whatever_it_asks() {
+    let registry = ToolRegistry::default();
+    registry
+        .register(RegisteredTool {
+            definition: openalpaca_llm::ToolDefinition {
+                name: "slow_tool".to_string(),
+                description: "slow_tool".to_string(),
+                parameters: serde_json::json!({"type": "object"}),
+                strict: None,
+                input_examples: None,
+            },
+            backend: ToolBackend::built_in(crate::test_util::Sleeps),
+            provides_capabilities: vec![],
+            exempt_from_timeout: false,
+            annotations: None,
+            version: "test-0.0.0".into(),
+            author: "test".into(),
+            created_at: chrono::Utc::now(),
+        })
+        .unwrap();
+    let sandbox = SandboxManager::with_defaults(Arc::new(registry), EventBus::default());
+    let call = ToolCall {
+        id: "tc_slow".to_string(),
+        name: "slow_tool".to_string(),
+        arguments: serde_json::json!({"timeout_secs": 2}),
+    };
+    let err = sandbox
+        .execute_tool(&call, &bounded(1, 600), &ToolContext::default())
+        .await
+        .unwrap_err();
+    assert_eq!(err, "Tool 'slow_tool' timed out after 1s");
+}
+
+/// A `Command`-backend tool running `sleep <seconds>`, its author's own
+/// `timeout_secs` (its TOML's) `own_secs`.
+fn sleeping_command_tool(seconds: &str, own_secs: u64) -> ToolRegistry {
+    let registry = ToolRegistry::default();
+    registry
+        .register(RegisteredTool {
+            definition: openalpaca_llm::ToolDefinition {
+                name: "slow_cmd".to_string(),
+                description: "slow_cmd".to_string(),
+                parameters: serde_json::json!({"type": "object"}),
+                strict: None,
+                input_examples: None,
+            },
+            backend: ToolBackend::Command {
+                command: "sleep".to_string(),
+                args_template: Some(seconds.to_string()),
+                timeout_secs: own_secs,
+            },
+            provides_capabilities: vec![],
+            exempt_from_timeout: false,
+            annotations: None,
+            version: "test-0.0.0".into(),
+            author: "test".into(),
+            created_at: chrono::Utc::now(),
+        })
+        .unwrap();
+    registry
+}
+
+/// CMD-TIMEOUT-2: a `Command`-backend tool whose author's `timeout_secs`
+/// is above the per-tool bound runs a call that asks for nothing to that
+/// figure — its author's 3 s, under a 1 s bound, runs a 2-second command
+/// to its end.
+#[tokio::test]
+async fn an_unasked_command_tool_above_the_bound_runs_to_its_own_figure() {
+    let gp = crate::test_util::GuardedProject::new();
+    let sandbox =
+        SandboxManager::with_defaults(Arc::new(sleeping_command_tool("2", 3)), EventBus::default());
+    let call = ToolCall {
+        id: "tc_cmd".to_string(),
+        name: "slow_cmd".to_string(),
+        arguments: serde_json::json!({}),
+    };
+    let out = sandbox
+        .execute_tool(&call, &bounded(1, 10), &gp.ctx())
+        .await;
+    assert_eq!(out, Ok(String::new()));
+}
+
+/// CMD-TIMEOUT-2: such a call is cut by the sandbox at its author's figure
+/// — one clock, never its backend's at the same instant. The hint named
+/// the ceiling, as `shell_execute`'s does, not that figure; since
+/// TIMEOUT-ONE-CLOCK (item 19) it names that figure as its limit beside the
+/// ceiling and advises no `timeout_secs`, which its schema does not take. Was
+/// `a_command_tool_cut_below_the_ceiling_is_told_the_ceiling_not_its_own_figure`,
+/// cut at the 1 s bound.
+#[tokio::test]
+async fn an_unasked_command_tool_above_the_bound_is_cut_at_its_own_figure() {
+    let gp = crate::test_util::GuardedProject::new();
+    let sandbox =
+        SandboxManager::with_defaults(Arc::new(sleeping_command_tool("5", 3)), EventBus::default());
+    let call = ToolCall {
+        id: "tc_cmd".to_string(),
+        name: "slow_cmd".to_string(),
+        arguments: serde_json::json!({}),
+    };
+    let err = sandbox
+        .execute_tool(&call, &bounded(1, 10), &gp.ctx())
+        .await
+        .unwrap_err();
+    assert_eq!(
+        err,
+        format!(
+            "Tool 'slow_cmd' timed out after 3s\n{}",
+            crate::tools::platform::timed_out_hint(3, 10, false)
+        )
+    );
+}
+
+/// CMD-TIMEOUT-2: an author's figure above the ceiling is clamped to it —
+/// its author's 5 s under a 2 s ceiling is cut at 2 s, and told that is the
+/// most the tool may run here.
+#[tokio::test]
+async fn an_unasked_command_tool_above_the_ceiling_is_cut_at_the_ceiling() {
+    let gp = crate::test_util::GuardedProject::new();
+    let sandbox =
+        SandboxManager::with_defaults(Arc::new(sleeping_command_tool("4", 5)), EventBus::default());
+    let call = ToolCall {
+        id: "tc_cmd".to_string(),
+        name: "slow_cmd".to_string(),
+        arguments: serde_json::json!({}),
+    };
+    let err = sandbox
+        .execute_tool(&call, &bounded(1, 2), &gp.ctx())
+        .await
+        .unwrap_err();
+    assert_eq!(
+        err,
+        format!(
+            "Tool 'slow_cmd' timed out after 2s\n{}",
+            crate::tools::platform::TIMED_OUT_HINT
+        )
+    );
+}
+
+/// CMD-TIMEOUT-2, one clock: an author's figure equal to the bound is the
+/// sandbox's cut, so the backend's clock stands back — the call is cut by
+/// the sandbox, with its hint, never by its backend at the same instant.
+#[tokio::test]
+async fn an_unasked_command_tool_at_the_bound_is_cut_by_the_sandbox() {
+    let gp = crate::test_util::GuardedProject::new();
+    let sandbox =
+        SandboxManager::with_defaults(Arc::new(sleeping_command_tool("4", 2)), EventBus::default());
+    let call = ToolCall {
+        id: "tc_cmd".to_string(),
+        name: "slow_cmd".to_string(),
+        arguments: serde_json::json!({}),
+    };
+    let err = sandbox
+        .execute_tool(&call, &bounded(2, 10), &gp.ctx())
+        .await
+        .unwrap_err();
+    assert_eq!(
+        err,
+        format!(
+            "Tool 'slow_cmd' timed out after 2s\n{}",
+            crate::tools::platform::timed_out_hint(2, 10, false)
+        )
+    );
+}
+
+/// CMD-TIMEOUT: a `Command`-backend tool's own `timeout_secs` is the call's
+/// default, and a call's `timeout_secs` lifts it — one whose author gave it
+/// 1 s, asked for 3, runs a 2-second command to its end. Was
+/// `a_command_tools_own_timeout_still_stops_it_whatever_a_call_asks`, the
+/// no-change half (killed at its author's figure whatever a call asked).
+#[tokio::test]
+async fn a_calls_timeout_secs_lifts_a_command_tools_own_figure() {
+    let gp = crate::test_util::GuardedProject::new();
+    let sandbox =
+        SandboxManager::with_defaults(Arc::new(sleeping_command_tool("2", 1)), EventBus::default());
+    let call = ToolCall {
+        id: "tc_cmd".to_string(),
+        name: "slow_cmd".to_string(),
+        arguments: serde_json::json!({"timeout_secs": 3}),
+    };
+    let out = sandbox
+        .execute_tool(&call, &bounded(1, 10), &gp.ctx())
+        .await;
+    assert_eq!(out, Ok(String::new()));
+}
+
+/// The default half: a call that asks for nothing runs under its author's
+/// figure, 1 s though the bound is 5 — since TIMEOUT-ONE-CLOCK cut there by
+/// the sandbox, not killed by its backend (CMD-TIMEOUT-2's "Command timed
+/// out after 1s"), and told its 1 s limit and the 10 s ceiling, with no
+/// `timeout_secs` advised, since its schema takes none.
+#[tokio::test]
+async fn a_command_tool_asked_for_nothing_stops_at_its_own_figure() {
+    let gp = crate::test_util::GuardedProject::new();
+    let sandbox =
+        SandboxManager::with_defaults(Arc::new(sleeping_command_tool("3", 1)), EventBus::default());
+    let call = ToolCall {
+        id: "tc_cmd".to_string(),
+        name: "slow_cmd".to_string(),
+        arguments: serde_json::json!({}),
+    };
+    let err = sandbox
+        .execute_tool(&call, &bounded(5, 10), &gp.ctx())
+        .await
+        .unwrap_err();
+    assert_eq!(
+        err,
+        format!(
+            "Tool 'slow_cmd' timed out after 1s\n{}",
+            crate::tools::platform::timed_out_hint(1, 10, false)
+        )
+    );
+}
+
+/// A call asking above the ceiling runs under the ceiling — cut by the
+/// sandbox at 2 s, not by its backend at its author's 1 s — and is told that
+/// is the most the tool may run here.
+#[tokio::test]
+async fn a_command_tool_asking_above_the_ceiling_is_cut_at_the_ceiling() {
+    let gp = crate::test_util::GuardedProject::new();
+    let sandbox =
+        SandboxManager::with_defaults(Arc::new(sleeping_command_tool("4", 1)), EventBus::default());
+    let call = ToolCall {
+        id: "tc_cmd".to_string(),
+        name: "slow_cmd".to_string(),
+        arguments: serde_json::json!({"timeout_secs": 10}),
+    };
+    let err = sandbox
+        .execute_tool(&call, &bounded(1, 2), &gp.ctx())
+        .await
+        .unwrap_err();
+    assert_eq!(
+        err,
+        format!(
+            "Tool 'slow_cmd' timed out after 2s\n{}",
+            crate::tools::platform::TIMED_OUT_HINT
+        )
+    );
+}
+
+/// One clock: a call that asked for 2 s, below the 10 s ceiling, is cut by
+/// the sandbox at its figure — never by its backend at the same instant,
+/// with the backend's words — and is told it may ask for up to the ceiling:
+/// it sent a `timeout_secs`, so its parameters take one (item 19).
+#[tokio::test]
+async fn a_command_tool_cut_at_its_asked_figure_is_cut_by_the_sandbox() {
+    let gp = crate::test_util::GuardedProject::new();
+    let sandbox =
+        SandboxManager::with_defaults(Arc::new(sleeping_command_tool("4", 1)), EventBus::default());
+    let call = ToolCall {
+        id: "tc_cmd".to_string(),
+        name: "slow_cmd".to_string(),
+        arguments: serde_json::json!({"timeout_secs": 2}),
+    };
+    let err = sandbox
+        .execute_tool(&call, &bounded(1, 10), &gp.ctx())
+        .await
+        .unwrap_err();
+    assert_eq!(
+        err,
+        "Tool 'slow_cmd' timed out after 2s\nHint: this tool may run up to 10 seconds here — \
+         call it again with a larger timeout_secs, or split the work into smaller calls that \
+         each finish sooner."
+    );
+}
+
+/// The figure is the sandbox's to set: a context a caller built with one is
+/// handed on without it, so a call that asked for nothing is still cut at
+/// its author's 1 s, not the caller's 10 — by the sandbox since
+/// TIMEOUT-ONE-CLOCK — and the hint names the policy's 10 s ceiling. Was a
+/// forged asked figure and ceiling, fields TIMEOUT-ONE-CLOCK removed.
+#[tokio::test]
+async fn a_caller_supplied_cut_is_discarded() {
+    let gp = crate::test_util::GuardedProject::new();
+    let sandbox =
+        SandboxManager::with_defaults(Arc::new(sleeping_command_tool("3", 1)), EventBus::default());
+    let call = ToolCall {
+        id: "tc_cmd".to_string(),
+        name: "slow_cmd".to_string(),
+        arguments: serde_json::json!({}),
+    };
+    let ctx = ToolContext {
+        sandbox_cut_secs: Some(10),
+        ..gp.ctx()
+    };
+    let err = sandbox
+        .execute_tool(&call, &bounded(5, 10), &ctx)
+        .await
+        .unwrap_err();
+    assert_eq!(
+        err,
+        format!(
+            "Tool 'slow_cmd' timed out after 1s\n{}",
+            crate::tools::platform::timed_out_hint(1, 10, false)
+        )
+    );
+}
+
+// ── PLUGIN-WAIT: a plugin tool waits the sandbox's figure ───────────
+
+/// A plugin's tool, `slow-plugin::slow`, whose executor answers after 2 s.
+fn slow_plugin_tool() -> ToolRegistry {
+    struct AnswersLate;
+    impl openalpaca_api::plugin_traits::PluginToolExecutor for AnswersLate {
+        async fn execute(
+            &self,
+            _tool_name: &str,
+            _arguments: &serde_json::Value,
+        ) -> Result<String, String> {
+            tokio::time::sleep(Duration::from_secs(2)).await;
+            Ok("late".to_string())
+        }
+        fn plugin_id(&self) -> &str {
+            "slow-plugin"
+        }
+    }
+    let registry = ToolRegistry::default();
+    registry
+        .register(RegisteredTool {
+            definition: openalpaca_llm::ToolDefinition {
+                name: "slow-plugin::slow".to_string(),
+                description: "slow".to_string(),
+                parameters: serde_json::json!({"type": "object"}),
+                strict: None,
+                input_examples: None,
+            },
+            backend: ToolBackend::Plugin(
+                openalpaca_api::plugin_traits::DynPluginToolExecutor::new_arc(AnswersLate),
+            ),
+            provides_capabilities: vec![],
+            exempt_from_timeout: false,
+            annotations: None,
+            version: "test-0.0.0".into(),
+            author: "plugin:slow-plugin".into(),
+            created_at: chrono::Utc::now(),
+        })
+        .unwrap();
+    registry
+}
+
+/// A plugin tool's call may ask for its own figure, as a command's may: its
+/// `timeout_secs` lifts the bound for that call, clamped to the ceiling; one
+/// that asks nothing is cut at the bound, and — below the ceiling — told the
+/// ceiling in the words a command's cut gets (PLUGIN-WAIT-2); since
+/// TIMEOUT-ONE-CLOCK (item 19) its limit and the ceiling, with no
+/// `timeout_secs` advised, since its schema takes none.
+#[tokio::test]
+async fn a_plugin_tools_call_may_ask_for_its_own_figure() {
+    let sandbox = SandboxManager::with_defaults(Arc::new(slow_plugin_tool()), EventBus::default());
+    let call = |arguments: serde_json::Value| ToolCall {
+        id: "tc_plugin".to_string(),
+        name: "slow-plugin::slow".to_string(),
+        arguments,
+    };
+    let asked = sandbox
+        .execute_tool(
+            &call(serde_json::json!({"timeout_secs": 3})),
+            &bounded(1, 600),
+            &ToolContext::default(),
+        )
+        .await;
+    assert_eq!(asked.as_deref(), Ok("late"));
+    let clamped = sandbox
+        .execute_tool(
+            &call(serde_json::json!({"timeout_secs": 3600})),
+            &bounded(1, 3),
+            &ToolContext::default(),
+        )
+        .await;
+    assert_eq!(clamped.as_deref(), Ok("late"));
+    let cut = sandbox
+        .execute_tool(
+            &call(serde_json::json!({})),
+            &bounded(1, 600),
+            &ToolContext::default(),
+        )
+        .await
+        .unwrap_err();
+    assert_eq!(
+        cut,
+        format!(
+            "Tool 'slow-plugin::slow' timed out after 1s\n{}",
+            crate::tools::platform::timed_out_hint(1, 600, false)
+        )
+    );
+}
+
+/// A plugin tool cut at the ceiling is told that is the most it may run
+/// (PLUGIN-WAIT-2): the hint is the one a command's cut gets, so at the
+/// ceiling it names no `timeout_secs`.
+#[tokio::test]
+async fn a_plugin_tool_cut_at_the_ceiling_is_told_that_is_the_most() {
+    let sandbox = SandboxManager::with_defaults(Arc::new(slow_plugin_tool()), EventBus::default());
+    let call = ToolCall {
+        id: "tc_plugin".to_string(),
+        name: "slow-plugin::slow".to_string(),
+        arguments: serde_json::json!({"timeout_secs": 5}),
+    };
+    let cut = sandbox
+        .execute_tool(&call, &bounded(1, 1), &ToolContext::default())
+        .await
+        .unwrap_err();
+    assert_eq!(
+        cut,
+        "Tool 'slow-plugin::slow' timed out after 1s\nHint: that is the most this tool may run \
+         here; split the work into smaller calls that each finish sooner."
+    );
+}
+
+/// What a plugin tool's executor was handed: the sandbox's cut, or `None`
+/// when called through `execute`.
+#[derive(Default)]
+struct RecordsTheCut(std::sync::Mutex<Vec<Option<Duration>>>);
+
+impl openalpaca_api::plugin_traits::PluginToolExecutor for RecordsTheCut {
+    async fn execute(
+        &self,
+        _tool_name: &str,
+        _arguments: &serde_json::Value,
+    ) -> Result<String, String> {
+        self.0.lock().unwrap().push(None);
+        Ok("plain".to_string())
+    }
+    async fn execute_within(
+        &self,
+        _tool_name: &str,
+        _arguments: &serde_json::Value,
+        sandbox_cut: Duration,
+    ) -> Result<String, String> {
+        self.0.lock().unwrap().push(Some(sandbox_cut));
+        Ok("within".to_string())
+    }
+    fn plugin_id(&self) -> &str {
+        "rec"
+    }
+}
+
+/// The sandbox hands a plugin tool the figure it cuts the call at — the
+/// bound, or what the call asked for clamped to the ceiling — and a figure a
+/// caller put on the context is not passed through.
+#[tokio::test]
+async fn the_sandbox_hands_a_plugin_tool_the_figure_it_cuts_at() {
+    let recorder = Arc::new(RecordsTheCut::default());
+    let registry = ToolRegistry::default();
+    registry
+        .register(RegisteredTool {
+            definition: openalpaca_llm::ToolDefinition {
+                name: "rec::tool".to_string(),
+                description: "records".to_string(),
+                parameters: serde_json::json!({"type": "object"}),
+                strict: None,
+                input_examples: None,
+            },
+            backend: ToolBackend::Plugin(
+                openalpaca_api::plugin_traits::DynPluginToolExecutor::from_arc(recorder.clone()),
+            ),
+            provides_capabilities: vec![],
+            exempt_from_timeout: false,
+            annotations: None,
+            version: "test-0.0.0".into(),
+            author: "plugin:rec".into(),
+            created_at: chrono::Utc::now(),
+        })
+        .unwrap();
+    let sandbox = SandboxManager::with_defaults(Arc::new(registry), EventBus::default());
+    let call = |arguments: serde_json::Value| ToolCall {
+        id: "tc_rec".to_string(),
+        name: "rec::tool".to_string(),
+        arguments,
+    };
+    let forged = ToolContext {
+        sandbox_cut_secs: Some(99),
+        ..Default::default()
+    };
+    for (arguments, ctx) in [
+        (serde_json::json!({}), ToolContext::default()),
+        (
+            serde_json::json!({"timeout_secs": 7}),
+            ToolContext::default(),
+        ),
+        (
+            serde_json::json!({"timeout_secs": 9999}),
+            ToolContext::default(),
+        ),
+        (serde_json::json!({}), forged),
+    ] {
+        let answer = sandbox
+            .execute_tool(&call(arguments), &bounded(3, 600), &ctx)
+            .await;
+        assert_eq!(answer.as_deref(), Ok("within"));
+    }
+    let secs = |s| Some(Duration::from_secs(s));
+    assert_eq!(
+        *recorder.0.lock().unwrap(),
+        vec![secs(3), secs(7), secs(600), secs(3)]
+    );
 }

@@ -8,6 +8,9 @@
 
 [defaults]
 connect_timeout_secs = 30
+# A tool call's limit: the sandbox cuts an MCP call here, or at
+# [execution.agent_defaults] max_tool_runtime_secs in daemon.toml where that is
+# lower; a cut call is a failed tool run with the reason timeout.
 request_timeout_secs = 30
 max_reconnect_attempts = 3
 reconnect_backoff_ms = 100

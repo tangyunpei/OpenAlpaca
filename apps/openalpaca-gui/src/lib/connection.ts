@@ -1,47 +1,114 @@
 /**
  * Daemon discovery and auth (API_MAP §1).
  *
- * The webview never reads `discovery.json`. Tauri commands do — the names are
- * read from `src-tauri/src/lib.rs`'s `tauri::generate_handler!`:
+ * The webview never reads `discovery.json`. Tauri commands do, called
+ * through the host (`lib/host/`: TauriHost, `lib/host/tauri.ts`) — the names
+ * are read from `src-tauri/src/lib.rs`'s `tauri::generate_handler!`:
  *
- *   `ensure_daemon_running` — probes liveness, spawns the sidecar if dead,
- *                             polls up to ~5 s. Use on boot. When the daemon
- *                             does not come up, the rejection carries the end
- *                             of what it wrote to `daemon.log` — its own
- *                             reason, verbatim.
- *   `get_connection_info`   — reads discovery + expiry check. Use on reconnect.
+ *   `ensure_daemon_running` — asks the daemon `discovery.json` names
+ *                             `GET /v1/health` and judges it (Q04): reuses one
+ *                             this app speaks to, refuses one it cannot use
+ *                             (`mismatch`, never parked on a spawn), answers
+ *                             `starting` at once for one that is up but not
+ *                             answering yet (this window asks again on its own
+ *                             timer, `lib/events.ts`), and only with no live
+ *                             daemon spawns the sidecar and waits ~5 s for the
+ *                             file to name a daemon, answering `starting` at
+ *                             once for one that is up but silent, as above
+ *                             (Q04-VERDICT). Use on boot. When the daemon does
+ *                             not come up, the rejection carries the end of
+ *                             what it wrote to `daemon.log` — its own reason,
+ *                             verbatim.
+ *   `get_connection_info`   — reads discovery + expiry check, and refuses
+ *                             (`mismatch`) a live daemon whose file states a
+ *                             protocol this app does not speak, so the
+ *                             reconnect ladder parks on it too (Q04). Use on
+ *                             reconnect, when a request is refused `401`, and
+ *                             once the cache is an hour old by the wall clock
+ *                             (`keepConnectionFresh`): the daemon rotates its
+ *                             token while it runs (T21).
  *   `read_daemon_log_tail`  — the end of `daemon.log`, read straight from the
  *                             file, so it answers with no daemon serving.
  *   `await_daemon_stopped`  — after `POST /v1/command {"command":"shutdown"}`,
  *                             waits until the process and its lock are gone.
  *
  * The first two return `ConnectionInfo`, serialized to the webview in
- * camelCase.
+ * camelCase, with the daemon's `version` and `protocol` and the shell's
+ * `note` on a daemon of an older protocol or another version (Q04), and
+ * `daemonPath` (Q21): where the `PATH` of a daemon this run
+ * of the app spawned came from — the login shell's, captured at the app's
+ * start (read again without `-i` when, run interactively, it ended before
+ * it printed its environment: CAPTURE-RETRY), or the fallback list — and
+ * how long the capture took, never the
+ * `PATH` itself, with the names of the variables passed beside it because
+ * `daemon.toml`'s `[daemon.env] passthrough_keys` lists them (N-DAEMON-2),
+ * never their values; `null` for a daemon the app did not spawn this run. A
+ * refusal of the shell's is typed, `{ kind, message }`
+ * (`lib/shell-error.ts`, Q13): it becomes a `ConnectionError` carrying that
+ * `kind` and the shell's sentence as it is (`lib/host/answer.ts`, the check
+ * every host's answer passes).
+ *
+ * In a plain browser, in a development build, the host is a fixture
+ * (`lib/host/fixture.ts`, unanswered unless `VITE_OPENALPACA_HOST=fixture`)
+ * or, with `VITE_OPENALPACA_HOST=dev-server`, the Vite dev server: then the
+ * dev server, not the webview, reads the `discovery.json` of the store
+ * `OPENALPACA_HOME_STORE` names (`lib/host/dev-server.ts`).
  *
  * `instanceId` is the identity guard: a change means the daemon restarted, so
  * every `task_id`, `stream_id` and `request_id` the client holds is dead and
  * the app must fully re-bootstrap rather than merely reopen its socket.
  */
 
-import { invoke } from "@tauri-apps/api/core";
+import { host } from "./host";
+
+export { ConnectionError, daemonPathOf } from "./host/answer";
 
 export interface ConnectionInfo {
   baseUrl: string;
   token: string;
   instanceId: string;
+  /**
+   * Where the `PATH` of the daemon this app spawned came from (Q21); `null`
+   * for a daemon this run of the app did not spawn. Absent only in a test's
+   * hand-written `ConnectionInfo`.
+   */
+  daemonPath?: DaemonPath | null;
+  /**
+   * The daemon's `build.version` and `build.protocol` (Q04); `null` from a
+   * shell that does not send them. Absent only in a test's hand-written
+   * `ConnectionInfo`.
+   */
+  version?: string | null;
+  protocol?: number | null;
+  /**
+   * The shell's sentence on a daemon it uses of an older protocol or another
+   * version — both named, and Stop then Start, never a restart — `null` for
+   * one of this app's (Q04's seventh row, A-20).
+   */
+  note?: string | null;
 }
 
-/** Thrown when discovery is missing/expired or the Tauri bridge is absent. */
-export class ConnectionError extends Error {
-  override readonly name = "ConnectionError";
-
-  constructor(
-    message: string,
-    /** The underlying Tauri rejection or malformed payload. */
-    readonly detail: unknown = null,
-  ) {
-    super(message);
-  }
+/**
+ * The shell's `daemonPath` (`src-tauri/src/login_path.rs`'s
+ * `DaemonPathReport`), pinned from both sides by `daemon-path.json`.
+ */
+export interface DaemonPath {
+  /**
+   * `login-shell`: the login shell's; `login-shell-noninteractive`: the
+   * login shell's, read again without `-i` because, run interactively, it
+   * ended before it printed its environment (CAPTURE-RETRY);
+   * `fallback-list`: the fixed list.
+   */
+  source: "login-shell" | "login-shell-noninteractive" | "fallback-list";
+  /** How long the capture took, from the app's start. */
+  captureMs: number;
+  /** Why the capture failed, the shell's sentence; `null` but for `fallback-list`. */
+  reason: string | null;
+  /**
+   * The variables passed beside `PATH` from the login shell, by name, as
+   * `[daemon.env] passthrough_keys` lists them (N-DAEMON-2); empty for none.
+   */
+  passedKeys: string[];
 }
 
 export type ConnectionListener = (info: ConnectionInfo | null) => void;
@@ -51,45 +118,27 @@ export type InstanceChangeListener = (
 ) => void;
 
 let current: ConnectionInfo | null = null;
+/**
+ * The connection a read on reconnect found replaced, kept while no
+ * connection is cached until a read lands, so that read announces the
+ * change: the re-bootstrap the read starts can fail first — since Q04 the
+ * shell answers `starting` at once while the new daemon boots — and the
+ * window then asks again through a boot or a rung of its own, which would
+ * otherwise see no previous connection and announce nothing.
+ */
+let replaced: ConnectionInfo | null = null;
+/** When `current` was read, by the wall clock (`Date.now()`); `null` with it. */
+let readAt: number | null = null;
 let bootstrapInFlight: Promise<ConnectionInfo> | null = null;
+let refreshInFlight: Promise<ConnectionInfo> | null = null;
 
 const connectionListeners = new Set<ConnectionListener>();
 const instanceListeners = new Set<InstanceChangeListener>();
 
-function isConnectionInfo(value: unknown): value is ConnectionInfo {
-  if (typeof value !== "object" || value === null) return false;
-  const v = value as Record<string, unknown>;
-  return (
-    typeof v.baseUrl === "string" &&
-    typeof v.token === "string" &&
-    typeof v.instanceId === "string"
-  );
-}
-
 function publish(info: ConnectionInfo | null): void {
   current = info;
+  readAt = info === null ? null : Date.now();
   for (const listener of connectionListeners) listener(info);
-}
-
-async function invokeConnection(
-  command: "get_connection_info" | "ensure_daemon_running",
-) {
-  let raw: unknown;
-  try {
-    raw = await invoke(command);
-  } catch (cause) {
-    throw new ConnectionError(
-      typeof cause === "string" ? cause : `Tauri command \`${command}\` failed`,
-      cause,
-    );
-  }
-  if (!isConnectionInfo(raw)) {
-    throw new ConnectionError(
-      `\`${command}\` returned an unexpected payload`,
-      raw,
-    );
-  }
-  return raw;
 }
 
 /**
@@ -100,25 +149,8 @@ async function invokeConnection(
  * answers for a daemon that would not start as well as one that is running.
  * Colour escapes are gone and nothing else is changed: render it verbatim.
  */
-export async function readDaemonLogTail(lines: number): Promise<string> {
-  let raw: unknown;
-  try {
-    raw = await invoke("read_daemon_log_tail", { lines });
-  } catch (cause) {
-    throw new ConnectionError(
-      typeof cause === "string"
-        ? cause
-        : "Tauri command `read_daemon_log_tail` failed",
-      cause,
-    );
-  }
-  if (typeof raw !== "string") {
-    throw new ConnectionError(
-      "`read_daemon_log_tail` returned an unexpected payload",
-      raw,
-    );
-  }
-  return raw;
+export function readDaemonLogTail(lines: number): Promise<string> {
+  return host().readDaemonLogTail(lines);
 }
 
 // ── Stop intent ─────────────────────────────────────────────────────────────
@@ -223,47 +255,13 @@ export interface DaemonStopReport {
   waitedMs: number;
 }
 
-const STOP_OUTCOMES: ReadonlySet<string> = new Set([
-  "not_running",
-  "stopped",
-  "lock_still_held",
-  "still_alive",
-]);
-
 /**
  * Wait — up to 15 s, in the shell — until the daemon's process has exited and
  * its single-instance lock is free. The shutdown route's `200` says only that
  * the daemon was asked; this is what says it is gone.
  */
-export async function awaitDaemonStopped(): Promise<DaemonStopReport> {
-  let raw: unknown;
-  try {
-    raw = await invoke("await_daemon_stopped");
-  } catch (cause) {
-    throw new ConnectionError(
-      typeof cause === "string"
-        ? cause
-        : "Tauri command `await_daemon_stopped` failed",
-      cause,
-    );
-  }
-  const report = raw as Partial<DaemonStopReport> | null;
-  if (
-    typeof report !== "object" ||
-    report === null ||
-    typeof report.outcome !== "string" ||
-    !STOP_OUTCOMES.has(report.outcome)
-  ) {
-    throw new ConnectionError(
-      "`await_daemon_stopped` returned an unexpected payload",
-      raw,
-    );
-  }
-  return {
-    outcome: report.outcome,
-    pid: typeof report.pid === "number" ? report.pid : null,
-    waitedMs: typeof report.waitedMs === "number" ? report.waitedMs : 0,
-  };
+export function awaitDaemonStopped(): Promise<DaemonStopReport> {
+  return host().awaitDaemonStopped();
 }
 
 /** The cached connection, or `null` before the first successful bootstrap. */
@@ -278,8 +276,10 @@ export function subscribeConnection(listener: ConnectionListener): () => void {
 }
 
 /**
- * Subscribe to daemon-identity changes. Fired when a refresh observes a
- * different `instanceId` — consumers must drop all server-derived state.
+ * Subscribe to daemon-identity changes. Fired once when a read observes a
+ * different `instanceId` than the connection it replaces — on reconnect, a
+ * read that lands after the re-bootstrap failed included — so consumers must
+ * drop all server-derived state.
  */
 export function subscribeInstanceChange(
   listener: InstanceChangeListener,
@@ -295,13 +295,10 @@ export function subscribeInstanceChange(
 export function bootstrapConnection(): Promise<ConnectionInfo> {
   if (bootstrapInFlight) return bootstrapInFlight;
 
-  bootstrapInFlight = invokeConnection("ensure_daemon_running")
+  bootstrapInFlight = host()
+    .ensureDaemonRunning()
     .then((info) => {
-      const previous = current;
-      publish(info);
-      if (previous && previous.instanceId !== info.instanceId) {
-        for (const listener of instanceListeners) listener(info, previous);
-      }
+      adopt(info);
       return info;
     })
     .finally(() => {
@@ -315,20 +312,45 @@ export function bootstrapConnection(): Promise<ConnectionInfo> {
  * Reconnect path: re-read discovery. On an `instanceId` mismatch this performs
  * a **full re-bootstrap** rather than handing back a connection to a daemon the
  * caller's state no longer matches.
+ *
+ * Also the path a request refused `401` takes (`lib/http.ts`): the daemon
+ * rotates the token while it runs (T21). Concurrent callers share one read.
  */
-export async function refreshConnection(): Promise<ConnectionInfo> {
-  const previous = current;
-  const info = await invokeConnection("get_connection_info");
+export function refreshConnection(): Promise<ConnectionInfo> {
+  if (refreshInFlight) return refreshInFlight;
+  refreshInFlight = rereadConnection().finally(() => {
+    refreshInFlight = null;
+  });
+  return refreshInFlight;
+}
+
+async function rereadConnection(): Promise<ConnectionInfo> {
+  const previous = current ?? replaced;
+  const info = await host().getConnectionInfo();
 
   if (previous && previous.instanceId !== info.instanceId) {
+    // Kept until a read lands: the boot below, or a later one if it fails.
+    replaced = previous;
     publish(null);
-    const rebooted = await bootstrapConnection();
-    for (const listener of instanceListeners) listener(rebooted, previous);
-    return rebooted;
+    return bootstrapConnection();
   }
 
-  publish(info);
+  adopt(info);
   return info;
+}
+
+/**
+ * Cache `info`, and announce the change when it is another daemon than the
+ * connection it replaces: the cached one, or the one a read on reconnect
+ * found replaced (`replaced`).
+ */
+function adopt(info: ConnectionInfo): void {
+  const previous = current ?? replaced;
+  replaced = null;
+  publish(info);
+  if (previous && previous.instanceId !== info.instanceId) {
+    for (const listener of instanceListeners) listener(info, previous);
+  }
 }
 
 /** The cached connection, bootstrapping on first use. */
@@ -336,9 +358,82 @@ export async function ensureConnection(): Promise<ConnectionInfo> {
   return current ?? (await bootstrapConnection());
 }
 
-/** Drop the cached connection (tests, and an explicit user-driven reconnect). */
+/**
+ * Drop the cached connection, and a change not yet announced with it (tests,
+ * and an explicit user-driven reconnect).
+ */
 export function resetConnection(): void {
+  replaced = null;
   publish(null);
+}
+
+// ── Keeping the token fresh (TOKEN-REREAD) ──────────────────────────────────
+
+/**
+ * How old the cached connection may grow, by the wall clock, before the
+ * window reads it again: one hour.
+ *
+ * The daemon renews its token twelve hours after its issue and honours the
+ * one it replaced until that one's `expires_at`, a day after its issue (T21),
+ * so a token is good for at least twelve hours after it was read. A URL that
+ * carries the token in its query — a content URL an `<img>` loads, the chat
+ * stream's `EventSource`, the events socket's — cannot answer a `401` by
+ * reading the connection again as `apiRequest` does; it carries whatever the
+ * cache held when it was built. Reading the cache again well inside those
+ * twelve hours keeps every such URL on a token the daemon honours
+ * (`tasks/pending-decisions.md` §1 _Rev 93_ (b)).
+ */
+export const CONNECTION_REREAD_AFTER_MS = 60 * 60 * 1000;
+
+/** How often the window looks at the cache's age: once a minute. */
+export const CONNECTION_CHECK_EVERY_MS = 60 * 1000;
+
+/**
+ * Read the connection again if the cache is due: `CONNECTION_REREAD_AFTER_MS`
+ * old or more by the wall clock, or read in the future (the clock was set
+ * back). Nothing while there is no cache (the first read is the boot's),
+ * while a boot is in flight, or while the window has no daemon by intent: a
+ * read that finds another instance re-bootstraps, and
+ * `ensure_daemon_running` would start a daemon the user stopped. A failed
+ * read keeps the cache and its stamp, so the next look tries again; the
+ * refusal itself is the socket's and `apiRequest`'s to report.
+ */
+function rereadIfDue(): void {
+  if (current === null || readAt === null) return;
+  if (bootstrapInFlight !== null) return;
+  if (getStopIntent() !== null) return;
+  const age = Date.now() - readAt;
+  if (age >= 0 && age < CONNECTION_REREAD_AFTER_MS) return;
+  refreshConnection().catch(() => undefined);
+}
+
+/**
+ * Keep the cached connection's token fresh while the window is open: look
+ * at its age every `CONNECTION_CHECK_EVERY_MS`, and at once when the window
+ * is shown (never while it is hidden) or focused again. Returns the function
+ * that stops it.
+ *
+ * Judged on the wall clock, not by a timer of hours: a Mac's sleep stops the
+ * webview's timers but not `Date.now()`, so a night's sleep is counted at the
+ * first look after the wake — at most one interval, plus the read, during
+ * which a URL built from the cache may still carry a lapsed token.
+ */
+export function keepConnectionFresh(): () => void {
+  // Listeners of this start's own, so one start's stop never removes
+  // another's (the DOM keeps one copy of a listener added twice).
+  const onTick = () => rereadIfDue();
+  const onFocus = () => rereadIfDue();
+  const onVisible = () => {
+    if (document.visibilityState !== "hidden") rereadIfDue();
+  };
+  const timer = setInterval(onTick, CONNECTION_CHECK_EVERY_MS);
+  document.addEventListener("visibilitychange", onVisible);
+  window.addEventListener("focus", onFocus);
+  return () => {
+    clearInterval(timer);
+    document.removeEventListener("visibilitychange", onVisible);
+    window.removeEventListener("focus", onFocus);
+  };
 }
 
 /** `http(s)://host:port` + path. */
