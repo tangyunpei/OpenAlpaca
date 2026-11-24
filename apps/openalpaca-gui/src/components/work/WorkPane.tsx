@@ -135,7 +135,7 @@ export function WorkPane({
         </Button>
       </PaneHeader>
 
-      <div className="sc min-h-0 flex-1 overflow-y-auto p-[14px]">
+      <div className="min-h-0 sc flex-1 overflow-y-auto p-[14px]">
         {query.isPending ? (
           <p className="m-0 font-mono text-2xs-plus text-faint">
             Loading runs…

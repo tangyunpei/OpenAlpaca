@@ -75,7 +75,7 @@ export function ModelPicker({
           Chat model
         </p>
 
-        <div className="sc max-h-[300px] overflow-y-auto">
+        <div className="max-h-[300px] sc overflow-y-auto">
           {status !== "ready" && (
             <p className="m-0 px-[13px] py-[10px] font-mono text-2xs-plus text-faint">
               {status === "loading"

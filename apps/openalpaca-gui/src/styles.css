@@ -167,6 +167,20 @@
   --spacing-detail-max: 760px;
   --spacing-settings-max: 660px;
   --spacing-palette: 560px;
+
+  /* ---- Animations ---- */
+  --animate-pulse-oa: oaP 2s ease-in-out infinite;
+  --animate-pulse-oa-fast: oaP 1.6s ease-in-out infinite;
+
+  @keyframes oaP {
+    0%,
+    100% {
+      opacity: 1;
+    }
+    50% {
+      opacity: 0.4;
+    }
+  }
 }
 
 @layer base {
@@ -186,30 +200,14 @@
   }
 }
 
-@layer utilities {
-  @keyframes oaP {
-    0%,
-    100% {
-      opacity: 1;
-    }
-    50% {
-      opacity: 0.4;
-    }
-  }
-  .animate-pulse-oa {
-    animation: oaP 2s ease-in-out infinite;
-  }
-  .animate-pulse-oa-fast {
-    animation: oaP 1.6s ease-in-out infinite;
-  }
-
-  .sc::-webkit-scrollbar {
+@utility sc {
+  &::-webkit-scrollbar {
     width: 9px;
   }
-  .sc::-webkit-scrollbar-track {
+  &::-webkit-scrollbar-track {
     background: transparent;
   }
-  .sc::-webkit-scrollbar-thumb {
+  &::-webkit-scrollbar-thumb {
     background: var(--color-line-popover);
     border-radius: 9px;
   }

@@ -109,7 +109,7 @@ export function LibraryList({
         />
       </div>
 
-      <div className="sc min-h-0 flex-1 overflow-y-auto p-[8px]">
+      <div className="min-h-0 sc flex-1 overflow-y-auto p-[8px]">
         {error !== null ? (
           <SectionEmpty note={error.message}>
             The library could not be loaded.

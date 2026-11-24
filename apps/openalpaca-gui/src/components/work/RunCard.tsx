@@ -299,7 +299,7 @@ function FileRow({ artifact, onOpen }: FileRowProps) {
       onClick={onOpen}
       className={cn(
         box,
-        "cursor-pointer transition-[background-color,border-color] duration-[120ms]",
+        "cursor-pointer transition-[background-color,border-color] duration-120",
         "hover:border-line-strong hover:bg-raised",
         "focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-blue",
       )}

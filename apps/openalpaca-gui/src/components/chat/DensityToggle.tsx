@@ -22,7 +22,7 @@ export function DensityToggle({ dense, onToggle }: DensityToggleProps) {
       type="button"
       aria-pressed={dense}
       onClick={onToggle}
-      className="cursor-pointer rounded-md border border-line bg-transparent px-[9px] py-[4px] font-sans text-sm-plus leading-[normal] text-secondary transition-colors duration-[120ms] hover:bg-muted-hover focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-blue"
+      className="cursor-pointer rounded-md border border-line bg-transparent px-[9px] py-[4px] font-sans text-sm-plus leading-[normal] text-secondary transition-colors duration-120 hover:bg-muted-hover focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-blue"
     >
       {dense ? "Comfortable" : "Compact"}
     </button>
@@ -39,7 +39,7 @@ export function RunningNowPill({ count, onOpen }: RunningNowPillProps) {
     <Button variant="secondaryXs" onClick={onOpen}>
       <span
         aria-hidden
-        className="animate-pulse-oa block h-[6px] w-[6px] shrink-0 rounded-full bg-green"
+        className="block h-[6px] w-[6px] shrink-0 animate-pulse-oa rounded-full bg-green"
       />
       {count} running
     </Button>

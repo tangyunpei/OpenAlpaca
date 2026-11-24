@@ -77,7 +77,7 @@ function projectLabel(workspaceId: string | null): string {
 
 const verb = cn(
   "cursor-pointer border-none bg-transparent p-0 font-mono text-2xs tracking-label text-muted-fg uppercase",
-  "transition-colors duration-[120ms] hover:text-ink",
+  "transition-colors duration-120 hover:text-ink",
   "focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-blue",
   "disabled:pointer-events-none disabled:opacity-55",
 );
@@ -164,7 +164,7 @@ export function SessionSidebar({
         </button>
       </div>
 
-      <div className="sc min-h-0 flex-1 overflow-y-auto px-[10px] py-[10px]">
+      <div className="min-h-0 sc flex-1 overflow-y-auto px-[10px] py-[10px]">
         {actionError !== null && (
           <p
             role="alert"
@@ -224,7 +224,7 @@ export function SessionSidebar({
                       onClick={() => onSelect(session.id)}
                       className={cn(
                         "flex w-full cursor-pointer flex-col items-start gap-[2px] rounded-md border-none px-[7px] py-[6px] text-left",
-                        "transition-[background-color] duration-[120ms]",
+                        "transition-[background-color] duration-120",
                         "focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-blue",
                         selected
                           ? "bg-rail text-ink"

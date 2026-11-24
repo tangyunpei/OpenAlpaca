@@ -391,7 +391,7 @@ function DetailShell({
       {head !== undefined && (
         <div className="shrink-0 px-[24px] pt-[16px]">{head}</div>
       )}
-      <div className="sc min-h-0 flex-1 overflow-y-auto px-[24px] pt-[20px] pb-[28px]">
+      <div className="min-h-0 sc flex-1 overflow-y-auto px-[24px] pt-[20px] pb-[28px]">
         {children}
       </div>
     </section>

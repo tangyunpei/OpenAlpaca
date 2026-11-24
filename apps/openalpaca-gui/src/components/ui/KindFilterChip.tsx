@@ -17,7 +17,7 @@ import type { FileKind } from "./file-kind";
 const chip = tv({
   base: cn(
     "cursor-pointer rounded-pill px-[9px] py-[4px] font-sans text-sm leading-[normal]",
-    "transition-[background-color,border-color,color] duration-[120ms]",
+    "transition-[background-color,border-color,color] duration-120",
     "focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-blue",
   ),
   variants: {

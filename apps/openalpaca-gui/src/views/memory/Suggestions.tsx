@@ -137,12 +137,12 @@ function SuggestionRow({
         <dt className="font-mono text-2xs-plus text-muted-fg">
           {targetTextLabel(item.target.origin)}
         </dt>
-        <dd className="m-0 min-w-0 break-words text-secondary">
+        <dd className="m-0 min-w-0 wrap-break-word text-secondary">
           <EscapedText escaped={excerpt} />
           <CutNote leftOut={item.target.excerpt_left_out} />
         </dd>
         <dt className="font-mono text-2xs-plus text-muted-fg">New</dt>
-        <dd className="m-0 min-w-0 break-words text-ink">
+        <dd className="m-0 min-w-0 wrap-break-word text-ink">
           <EscapedText escaped={knowledge} />
           <CutNote leftOut={item.knowledge_left_out} />
         </dd>
@@ -152,7 +152,7 @@ function SuggestionRow({
         {reason !== null && (
           <>
             <dt className="font-mono text-2xs-plus text-muted-fg">Why</dt>
-            <dd className="m-0 min-w-0 break-words text-secondary">
+            <dd className="m-0 min-w-0 wrap-break-word text-secondary">
               <EscapedText escaped={reason} />
             </dd>
           </>
@@ -210,7 +210,7 @@ function ChangeRow({
       <dt className="font-mono text-2xs-plus text-muted-fg">
         {changeLabel(change.field)}
       </dt>
-      <dd className="m-0 min-w-0 break-words text-ink">
+      <dd className="m-0 min-w-0 wrap-break-word text-ink">
         <EscapedText escaped={from} /> → <EscapedText escaped={to} />
       </dd>
     </>

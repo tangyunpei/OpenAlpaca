@@ -264,7 +264,7 @@ export default function ChatView({
             <button
               type="button"
               onClick={openSessions}
-              className="cursor-pointer border-none bg-transparent p-0 font-mono text-2xs tracking-label text-muted-fg uppercase transition-colors duration-[120ms] hover:text-ink focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-blue"
+              className="cursor-pointer border-none bg-transparent p-0 font-mono text-2xs tracking-label text-muted-fg uppercase transition-colors duration-120 hover:text-ink focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-blue"
             >
               Conversations
             </button>
@@ -277,7 +277,7 @@ export default function ChatView({
 
         <div
           ref={scroller}
-          className="sc min-h-0 flex-1 overflow-y-auto pt-[30px] pb-[10px]"
+          className="min-h-0 sc flex-1 overflow-y-auto pt-[30px] pb-[10px]"
         >
           <div
             className="mx-auto px-[26px]"

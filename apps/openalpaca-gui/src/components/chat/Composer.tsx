@@ -273,7 +273,7 @@ export function Composer(props: ComposerProps) {
           <div className="mb-[10px] flex items-center gap-[8px]">
             <span
               aria-hidden
-              className="animate-pulse-oa-fast block h-[6px] w-[6px] shrink-0 rounded-full bg-red"
+              className="block h-[6px] w-[6px] shrink-0 animate-pulse-oa-fast rounded-full bg-red"
             />
             <span className="min-w-0 font-mono text-xs-plus tracking-label wrap-anywhere text-amber-ink">
               {/* Right above Approve: the name as the card shows it, which
@@ -317,7 +317,7 @@ export function Composer(props: ComposerProps) {
               onClick={onDeny}
               className={cn(
                 "inline-flex flex-1 cursor-pointer items-center justify-center gap-[6px] rounded-lg border border-line bg-transparent p-[11px] text-md leading-[normal] font-semibold text-ink",
-                "transition-[background-color,border-color,color] duration-[120ms] hover:bg-muted",
+                "transition-[background-color,border-color,color] duration-120 hover:bg-muted",
                 "focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-blue",
                 "disabled:pointer-events-none disabled:opacity-55",
               )}
@@ -334,7 +334,7 @@ export function Composer(props: ComposerProps) {
                 onClick={onAlwaysAllow}
                 className={cn(
                   "cursor-pointer rounded-lg border-none bg-transparent px-[13px] py-[11px] text-base leading-[normal] text-tertiary",
-                  "transition-colors duration-[120ms] hover:text-ink",
+                  "transition-colors duration-120 hover:text-ink",
                   "focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-blue",
                   "disabled:pointer-events-none disabled:opacity-55",
                 )}

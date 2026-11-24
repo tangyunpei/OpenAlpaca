@@ -51,7 +51,7 @@ export class ViewBoundary extends Component<Props, State> {
           <button
             type="button"
             onClick={() => this.setState({ error: null })}
-            className="hover:bg-hover mt-4 rounded-xl border border-line bg-raised px-3 py-1.5 text-xs-plus text-ink transition-colors duration-[120ms]"
+            className="hover:bg-hover mt-4 rounded-xl border border-line bg-raised px-3 py-1.5 text-xs-plus text-ink transition-colors duration-120"
           >
             Try again
           </button>

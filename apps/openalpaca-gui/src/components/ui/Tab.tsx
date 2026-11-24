@@ -21,7 +21,7 @@ const tab = tv({
     // `border-0 border-b-2`, never `border-none`: `border-none` sets
     // border-style, which would erase the underline the width then asks for.
     "-mb-px cursor-pointer border-0 border-b-2 bg-transparent font-sans font-medium",
-    "transition-[color,border-color] duration-[120ms]",
+    "transition-[color,border-color] duration-120",
     "focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-blue",
   ),
   variants: {

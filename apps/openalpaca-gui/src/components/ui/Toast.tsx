@@ -20,7 +20,7 @@ export function Toast({ message, className }: ToastProps) {
       role="status"
       aria-live="polite"
       className={cn(
-        "absolute right-[20px] bottom-[20px] z-[60] flex max-w-[380px] items-center gap-[10px] rounded-2xl bg-ink px-[14px] py-[10px] text-on-dark shadow-toast",
+        "absolute right-[20px] bottom-[20px] z-60 flex max-w-[380px] items-center gap-[10px] rounded-2xl bg-ink px-[14px] py-[10px] text-on-dark shadow-toast",
         className,
       )}
     >

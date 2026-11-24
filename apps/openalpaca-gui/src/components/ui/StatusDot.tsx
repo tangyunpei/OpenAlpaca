@@ -34,7 +34,7 @@ const dot = tv({
       interrupted: "border-gold bg-transparent",
     },
     size: {
-      6: "h-[6px] w-[6px] border-[1px]",
+      6: "h-[6px] w-[6px] border",
       7: "h-[7px] w-[7px] border-[1.5px]",
     },
     pulse: {

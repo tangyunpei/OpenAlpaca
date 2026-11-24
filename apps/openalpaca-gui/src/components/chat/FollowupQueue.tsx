@@ -71,7 +71,7 @@ export function FollowupQueue({
             onClick={() => onCancel(followup.id)}
             className={cn(
               "shrink-0 cursor-pointer border-none bg-transparent p-0 text-sm text-muted-fg",
-              "transition-colors duration-[120ms] hover:text-ink",
+              "transition-colors duration-120 hover:text-ink",
               "focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-blue",
               "disabled:pointer-events-none disabled:opacity-55",
             )}
